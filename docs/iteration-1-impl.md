@@ -35,9 +35,8 @@ wandering-compiler/
 │
 ├── proto/
 │   ├── w17/                             # authoring vocabulary — published to users; consumed by loader
-│   │   ├── db.proto                     # (w17.db.table)
-│   │   ├── field.proto                  # (w17.field)
-│   │   └── validate.proto               # (w17.validate)
+│   │   ├── db.proto                     # (w17.db.table), (w17.db.column)
+│   │   └── field.proto                  # (w17.field) — merged data semantics (M1 rev2)
 │   └── domains/
 │       └── compiler/
 │           ├── types/                   # (iteration-1: empty; grows when compiler exposes gRPC types)
@@ -133,14 +132,19 @@ Notes:
 
 Each milestone is independently testable. Ship them in order; do not skip.
 
-### M1 — w17 option schemas compile
+### M1 — w17 option schemas compile (revised 2026-04-20 — M1 rev2)
 
-- Write `proto/w17/{db,field,validate}.proto` against the vocabulary in
-  `iteration-1.md` "In scope".
-- `make schemagen` produces `srcgo/pb/w17/*_pb.go`.
+- Write `proto/w17/{db,field}.proto` against the vocabulary in
+  `iteration-1.md` "In scope". `(w17.validate)` was merged into
+  `(w17.field)` in M1 rev2 — there is no `validate.proto`.
+  `(w17.db.column)` is the field-level storage-override extension.
+- `make schemagen` produces `srcgo/pb/w17/*.pb.go` (and
+  `srcgo/pb/w17/db/db.pb.go`).
 - Hand-written test: a tiny `.proto` file that imports our options and sets
-  one of each, loaded via `protocompile` in a Go test that pulls the option
-  values out. Proves the proto vocabulary is well-formed.
+  one of each (including `unique`, `(w17.db.column)`, `default_auto`,
+  temporal types, `Index.name` + `Index.include`), loaded via
+  `protocompile` in a Go test that pulls the option values out. Proves the
+  proto vocabulary is well-formed.
 - **Serves AC #1** (option schema surface).
 
 ### M2 — loader + IR builder
@@ -303,21 +307,21 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-20).** Skeleton + M1 complete.
+**Status (2026-04-20).** Skeleton + M1 + M1 rev2 complete.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
-- M1: `proto/w17/{db,field,validate}.proto` authored; `make schemagen` emits
-  `srcgo/pb/w17/{field,validate}.pb.go` and `srcgo/pb/w17/db/db.pb.go`
-  (gitignored). `TestW17VocabularyCompiles` loads a fixture via
-  `bufbuild/protocompile` and reads every option value through the generated
-  extensions — green.
+- M1 rev2: `proto/w17/{db,field}.proto` hold the merged vocabulary.
+  `(w17.validate)` is gone; its bounds / pattern fields moved onto
+  `(w17.field)`. `(w17.db.column)` extends `FieldOptions` with `index` +
+  `name` (storage-only). Temporal types `DATE` / `TIME` / `DATETIME` /
+  `INTERVAL` landed; `default` oneof + `AutoDefault` enum resolve open
+  question #4 (see `iteration-1.md` D7). `make schemagen` emits
+  `srcgo/pb/w17/field.pb.go` and `srcgo/pb/w17/db/db.pb.go` (gitignored).
+  `TestW17VocabularyCompiles` exercises unique, `(w17.db.column)`,
+  `default_auto: NOW / UUID_V4 / TRUE`, `default_string`, `default_int`,
+  `Index.name` + `Index.include` — green.
 - Extension layout split: `proto/w17/db.proto` is proto package `w17.db` →
-  Go package `dbpb` (subdir); `field.proto` and `validate.proto` share proto
-  package `w17` → Go package `w17pb`. Flat `proto/w17/` authoring layout is
-  preserved; split only affects Go output.
+  Go package `dbpb` (subdir); `field.proto` is proto package `w17` → Go
+  package `w17pb`. Flat `proto/w17/` authoring layout is preserved; split
+  only affects Go output.
 
-**Next:** M1 rev2 (pending — see `docs/iteration-1-m1-rev.md`): merge
-`(w17.validate)` into `(w17.field)`, introduce `(w17.db.column)` for
-storage-layer choices (`index`, `name`), expand temporal types
-(`DATE`/`TIME`/`DATETIME`/`INTERVAL`), resolve open question #4 with
-`oneof default` + `AutoDefault` enum. **Implement the rev doc verbatim.**
-After rev lands: M2 — loader + IR builder.
+**Next:** M2 — loader + IR builder.

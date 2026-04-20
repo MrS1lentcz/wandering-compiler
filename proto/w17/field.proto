@@ -6,60 +6,86 @@ import "google/protobuf/descriptor.proto";
 
 option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17;w17pb";
 
-// Field annotates a proto field with DB and validation semantics.
+// Field declares the DB / data semantics of a proto field. Previously split
+// across (w17.field) + (w17.validate) — merged 2026-04-20 (the split was
+// artificial: max_len appeared on both, CHECK-vs-app enforcement is a target
+// concern, not a source concern). See docs/iteration-1.md D7 and
+// docs/iteration-1-m1-rev.md.
 //
 // Usage:
-//   string slug = 2 [(w17.field) = { type: SLUG, max_len: 120 }];
-//
-// `type` is conceptually required — the compiler rejects fields without it
-// unless the proto carrier is `bool` or `google.protobuf.Timestamp` (those
-// carriers have no semantic subtype in iteration-1). Proto schema does not
-// enforce this; the IR builder does (see iteration-1-impl.md M2).
-//
-// See docs/iteration-1.md §In scope and
-// docs/experiments/iteration-1-models.md §Semantic type enum.
+//   string slug = 2 [(w17.field) = { type: SLUG, max_len: 120, unique: true }];
+//   double price = 5 [(w17.field) = { type: MONEY, gte: 0 }];
+//   google.protobuf.Timestamp created_at = 10
+//     [(w17.field) = { type: DATETIME, default_auto: NOW }];
 extend google.protobuf.FieldOptions {
   Field field = 51001;
 }
 
 message Field {
+  // Semantic subtype. Required for every carrier except bool; for Timestamp
+  // must be DATE / TIME / DATETIME; for Duration defaults to INTERVAL.
   Type type = 1;
 
-  // Primary key. Combined with `type: UUID` or numeric id types.
+  // Primary key.
   bool pk = 2;
 
-  // Foreign key, in the form "<table>.<column>". Iteration-1 only supports
-  // same-file references (see iteration-1.md "Out of scope" for cross-module
-  // FKs via package paths).
+  // Foreign key, "<table>.<column>" form. Iteration-1 supports same-file
+  // references only.
   string fk = 3;
 
-  // Marks the field as not changeable after insert. Iteration-1 records the
-  // annotation but does not enforce it in SQL (see iteration-1.md).
+  // Annotation for future iterations; not enforced in SQL in iter-1.
   bool immutable = 4;
 
-  // Opts the column out of NOT NULL. Default is NOT NULL + required. When
-  // true, the column is nullable AND the generated internal proto emits the
-  // field as proto3 `optional` so field presence survives the wire format
-  // (D1 in iteration-1.md).
+  // Opt-out of NOT NULL. When true the column is nullable AND the generated
+  // internal proto emits the field as proto3 `optional`.
   bool null = 5;
 
-  // String-only. When true, allows empty string. Default is
-  // CHECK (col <> '') for all string types. Orthogonal to `null`: `null`
-  // = "value may be absent"; `blank` = "if present, may be empty".
+  // String-only. When true allows empty string (default CHECK col <> '').
+  // Orthogonal to null.
   bool blank = 6;
 
-  // Required for type CHAR and SLUG; drives VARCHAR(N) sizing. Ignored for
-  // other types. 0 is treated as unset.
-  int32 max_len = 7;
+  // Data-level uniqueness. Renders as UNIQUE INDEX in SQL. Orthogonal to the
+  // storage-level (w17.db.column).index flag (which is a pure optimisation).
+  bool unique = 7;
+
+  // --- Length bounds (string carriers) ---
+  // max_len is required for CHAR and SLUG and drives VARCHAR(N) sizing. For
+  // other string types it is an optional upper bound. Counted as Unicode
+  // code points (char_length).
+  int32 max_len = 8;
+  optional int32 min_len = 9;
+
+  // --- Numeric bounds ---
+  // gt / lt strict, gte / lte inclusive. Can coexist (e.g. gte + lt).
+  // `optional` so 0 vs unset is distinguishable.
+  optional double gt  = 10;
+  optional double gte = 11;
+  optional double lt  = 12;
+  optional double lte = 13;
+
+  // --- Pattern override (string carriers) ---
+  // Replaces the default regex implied by `type` (e.g. SLUG's `^[a-z0-9-]+$`).
+  // Empty string = no override.
+  string pattern = 14;
+
+  // --- Default value at insert time ---
+  // Exactly one of the branches may be set. No default_bool: bool defaults
+  // go via AutoDefault.TRUE / FALSE for single-channel consistency.
+  oneof default {
+    string      default_string = 20;
+    int64       default_int    = 21;
+    double      default_double = 22;
+    AutoDefault default_auto   = 23;
+  }
 }
 
-// Type is the semantic subtype of a DB column — refines the proto carrier
-// into a SQL column type and a default set of CHECK constraints. Additional
-// constraints stack on top via (w17.validate).
+// Type — semantic subtype refining the proto carrier into a SQL column type
+// and a default constraint set. Authoritative carrier × SemType table is in
+// docs/iteration-1.md D2 (see update in this revision).
 enum Type {
   TYPE_UNSPECIFIED = 0;
 
-  // String carriers (proto carrier: string)
+  // String carriers (carrier: string)
   CHAR  = 1;
   TEXT  = 2;
   UUID  = 3;
@@ -67,11 +93,46 @@ enum Type {
   URL   = 5;
   SLUG  = 6;
 
-  // Numeric carriers (proto carrier: int32 / int64 / double, see spec)
+  // Numeric carriers (carrier: int32 / int64 / double — see D2 table)
   NUMBER     = 10;
   ID         = 11;
   COUNTER    = 12;
   MONEY      = 13;
   PERCENTAGE = 14;
   RATIO      = 15;
+
+  // Temporal (carrier: google.protobuf.Timestamp)
+  DATE     = 20;
+  TIME     = 21;
+  DATETIME = 22;
+
+  // Duration (carrier: google.protobuf.Duration)
+  INTERVAL = 30;
+}
+
+// AutoDefault — dynamically resolved default value. Emitters render each
+// variant per dialect. IR builder rejects invalid carrier × AutoDefault
+// combinations (see D7 table).
+enum AutoDefault {
+  AUTO_DEFAULT_UNSPECIFIED = 0;
+
+  // Temporal — resolved per Type:
+  //   DATE     → CURRENT_DATE
+  //   TIME     → CURRENT_TIME
+  //   DATETIME → NOW() / CURRENT_TIMESTAMP
+  NOW = 1;
+
+  // UUID generation — valid on string carrier with type UUID.
+  UUID_V4 = 10;
+  UUID_V7 = 11;
+
+  // JSON literals — valid on string carrier (stored as '[]' / '{}') and on
+  // JSONB carrier when JSONB lands (iter-2+). Reserved now for shape
+  // stability.
+  EMPTY_JSON_ARRAY  = 20;
+  EMPTY_JSON_OBJECT = 21;
+
+  // Bool — the only way to set a bool default.
+  TRUE  = 30;
+  FALSE = 31;
 }

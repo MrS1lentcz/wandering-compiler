@@ -10,8 +10,7 @@ schemagen:
 		--go_out=srcgo/pb \
 		--go_opt=module=github.com/MrS1lentcz/wandering-compiler/srcgo/pb \
 		proto/w17/db.proto \
-		proto/w17/field.proto \
-		proto/w17/validate.proto
+		proto/w17/field.proto
 
 test:
 	@echo "TODO: go test ./..."

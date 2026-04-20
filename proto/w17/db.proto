@@ -6,22 +6,35 @@ import "google/protobuf/descriptor.proto";
 
 option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/db;dbpb";
 
-// Table marks a proto message as a DB table and carries table-level options.
+// (w17.db.table) — message-level DB configuration.
 //
 // Usage:
 //   message Product {
 //     option (w17.db.table) = {
 //       name: "products",
 //       indexes: [
-//         { fields: ["slug"], unique: true }
+//         { fields: ["category_id", "is_active"] }
 //       ]
 //     };
 //     ...
 //   }
-//
-// See docs/iteration-1.md §In scope.
 extend google.protobuf.MessageOptions {
   Table table = 51000;
+}
+
+// (w17.db.column) — field-level STORAGE overrides. Data semantics
+// (type, constraints, uniqueness, defaults) live on (w17.field).
+// (w17.db.column) is reserved for choices that don't affect the data
+// contract: storage indexes, column-name overrides for legacy adoption,
+// future tablespace / storage parameters.
+//
+// Usage:
+//   string email = 3 [
+//     (w17.field)     = { type: EMAIL, unique: true },
+//     (w17.db.column) = { index: true, name: "email_address" }
+//   ];
+extend google.protobuf.FieldOptions {
+  Column column = 51002;
 }
 
 message Table {
@@ -32,4 +45,22 @@ message Table {
 message Index {
   repeated string fields = 1;
   bool unique = 2;
+
+  // Optional name override. Default: auto-derived from table + fields.
+  string name = 3;
+
+  // Postgres INCLUDE — covering-index columns. Emitters that don't support
+  // INCLUDE must error if non-empty.
+  repeated string include = 4;
+}
+
+message Column {
+  // Single-field non-unique storage index. Sugar for a single-col entry in
+  // (w17.db.table).indexes. Does NOT imply UNIQUE — use (w17.field).unique
+  // for uniqueness (data semantic, always represented as a UNIQUE INDEX).
+  bool index = 1;
+
+  // SQL column name override. Default = proto field name 1:1. Rare — mostly
+  // for adopting existing schemas with non-proto naming conventions.
+  string name = 2;
 }

@@ -25,46 +25,60 @@ package w17.catalog.products;
 import "google/protobuf/timestamp.proto";
 import "w17/db.proto";
 import "w17/field.proto";
-import "w17/validate.proto";
 
 message Product {
   option (w17.db.table) = {
     name: "products"
     indexes: [
-      { fields: ["slug"],                      unique: true },
-      { fields: ["category_id", "is_active"]                }
+      { fields: ["category_id", "is_active"] }
     ]
   };
 
-  string id              = 1  [(w17.field) = { type: UUID, pk: true, immutable: true }];
-  string slug            = 2  [(w17.field) = { type: SLUG, max_len: 120 }];
-  string name            = 3  [(w17.field) = { type: CHAR, max_len: 255 }];
-  string description     = 4  [(w17.field) = { type: TEXT, blank: true }];
-  double price           = 5  [(w17.field) = { type: MONEY }, (w17.validate) = { gte: 0 }];
-  double discount_rate   = 6  [(w17.field) = { type: RATIO, null: true }];
-  string category_id     = 7  [(w17.field) = { type: UUID, fk: "categories.id" }];
-  int64  stock_quantity  = 8  [(w17.field) = { type: COUNTER }];
-  bool   is_active       = 9;
+  string id              = 1 [(w17.field) = { type: UUID, pk: true, immutable: true, default_auto: UUID_V4 }];
+  string slug            = 2 [(w17.field) = { type: SLUG, max_len: 120, unique: true }];
+  string name            = 3 [(w17.field) = { type: CHAR, max_len: 255 }];
+  string description     = 4 [(w17.field) = { type: TEXT, blank: true }];
+  double price           = 5 [(w17.field) = { type: MONEY, gte: 0 }];
+  double discount_rate   = 6 [(w17.field) = { type: RATIO, null: true }];
+  string category_id     = 7 [
+    (w17.field)     = { type: UUID, fk: "categories.id" },
+    (w17.db.column) = { index: true }
+  ];
+  int64  stock_quantity  = 8 [(w17.field) = { type: COUNTER }];
+  bool   is_active       = 9 [(w17.field) = { default_auto: TRUE }];
+
+  // created_at: DB default NOW() at insert. updated_at: DB default NOW() at
+  // insert only. Handlers mutating the row MUST set updated_at explicitly —
+  // the compiler does not auto-update it. The future mandatory-mutation
+  // contract (parked experiment) will verify all write RPCs touch it.
+  google.protobuf.Timestamp created_at = 10 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+  google.protobuf.Timestamp updated_at = 11 [(w17.field) = { type: DATETIME, default_auto: NOW }];
 }
 ```
 
 Notes on authoring surface in iteration 1:
 
-- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `google.protobuf.Timestamp`.
+- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `google.protobuf.Timestamp`, `google.protobuf.Duration`.
   `bytes`, `jsonb`, `repeated`, `oneof`, and nested messages are **out of scope**.
-- **`w17.db.table`:** `name`, `indexes` (single or multi-column, unique or not). **No auto-generated fields.** Every DB column must correspond to a declared proto field — if a table needs `created_at`/`updated_at`, the developer declares those as explicit `google.protobuf.Timestamp` fields. Soft-delete is an application-level concern (archive tables, tombstone flags, separate audit schemas — the compiler has no opinion) and is not provided as a table option.
-- **`w17.field`:**
-  - `type` (required, enum — semantic subtype; picks SQL column type and implicit constraints, see table below).
+- **`w17.db.table`:** `name`, `indexes` (single or multi-column, unique or not; each index may set `name` override and `include` covering columns). **No auto-generated fields.** Every DB column must correspond to a declared proto field — if a table needs `created_at`/`updated_at`, the developer declares those as explicit `google.protobuf.Timestamp` fields with `default_auto: NOW`. Soft-delete is an application-level concern (archive tables, tombstone flags, separate audit schemas — the compiler has no opinion) and is not provided as a table option.
+- **`w17.field` (merged vocabulary — data semantics):**
+  - `type` (required for every carrier except `bool`; picks SQL column type and implicit constraints, see table below).
   - `pk` (primary key), `fk` (`"<table>.<column>"` string — no cross-domain/module wiring yet), `immutable` (for docs in iteration 1; enforcement comes with services).
   - `null: true` — opt-out of `NOT NULL`. Column becomes nullable in DB, field becomes `optional` in internal proto (so presence survives), validator stops requiring a value. Default is `null: false` → NOT NULL + required.
   - `blank: true` — allow empty string for string types. Default is `blank: false` → `CHECK (col <> '')`. `blank` is orthogonal to `null` (null = "value may be missing"; blank = "if present, may be empty").
-  - `max_len` — only meaningful for `CHAR` and `SLUG`; drives `VARCHAR(N)` sizing.
-- **`w17.validate`:** `min_len`, `max_len` (length for strings beyond what `type` implies), `gt`, `gte`, `lt`, `lte` (numeric bounds), `pattern` (regex, overrides the type's default regex).
-- **Out of scope:** projections, references into `common/`, cross-module FKs resolved via package paths, auto-generated default values beyond zero-values and `COUNTER` → 0, field-level `default`/`on_update` annotations (needed before timestamps are ergonomic to declare — parked as a follow-up design question, see Open questions below).
+  - `unique: true` — data-level uniqueness. Renders as `CREATE UNIQUE INDEX`. Orthogonal to the storage-only `(w17.db.column).index` flag.
+  - `max_len` / `min_len` — length bounds for string carriers; `max_len` is required for `CHAR` / `SLUG` and drives `VARCHAR(N)` sizing.
+  - `gt` / `gte` / `lt` / `lte` — numeric bounds (optional, so `0` is distinguishable from unset).
+  - `pattern` — regex, overrides the type's default regex (e.g. `SLUG`).
+  - `default` oneof — see D7. Literal branches `default_string` / `default_int` / `default_double`, or `default_auto: AutoDefault` for dynamically resolved defaults (`NOW`, `UUID_V4/V7`, `TRUE/FALSE`, `EMPTY_JSON_*`).
+- **`w17.db.column` (storage-only overrides, orthogonal to data semantics):**
+  - `index: true` — single-field non-unique storage index (sugar for a single-column entry in `(w17.db.table).indexes`). Does **not** imply `UNIQUE`.
+  - `name` — SQL column-name override (rare; mostly for adopting existing schemas with non-proto naming conventions).
+- **Out of scope:** projections, references into `common/`, cross-module FKs resolved via package paths, `on_update` auto-mutation side-effects (deliberately rejected — see D7 + parked mandatory-mutation-contract experiment).
 
 ### Semantic type enum
 
-Semantic `type` is the Django-inspired "data refinement + basic constraints in one" knob. It controls the SQL column type and emits implicit CHECK constraints. Additional `w17.validate` rules stack on top.
+Semantic `type` is the Django-inspired "data refinement + basic constraints in one" knob. It controls the SQL column type and emits implicit CHECK constraints. Additional bounds (`gt`/`gte`/`lt`/`lte`/`min_len`/`max_len`/`pattern`) stack on top via other `(w17.field)` attributes — they live on the same extension since M1 rev2.
 
 **String types** (proto carrier: `string`):
 
@@ -81,17 +95,25 @@ Semantic `type` is the Django-inspired "data refinement + basic constraints in o
 
 | `type` value | Proto carrier      | SQL column            | Implicit constraints                          |
 |-------------:|-------------------|-----------------------|-----------------------------------------------|
-| `NUMBER`     | `int32`/`int64`/`double` | `INTEGER`/`BIGINT`/`DOUBLE PRECISION` | none (bounds via `w17.validate`) |
+| `NUMBER`     | `int32`/`int64`/`double` | `INTEGER`/`BIGINT`/`DOUBLE PRECISION` | none (bounds via `(w17.field).gt/gte/lt/lte`) |
 | `ID`         | `int32`/`int64`   | `INTEGER`/`BIGINT`    | `CHECK (col >= 0)`                            |
-| `COUNTER`    | `int64`           | `BIGINT`              | `CHECK (col >= 0)`; default `0`               |
-| `MONEY`      | `double`          | `NUMERIC(19, 4)`      | none (bounds via `w17.validate`). Currency code is a separate field. Wire format is lossy `double`; use int64-cents pattern if you need exact transport. |
+| `COUNTER`    | `int64`           | `BIGINT`              | `CHECK (col >= 0)`; no implicit default (use `default_int: 0`) |
+| `MONEY`      | `double`          | `NUMERIC(19, 4)`      | none (bounds via `(w17.field).gt/gte/lt/lte`). Currency code is a separate field. Wire format is lossy `double`; use int64-cents pattern if you need exact transport. |
 | `PERCENTAGE` | `double`          | `NUMERIC(5, 2)`       | `CHECK (col BETWEEN 0 AND 100)` — "human" 0–100 scale |
 | `RATIO`      | `double`          | `NUMERIC(5, 4)`       | `CHECK (col BETWEEN 0 AND 1)` — mathematical 0–1 fraction |
+
+**Temporal types** (proto carriers as noted):
+
+| `type` value | Proto carrier                | SQL column     | Implicit constraints / notes                 |
+|-------------:|-----------------------------|----------------|----------------------------------------------|
+| `DATE`       | `google.protobuf.Timestamp` | `DATE`         | time component truncated at emit time        |
+| `TIME`       | `google.protobuf.Timestamp` | `TIME`         | date component truncated at emit time        |
+| `DATETIME`   | `google.protobuf.Timestamp` | `TIMESTAMPTZ`  | stored with TZ; canonical UTC                |
+| `INTERVAL`   | `google.protobuf.Duration`  | `INTERVAL`     | unspecified `type` is permitted (inferred)   |
 
 **Other types:**
 
 - `bool` carrier, no semantic subtype — maps to `BOOLEAN`.
-- `google.protobuf.Timestamp` carrier, no semantic subtype yet — maps to `TIMESTAMPTZ`. (Date-only, local-datetime, and duration variants are deferred to a later iteration.)
 
 ### Null and blank semantics, together
 
@@ -141,6 +163,8 @@ message Product {
   string  category_id     = 7;
   int64   stock_quantity  = 8;
   bool    is_active       = 9;
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
 }
 ```
 
@@ -163,15 +187,17 @@ Observations:
 
 ```sql
 CREATE TABLE products (
-    id               UUID             PRIMARY KEY,
+    id               UUID             PRIMARY KEY  DEFAULT gen_random_uuid(),
     slug             VARCHAR(120)     NOT NULL,
     name             VARCHAR(255)     NOT NULL,
     description      TEXT             NOT NULL,
     price            NUMERIC(19, 4)   NOT NULL,
     discount_rate    NUMERIC(5, 4)    NULL,
     category_id      UUID             NOT NULL REFERENCES categories(id),
-    stock_quantity   BIGINT           NOT NULL DEFAULT 0,
-    is_active        BOOLEAN          NOT NULL,
+    stock_quantity   BIGINT           NOT NULL,
+    is_active        BOOLEAN          NOT NULL    DEFAULT TRUE,
+    created_at       TIMESTAMPTZ      NOT NULL    DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ      NOT NULL    DEFAULT NOW(),
 
     CONSTRAINT products_slug_len      CHECK (char_length(slug) <= 120),
     CONSTRAINT products_slug_format   CHECK (slug ~ '^[a-z0-9-]+$'),
@@ -185,6 +211,9 @@ CREATE TABLE products (
 CREATE UNIQUE INDEX products_slug_uidx
     ON products (slug);
 
+CREATE INDEX products_category_id_idx
+    ON products (category_id);
+
 CREATE INDEX products_category_id_is_active_idx
     ON products (category_id, is_active);
 ```
@@ -193,6 +222,7 @@ CREATE INDEX products_category_id_is_active_idx
 
 ```sql
 DROP INDEX IF EXISTS products_category_id_is_active_idx;
+DROP INDEX IF EXISTS products_category_id_idx;
 DROP INDEX IF EXISTS products_slug_uidx;
 DROP TABLE IF EXISTS products;
 ```
@@ -209,19 +239,35 @@ Mapping rules applied:
 | `type: SLUG, max_len: N`                    | `VARCHAR(N)` + `^[a-z0-9-]+$` CHECK             |
 | `type: NUMBER` (int32/int64/double carrier) | `INTEGER` / `BIGINT` / `DOUBLE PRECISION`       |
 | `type: ID`                                  | same as carrier + `CHECK (col >= 0)`            |
-| `type: COUNTER`                             | `BIGINT NOT NULL DEFAULT 0` + `CHECK (col >= 0)`|
+| `type: COUNTER`                             | `BIGINT` + `CHECK (col >= 0)` (no implicit default; use `default_int: 0`) |
 | `type: MONEY`                               | `NUMERIC(19, 4)`                                |
 | `type: PERCENTAGE`                          | `NUMERIC(5, 2)` + `CHECK (col BETWEEN 0 AND 100)` |
 | `type: RATIO`                               | `NUMERIC(5, 4)` + `CHECK (col BETWEEN 0 AND 1)` |
+| `type: DATE`                                | `DATE` (Timestamp carrier)                      |
+| `type: TIME`                                | `TIME` (Timestamp carrier)                      |
+| `type: DATETIME`                            | `TIMESTAMPTZ` (Timestamp carrier)               |
+| `type: INTERVAL`                            | `INTERVAL` (Duration carrier)                   |
 | `bool` carrier                              | `BOOLEAN`                                       |
-| `google.protobuf.Timestamp`                 | `TIMESTAMPTZ`                                   |
 | `(w17.field) = { pk: true }`                | `PRIMARY KEY`                                   |
 | `(w17.field) = { fk: "t.c" }`               | `REFERENCES t(c)`                               |
 | `(w17.field) = { null: true }`              | drop `NOT NULL`; emit proto3 `optional`         |
 | `(w17.field) = { blank: false }` (default)  | `CHECK (col <> '')` on string types             |
-| `(w17.validate) = { gt/gte/lt/lte/pattern }`| `CHECK` constraint                              |
+| `(w17.field) = { unique: true }`            | `CREATE UNIQUE INDEX` (single-column, data-level) |
+| `(w17.field) = { gt/gte/lt/lte/pattern }`   | `CHECK` constraint (merged from old `(w17.validate)`) |
+| `(w17.field) = { default_string: "x" }`     | column `DEFAULT 'x'`                            |
+| `(w17.field) = { default_int: N }`          | column `DEFAULT N`                              |
+| `(w17.field) = { default_double: X }`       | column `DEFAULT X`                              |
+| `(w17.field) = { default_auto: NOW }`       | `DEFAULT NOW()` / `CURRENT_DATE` / `CURRENT_TIME` per type |
+| `(w17.field) = { default_auto: UUID_V4 }`   | `DEFAULT gen_random_uuid()`                     |
+| `(w17.field) = { default_auto: UUID_V7 }`   | `DEFAULT uuidv7()` (extension required; emitter flags if missing) |
+| `(w17.field) = { default_auto: TRUE/FALSE }`| `DEFAULT TRUE` / `DEFAULT FALSE`                |
+| `(w17.field) = { default_auto: EMPTY_JSON_* }` | `DEFAULT '[]'` / `DEFAULT '{}'`              |
+| `(w17.db.column) = { index: true }`         | `CREATE INDEX` (non-unique, single-column)      |
+| `(w17.db.column) = { name: "x" }`           | SQL column name override                        |
 | `indexes: [{ unique: true, fields }]`       | `CREATE UNIQUE INDEX`                           |
 | `indexes: [{ fields }]`                     | `CREATE INDEX`                                  |
+| `indexes: [{ fields, name: "x" }]`          | `CREATE INDEX x` (override auto-derived name)   |
+| `indexes: [{ fields, include: [cols] }]`    | `CREATE INDEX … INCLUDE (cols)` (Postgres covering index) |
 
 Every generated row is deterministic: same proto input always yields the same SQL
 byte-for-byte. This is a hard acceptance criterion (see `docs/iteration-1.md`).
@@ -261,22 +307,36 @@ type Table struct {
 }
 
 type Column struct {
-    Name      string       // proto field name, 1:1
-    Carrier   ProtoCarrier // STRING | INT32 | INT64 | BOOL | DOUBLE | TIMESTAMP
-    SemType   SemanticType // UUID | CHAR | TEXT | EMAIL | URL | SLUG
-                           // | NUMBER | ID | COUNTER | MONEY | PERCENTAGE | RATIO
-                           // | (none — for bool / timestamp carriers)
-    MaxLen    int          // only for CHAR / SLUG
-    Null      bool         // default false → NOT NULL
-    Blank     bool         // default false; string-only
-    PK        bool
-    Immutable bool         // iteration-1: annotation only, not enforced
+    Name       string       // SQL column name (proto field name 1:1 unless overridden via (w17.db.column).name)
+    Carrier    ProtoCarrier // STRING | INT32 | INT64 | BOOL | DOUBLE | TIMESTAMP | DURATION
+    SemType    SemanticType // UUID | CHAR | TEXT | EMAIL | URL | SLUG
+                            // | NUMBER | ID | COUNTER | MONEY | PERCENTAGE | RATIO
+                            // | DATE | TIME | DATETIME | INTERVAL
+                            // | (none — for bool carrier)
+    MaxLen     int          // only for CHAR / SLUG
+    Null       bool         // default false → NOT NULL
+    Blank      bool         // default false; string-only
+    Unique     bool         // data-level uniqueness (w17.field.unique)
+    StoreIndex bool         // storage-only index (w17.db.column.index); non-unique
+    PK         bool
+    Immutable  bool         // iteration-1: annotation only, not enforced
+    Default    Default      // tagged union, nil = no default; see below
 }
 
+// Default is a tagged union covering the oneof on (w17.field).
+// Emitters render each variant per dialect.
+type Default interface{ defaultKind() }
+
+type DefaultString struct{ Value string }
+type DefaultInt    struct{ Value int64 }
+type DefaultDouble struct{ Value float64 }
+type DefaultAuto   struct{ Kind AutoDefaultKind } // NOW | UUID_V4 | UUID_V7 | EMPTY_JSON_ARRAY | EMPTY_JSON_OBJECT | TRUE | FALSE
+
 type Index struct {
-    Name   string   // stable, derived from table + fields
-    Fields []string
-    Unique bool
+    Name    string   // stable, derived from table + fields unless overridden
+    Fields  []string
+    Unique  bool
+    Include []string // Postgres INCLUDE (covering index); emitters that don't support it error on non-empty
 }
 
 type ForeignKey struct {
@@ -342,18 +402,17 @@ type AddTable struct{ Table *ir.Table }
 3. ~~**`required` semantics.**~~ **Resolved** — see Decisions section below.
    Default is `NOT NULL` + required. Opt-out is `(w17.field) = { null: true }`,
    which makes the column nullable and emits proto3 `optional` so presence
-   survives the wire format. `required` is no longer part of `(w17.validate)`
-   — it would be redundant with `null`.
-4. **Default values & timestamp ergonomics.** Iteration 1 emits no column
-   `DEFAULT` other than `COUNTER` → `0`. Every other field must be supplied
-   at INSERT time. Concretely: a developer who declares an explicit
-   `google.protobuf.Timestamp created_at` field gets a `TIMESTAMPTZ NOT NULL`
-   column with no default, which is awkward. The follow-up design question
-   is whether to introduce field-level `(w17.field) = { default: NOW, on_update: NOW }`
-   (Django `auto_now_add` / `auto_now` equivalents) — without that, hand-written
-   timestamp fields are strictly worse than the old `timestamps: true` shortcut
-   that was deliberately removed. Decision deferred until we have one real
-   table in a pilot project that needs timestamps.
+   survives the wire format. `required` is not part of `(w17.field)` — it
+   would be redundant with `null`. (Historically also absent from the now-
+   removed `(w17.validate)`.)
+4. ~~**Default values & timestamp ergonomics.**~~ **Resolved** by M1 rev2
+   (2026-04-20) — see `iteration-1.md` D7. `(w17.field)` carries a `default`
+   oneof: `default_string` / `default_int` / `default_double` for explicit
+   literals, `default_auto: AutoDefault` for dynamically resolved values
+   (`NOW`, `UUID_V4`, `UUID_V7`, `TRUE`, `FALSE`, `EMPTY_JSON_ARRAY`,
+   `EMPTY_JSON_OBJECT`). No `on_update` — handlers mutate `updated_at`-style
+   fields explicitly; future static enforcement via the parked
+   mandatory-mutation-contract experiment (`_parked/mandatory-mutation-contract.md`).
 5. **Ent boundary.** Do we use ent's full migration tooling (schema diff → Atlas → SQL),
    or do we bypass ent and write our own diff against a stored snapshot? Ent gives
    us maturity for free; bypass gives us full control and removes a heavy dependency.

@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package vocabtest;
 
+import "google/protobuf/timestamp.proto";
 import "w17/db.proto";
 import "w17/field.proto";
-import "w17/validate.proto";
 
 // Fixture for TestW17VocabularyCompiles. Exercises one of each w17 option
 // so a failure in the generated extension surface shows up immediately.
@@ -15,17 +15,21 @@ message Product {
     name: "products",
     indexes: [
       { fields: ["slug"], unique: true },
-      { fields: ["category_id", "is_active"] }
+      { fields: ["category_id", "is_active"] },
+      { fields: ["name"], name: "products_name_covering_idx", include: ["price"] }
     ]
   };
 
-  string slug          = 1 [(w17.field) = { type: SLUG, max_len: 120 }];
-  double price         = 2 [
-    (w17.field)    = { type: MONEY },
-    (w17.validate) = { gte: 0 }
+  string id             = 1 [(w17.field) = { type: UUID, pk: true, immutable: true, default_auto: UUID_V4 }];
+  string slug           = 2 [(w17.field) = { type: SLUG, max_len: 120, unique: true }];
+  string name           = 3 [(w17.field) = { type: CHAR, max_len: 255, default_string: "unnamed" }];
+  double price          = 4 [(w17.field) = { type: MONEY, gte: 0 }];
+  double discount_rate  = 5 [(w17.field) = { type: RATIO, null: true }];
+  string category_id    = 6 [
+    (w17.field)     = { type: UUID, fk: "categories.id" },
+    (w17.db.column) = { index: true, name: "cat_id" }
   ];
-  double discount_rate = 3 [(w17.field) = { type: RATIO, null: true }];
-  string category_id   = 4 [(w17.field) = { type: UUID, fk: "categories.id" }];
-  int64  stock_qty     = 5 [(w17.field) = { type: COUNTER }];
-  bool   is_active     = 6;
+  int64  stock_qty      = 7 [(w17.field) = { type: COUNTER, default_int: 0 }];
+  bool   is_active      = 8 [(w17.field) = { default_auto: TRUE }];
+  google.protobuf.Timestamp created_at = 9 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
 }

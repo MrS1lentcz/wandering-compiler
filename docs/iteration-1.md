@@ -34,13 +34,14 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
 
 ## In scope
 
-- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `google.protobuf.Timestamp`.
+- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `google.protobuf.Timestamp`, `google.protobuf.Duration`.
 - **Semantic `type` enum (in `(w17.field)`):**
   - Strings: `CHAR`, `TEXT`, `UUID`, `EMAIL`, `URL`, `SLUG`.
   - Numbers: `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100), `RATIO` (0–1).
-- **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not). No auto-generated fields — every DB column is a declared proto field.
-- **`(w17.field)` options:** `type` (required), `pk`, `fk`, `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `max_len` (for `CHAR`/`SLUG`).
-- **`(w17.validate)` options:** `min_len`, `max_len`, `gt`, `gte`, `lt`, `lte`, `pattern`.
+  - Temporal: `DATE`, `TIME`, `DATETIME` on Timestamp carrier; `INTERVAL` on Duration carrier.
+- **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not; with optional `name` override and `include` covering columns). No auto-generated fields — every DB column is a declared proto field.
+- **`(w17.field)` options (merged vocabulary):** `type` (required for every carrier except bool), `pk`, `fk`, `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), and a `default` oneof — see D7.
+- **`(w17.db.column)` options (field-level storage overrides):** `index` (single-field non-unique storage index), `name` (SQL column-name override). Orthogonal to `(w17.field).unique`: `unique` is a data semantic, `index` is a pure optimisation.
 - **Output layer:** Postgres 14+ SQL via the PG dialect emitter. Tested against a real Postgres instance (SQLite acceptable for local dev loops only). The emitter sits behind a dialect interface — additional dialects (MySQL, SQLite-as-production, …) are additive, not disruptive.
 - **Intermediate representation:** own dialect-agnostic IR (`Schema` / `Table` / `Column` / `Check` as tagged union / `Index` / `ForeignKey`) + trivial differ (`nil → Schema` yields `AddTable` ops). See D4 and Stage 4 in `iteration-1-models.md`.
 - **Determinism:** same input always produces byte-identical output.
@@ -106,9 +107,13 @@ can close. Full detail in
    Generator flag (`--check-constraints=full|length-only|off`) lets the project
    trade DB-side enforcement for write throughput. Default value is open.
 3. ~~Default nullability~~ — **resolved**, see Decisions below (D1).
-4. Default values & timestamp ergonomics (whether to introduce field-level
-   `default` / `on_update` annotations so explicit timestamp fields are
-   usable without hand-written INSERTs).
+4. ~~Default values & timestamp ergonomics~~ — **resolved**, see Decisions
+   below (D7). Field-level `default` is a oneof of explicit literals
+   (`default_string` / `default_int` / `default_double`) plus
+   `default_auto: AutoDefault` for dynamically resolved values
+   (`NOW`, `UUID_V4`, `UUID_V7`, `TRUE`, `FALSE`, `EMPTY_JSON_*`).
+   No `on_update` — handlers set it explicitly (future enforcement via the
+   parked mandatory-mutation-contract experiment).
 5. ~~Ent boundary~~ — **resolved**, see Decisions below (D4).
 
 ## What "done" looks like
@@ -117,10 +122,9 @@ The iteration closes when:
 
 - All seven acceptance criteria pass in CI.
 - The pilot project has been migrated and its maintainers have signed off.
-- All five original open questions have written answers. #1, #3, and #5 are
-  resolved (D5, D1, D4). #2 and #4 remain — both are minor-dimension tuning
-  (CHECK default verbosity, timestamp ergonomics) and can close once a pilot
-  exercises them.
+- All five original open questions have written answers. #1, #3, #4, and #5
+  are resolved (D5, D1, D7, D4). #2 remains — minor-dimension tuning (CHECK
+  default verbosity) that can close once a pilot exercises it.
 
 ## Decisions
 
@@ -135,8 +139,8 @@ The iteration closes when:
    value and "not set" would be indistinguishable and the nullable-column
    signal would be lost).
 
-`required` is removed from `(w17.validate)` — it would be redundant with
-`null`.
+`required` is not part of `(w17.field)` — it would be redundant with
+`null`. (Historically considered on the now-removed `(w17.validate)` as well.)
 
 **Rationale.** `null` already answers both questions that a `required` flag
 would have answered: whether the DB column is nullable, and whether the
@@ -149,23 +153,52 @@ empty strings through. `null` and `blank` are orthogonal — `null` is about
 "may the value be absent", `blank` is about "if the value is present, may
 it be `''`". Default for both is `false`.
 
-### D2 — Semantic type enum (supersedes earlier ad-hoc string/number handling)
+### D2 — Semantic type enum (supersedes earlier ad-hoc string/number handling; expanded by M1 rev2, 2026-04-20)
 
-**Decision.** `(w17.field)` carries a required `type` enum that refines the
-proto carrier into a SQL column and a default set of CHECK constraints.
+**Decision.** `(w17.field)` carries a `type` enum that refines the proto
+carrier into a SQL column and a default set of CHECK constraints. `type`
+is required for every carrier except `bool` (bool has no subtype).
 
-- String carriers: `CHAR`, `TEXT`, `UUID`, `EMAIL`, `URL`, `SLUG`.
-- Number carriers: `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100
-  "human" scale), `RATIO` (0–1 mathematical fraction).
-- `bool` and `google.protobuf.Timestamp` have no semantic subtype yet.
+- **String carriers** (`string`): `CHAR`, `TEXT`, `UUID`, `EMAIL`, `URL`, `SLUG`.
+- **Number carriers** (`int32` / `int64` / `double`): `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100 "human" scale), `RATIO` (0–1 mathematical fraction).
+- **Temporal carriers**:
+  - `google.protobuf.Timestamp` → required one of `DATE`, `TIME`, `DATETIME`.
+  - `google.protobuf.Duration` → `INTERVAL` (unspecified is permitted and inferred).
+- **`bool`** carrier has no semantic subtype.
 
 The mapping to SQL and the implicit CHECK constraints are tabulated in
-`docs/experiments/iteration-1-models.md`.
+`docs/experiments/iteration-1-models.md`. Everything else that used to live
+on `(w17.validate)` (`min_len`, `max_len`, `gt`, `gte`, `lt`, `lte`,
+`pattern`) is now part of `(w17.field)` directly — the validate/field split
+was dropped in M1 rev2 (see `docs/iteration-1-m1-rev.md`).
+
+**Carrier × Type (authoritative):**
+
+| Carrier | `type` must be |
+|---|---|
+| `bool` | `TYPE_UNSPECIFIED` (subtype forbidden) |
+| `string` | one of `CHAR, TEXT, UUID, EMAIL, URL, SLUG` — required |
+| `int32` | one of `NUMBER, ID, COUNTER` — required |
+| `int64` | one of `NUMBER, ID, COUNTER` — required |
+| `double` | one of `NUMBER, MONEY, PERCENTAGE, RATIO` — required |
+| `google.protobuf.Timestamp` | one of `DATE, TIME, DATETIME` — required |
+| `google.protobuf.Duration` | `INTERVAL` — unspecified permitted (infer) |
+
+Additional field-level rules enforced by the IR builder (M2):
+
+- `max_len` required iff `type ∈ {CHAR, SLUG}`; forbidden otherwise.
+- `min_len`, `pattern`, `blank` valid only for string carrier.
+- `gt`, `gte`, `lt`, `lte` valid only for numeric carrier.
+- `pk` implies `unique` implicitly (no need to set both).
+- `fk` is `"<table>.<column>"`; same-file target required in iter-1.
 
 **Rationale.** Django-style: data refinement and basic validation in one
-annotation, human-readable, and it avoids scattering the same constraints
-across `(w17.validate)` for every email/slug/uuid field. `(w17.validate)`
-stacks additional constraints (`gt`, `lte`, `pattern`, …) on top.
+annotation, human-readable. The separate `(w17.validate)` extension was
+removed because the split was artificial (`max_len` appeared on both sides;
+CHECK-in-DB vs. app-layer enforcement is a target-rendering concern, not a
+source-vocabulary concern). Everything is now on `(w17.field)`; the
+storage-only flags (`index`, `name` override) live on the new
+`(w17.db.column)`.
 
 ### D3 — No compiler-generated fields (supersedes `timestamps` / `soft_delete` table options)
 
@@ -296,3 +329,62 @@ expose a review UI, and serve migrations to the deploy client at apply time.
 **Caveat.** Until the platform ships, iteration-1 and its pilots operate
 without audit trail, approval workflow, or applied-state tracking. These
 gaps are known and expected; they are not iteration-1 problems.
+
+### D7 — Field-level defaults (resolves open question #4; added by M1 rev2, 2026-04-20)
+
+**Decision.** `(w17.field)` carries a `default` oneof:
+
+    oneof default {
+      string      default_string = 20;
+      int64       default_int    = 21;
+      double      default_double = 22;
+      AutoDefault default_auto   = 23;
+    }
+
+Explicit-literal branches (`default_string`, `default_int`, `default_double`)
+are emitted as SQL `DEFAULT <literal>`. `default_auto: AutoDefault` covers
+dynamically resolved values that the per-dialect emitter renders:
+
+    enum AutoDefault {
+      AUTO_DEFAULT_UNSPECIFIED = 0;
+      NOW               = 1;    // temporal: CURRENT_DATE / CURRENT_TIME / NOW()
+      UUID_V4           = 10;   // string + type UUID
+      UUID_V7           = 11;   // string + type UUID
+      EMPTY_JSON_ARRAY  = 20;   // string (and future JSONB) literal '[]'
+      EMPTY_JSON_OBJECT = 21;   // string (and future JSONB) literal '{}'
+      TRUE              = 30;   // bool carrier
+      FALSE             = 31;   // bool carrier
+    }
+
+No `default_bool` — bool defaults flow through `AutoDefault.TRUE / FALSE`
+for single-channel consistency. No `on_update` anywhere — auto-update
+side-effects are too magical to escape once baked in (archive copies,
+backfill jobs, admin corrections all fight the framework). Handlers that
+mutate a row must set `updated_at` (or equivalent) explicitly; future
+enforcement will come from the parked mandatory-mutation-contract
+experiment (`docs/experiments/_parked/mandatory-mutation-contract.md`).
+
+**Type × AutoDefault compatibility (IR builder enforces):**
+
+| AutoDefault | Valid on |
+|---|---|
+| `NOW` | Timestamp carrier (type = DATE / TIME / DATETIME) |
+| `UUID_V4`, `UUID_V7` | string carrier + type = UUID |
+| `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | string carrier + type = TEXT (CHAR permitted if `max_len` fits) |
+| `TRUE`, `FALSE` | bool carrier |
+
+Literal-branch carrier compatibility:
+
+- `default_string` — string carrier only.
+- `default_int` — int32 / int64 carriers.
+- `default_double` — double carrier.
+
+**Rationale.** Django's `default=` + `auto_now_add=True` / `auto_now=True`
+is two design choices in one: a *data* decision (what default value) and a
+*behaviour* decision (who re-writes the field on every update). Merging
+them into one `default` knob broke escape — there was no way to say "use
+the default for inserts but let my handler manage updates" without
+disabling the default entirely. Splitting `default` (data) from the
+parked mandatory-mutation-contract (behaviour) keeps each concern
+single-purpose and gives us a statically-audited, per-RPC opt-out for
+mutation-side-effects when we build that layer.

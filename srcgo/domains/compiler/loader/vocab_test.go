@@ -49,7 +49,7 @@ func TestW17VocabularyCompiles(t *testing.T) {
 	if got, want := tableExt.GetName(), "products"; got != want {
 		t.Errorf("table.name = %q, want %q", got, want)
 	}
-	if got, want := len(tableExt.GetIndexes()), 2; got != want {
+	if got, want := len(tableExt.GetIndexes()), 3; got != want {
 		t.Fatalf("len(table.indexes) = %d, want %d", got, want)
 	}
 	if got, want := tableExt.GetIndexes()[0].GetFields(), []string{"slug"}; !equalStrings(got, want) {
@@ -64,8 +64,30 @@ func TestW17VocabularyCompiles(t *testing.T) {
 	if tableExt.GetIndexes()[1].GetUnique() {
 		t.Error("table.indexes[1].unique = true, want false")
 	}
+	if got, want := tableExt.GetIndexes()[2].GetName(), "products_name_covering_idx"; got != want {
+		t.Errorf("table.indexes[2].name = %q, want %q", got, want)
+	}
+	if got, want := tableExt.GetIndexes()[2].GetInclude(), []string{"price"}; !equalStrings(got, want) {
+		t.Errorf("table.indexes[2].include = %v, want %v", got, want)
+	}
 
-	// --- (w17.field) on slug: type=SLUG, max_len=120 ---
+	// --- (w17.field) on id: UUID, pk, immutable, default_auto UUID_V4 ---
+	idOpts := fieldOptions(t, product, "id")
+	idExt := proto.GetExtension(idOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := idExt.GetType(), w17pb.Type_UUID; got != want {
+		t.Errorf("id.field.type = %v, want %v", got, want)
+	}
+	if !idExt.GetPk() {
+		t.Error("id.field.pk = false, want true")
+	}
+	if !idExt.GetImmutable() {
+		t.Error("id.field.immutable = false, want true")
+	}
+	if got, want := idExt.GetDefaultAuto(), w17pb.AutoDefault_UUID_V4; got != want {
+		t.Errorf("id.field.default_auto = %v, want %v", got, want)
+	}
+
+	// --- (w17.field) on slug: SLUG, max_len=120, unique=true ---
 	slugOpts := fieldOptions(t, product, "slug")
 	slugExt := proto.GetExtension(slugOpts, w17pb.E_Field).(*w17pb.Field)
 	if got, want := slugExt.GetType(), w17pb.Type_SLUG; got != want {
@@ -74,18 +96,30 @@ func TestW17VocabularyCompiles(t *testing.T) {
 	if got, want := slugExt.GetMaxLen(), int32(120); got != want {
 		t.Errorf("slug.field.max_len = %d, want %d", got, want)
 	}
+	if !slugExt.GetUnique() {
+		t.Error("slug.field.unique = false, want true")
+	}
 
-	// --- (w17.field) + (w17.validate) on price: MONEY, gte=0 ---
+	// --- (w17.field) on name: CHAR, max_len=255, default_string="unnamed" ---
+	nameOpts := fieldOptions(t, product, "name")
+	nameExt := proto.GetExtension(nameOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := nameExt.GetType(), w17pb.Type_CHAR; got != want {
+		t.Errorf("name.field.type = %v, want %v", got, want)
+	}
+	if got, want := nameExt.GetDefaultString(), "unnamed"; got != want {
+		t.Errorf("name.field.default_string = %q, want %q", got, want)
+	}
+
+	// --- (w17.field) on price: MONEY, gte=0 (bounds merged into Field) ---
 	priceOpts := fieldOptions(t, product, "price")
-	priceFieldExt := proto.GetExtension(priceOpts, w17pb.E_Field).(*w17pb.Field)
-	if got, want := priceFieldExt.GetType(), w17pb.Type_MONEY; got != want {
+	priceExt := proto.GetExtension(priceOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := priceExt.GetType(), w17pb.Type_MONEY; got != want {
 		t.Errorf("price.field.type = %v, want %v", got, want)
 	}
-	priceValExt := proto.GetExtension(priceOpts, w17pb.E_Validate).(*w17pb.Validate)
-	if priceValExt.Gte == nil {
-		t.Error("price.validate.gte unset, want present")
-	} else if got, want := *priceValExt.Gte, float64(0); got != want {
-		t.Errorf("price.validate.gte = %v, want %v", got, want)
+	if priceExt.Gte == nil {
+		t.Error("price.field.gte unset, want present")
+	} else if got, want := *priceExt.Gte, float64(0); got != want {
+		t.Errorf("price.field.gte = %v, want %v", got, want)
 	}
 
 	// --- (w17.field) on discount_rate: RATIO, null=true ---
@@ -98,33 +132,59 @@ func TestW17VocabularyCompiles(t *testing.T) {
 		t.Error("discount_rate.field.null = false, want true")
 	}
 
-	// --- (w17.field) on category_id: UUID + fk="categories.id" ---
+	// --- category_id: (w17.field) UUID + fk; (w17.db.column) index + name ---
 	catOpts := fieldOptions(t, product, "category_id")
-	catExt := proto.GetExtension(catOpts, w17pb.E_Field).(*w17pb.Field)
-	if got, want := catExt.GetType(), w17pb.Type_UUID; got != want {
+	catFieldExt := proto.GetExtension(catOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := catFieldExt.GetType(), w17pb.Type_UUID; got != want {
 		t.Errorf("category_id.field.type = %v, want %v", got, want)
 	}
-	if got, want := catExt.GetFk(), "categories.id"; got != want {
+	if got, want := catFieldExt.GetFk(), "categories.id"; got != want {
 		t.Errorf("category_id.field.fk = %q, want %q", got, want)
 	}
+	catColExt := proto.GetExtension(catOpts, dbpb.E_Column).(*dbpb.Column)
+	if !catColExt.GetIndex() {
+		t.Error("category_id.db.column.index = false, want true")
+	}
+	if got, want := catColExt.GetName(), "cat_id"; got != want {
+		t.Errorf("category_id.db.column.name = %q, want %q", got, want)
+	}
 
-	// --- (w17.field) on stock_qty: COUNTER ---
+	// --- stock_qty: COUNTER, default_int=0 ---
 	stockOpts := fieldOptions(t, product, "stock_qty")
 	stockExt := proto.GetExtension(stockOpts, w17pb.E_Field).(*w17pb.Field)
 	if got, want := stockExt.GetType(), w17pb.Type_COUNTER; got != want {
 		t.Errorf("stock_qty.field.type = %v, want %v", got, want)
 	}
+	if got, want := stockExt.GetDefaultInt(), int64(0); got != want {
+		t.Errorf("stock_qty.field.default_int = %d, want %d", got, want)
+	}
+	if _, ok := stockExt.GetDefault().(*w17pb.Field_DefaultInt); !ok {
+		t.Errorf("stock_qty.field.default branch = %T, want *Field_DefaultInt", stockExt.GetDefault())
+	}
 
-	// --- bool carrier with no (w17.field): presence check is explicit ---
-	activeField := product.Fields().ByName("is_active")
-	activeOpts := typedOptions[*descriptorpb.FieldOptions](t, activeField.Options())
-	if proto.HasExtension(activeOpts, w17pb.E_Field) {
-		t.Error("is_active unexpectedly has (w17.field) set")
+	// --- is_active: bool carrier, default_auto TRUE (the bool-default channel) ---
+	activeOpts := fieldOptions(t, product, "is_active")
+	activeExt := proto.GetExtension(activeOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := activeExt.GetDefaultAuto(), w17pb.AutoDefault_TRUE; got != want {
+		t.Errorf("is_active.field.default_auto = %v, want %v", got, want)
 	}
 	// Carrier type is what the IR builder will read when the field has no
 	// semantic type annotation.
-	if got, want := activeField.Kind(), protoreflect.BoolKind; got != want {
+	if got, want := product.Fields().ByName("is_active").Kind(), protoreflect.BoolKind; got != want {
 		t.Errorf("is_active.Kind() = %v, want %v", got, want)
+	}
+
+	// --- created_at: Timestamp carrier, DATETIME, default_auto NOW, immutable ---
+	createdOpts := fieldOptions(t, product, "created_at")
+	createdExt := proto.GetExtension(createdOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := createdExt.GetType(), w17pb.Type_DATETIME; got != want {
+		t.Errorf("created_at.field.type = %v, want %v", got, want)
+	}
+	if got, want := createdExt.GetDefaultAuto(), w17pb.AutoDefault_NOW; got != want {
+		t.Errorf("created_at.field.default_auto = %v, want %v", got, want)
+	}
+	if !createdExt.GetImmutable() {
+		t.Error("created_at.field.immutable = false, want true")
 	}
 }
 
