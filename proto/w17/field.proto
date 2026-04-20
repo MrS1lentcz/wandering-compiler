@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package w17;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17;w17pb";
+
+// Field annotates a proto field with DB and validation semantics.
+//
+// Usage:
+//   string slug = 2 [(w17.field) = { type: SLUG, max_len: 120 }];
+//
+// `type` is conceptually required — the compiler rejects fields without it
+// unless the proto carrier is `bool` or `google.protobuf.Timestamp` (those
+// carriers have no semantic subtype in iteration-1). Proto schema does not
+// enforce this; the IR builder does (see iteration-1-impl.md M2).
+//
+// See docs/iteration-1.md §In scope and
+// docs/experiments/iteration-1-models.md §Semantic type enum.
+extend google.protobuf.FieldOptions {
+  Field field = 51001;
+}
+
+message Field {
+  Type type = 1;
+
+  // Primary key. Combined with `type: UUID` or numeric id types.
+  bool pk = 2;
+
+  // Foreign key, in the form "<table>.<column>". Iteration-1 only supports
+  // same-file references (see iteration-1.md "Out of scope" for cross-module
+  // FKs via package paths).
+  string fk = 3;
+
+  // Marks the field as not changeable after insert. Iteration-1 records the
+  // annotation but does not enforce it in SQL (see iteration-1.md).
+  bool immutable = 4;
+
+  // Opts the column out of NOT NULL. Default is NOT NULL + required. When
+  // true, the column is nullable AND the generated internal proto emits the
+  // field as proto3 `optional` so field presence survives the wire format
+  // (D1 in iteration-1.md).
+  bool null = 5;
+
+  // String-only. When true, allows empty string. Default is
+  // CHECK (col <> '') for all string types. Orthogonal to `null`: `null`
+  // = "value may be absent"; `blank` = "if present, may be empty".
+  bool blank = 6;
+
+  // Required for type CHAR and SLUG; drives VARCHAR(N) sizing. Ignored for
+  // other types. 0 is treated as unset.
+  int32 max_len = 7;
+}
+
+// Type is the semantic subtype of a DB column — refines the proto carrier
+// into a SQL column type and a default set of CHECK constraints. Additional
+// constraints stack on top via (w17.validate).
+enum Type {
+  TYPE_UNSPECIFIED = 0;
+
+  // String carriers (proto carrier: string)
+  CHAR  = 1;
+  TEXT  = 2;
+  UUID  = 3;
+  EMAIL = 4;
+  URL   = 5;
+  SLUG  = 6;
+
+  // Numeric carriers (proto carrier: int32 / int64 / double, see spec)
+  NUMBER     = 10;
+  ID         = 11;
+  COUNTER    = 12;
+  MONEY      = 13;
+  PERCENTAGE = 14;
+  RATIO      = 15;
+}

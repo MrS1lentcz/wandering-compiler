@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package vocabtest;
+
+import "w17/db.proto";
+import "w17/field.proto";
+import "w17/validate.proto";
+
+// Fixture for TestW17VocabularyCompiles. Exercises one of each w17 option
+// so a failure in the generated extension surface shows up immediately.
+// Intentionally minimal — shape validation is the IR builder's job (M2),
+// not this test's.
+message Product {
+  option (w17.db.table) = {
+    name: "products",
+    indexes: [
+      { fields: ["slug"], unique: true },
+      { fields: ["category_id", "is_active"] }
+    ]
+  };
+
+  string slug          = 1 [(w17.field) = { type: SLUG, max_len: 120 }];
+  double price         = 2 [
+    (w17.field)    = { type: MONEY },
+    (w17.validate) = { gte: 0 }
+  ];
+  double discount_rate = 3 [(w17.field) = { type: RATIO, null: true }];
+  string category_id   = 4 [(w17.field) = { type: UUID, fk: "categories.id" }];
+  int64  stock_qty     = 5 [(w17.field) = { type: COUNTER }];
+  bool   is_active     = 6;
+}

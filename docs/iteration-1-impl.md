@@ -303,6 +303,16 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-20).** Skeleton checklist complete — three-file minimum
-(`srcgo/go.mod`, `Makefile`, `.gitignore`) in place. No Go source yet.
-**Next:** M1 — `proto/w17/{db,field,validate}.proto` + `make schemagen`.
+**Status (2026-04-20).** Skeleton + M1 complete.
+- Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
+- M1: `proto/w17/{db,field,validate}.proto` authored; `make schemagen` emits
+  `srcgo/pb/w17/{field,validate}.pb.go` and `srcgo/pb/w17/db/db.pb.go`
+  (gitignored). `TestW17VocabularyCompiles` loads a fixture via
+  `bufbuild/protocompile` and reads every option value through the generated
+  extensions — green.
+- Extension layout split: `proto/w17/db.proto` is proto package `w17.db` →
+  Go package `dbpb` (subdir); `field.proto` and `validate.proto` share proto
+  package `w17` → Go package `w17pb`. Flat `proto/w17/` authoring layout is
+  preserved; split only affects Go output.
+
+**Next:** M2 — loader + IR builder.

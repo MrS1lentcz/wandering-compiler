@@ -1,0 +1,43 @@
+syntax = "proto3";
+
+package w17;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17;w17pb";
+
+// Validate stacks additional constraints on a field beyond what its (w17.field)
+// type implies.
+//
+// Usage:
+//   double price = 5 [
+//     (w17.field)    = { type: MONEY },
+//     (w17.validate) = { gte: 0 }
+//   ];
+//
+// All numeric bounds and `min_len`/`max_len` are `optional` because proto3
+// scalar defaults would collide with valid boundary values (`gte: 0` must be
+// distinguishable from "no lower bound").
+extend google.protobuf.FieldOptions {
+  Validate validate = 51002;
+}
+
+message Validate {
+  // String length bounds (in addition to what `type` + `(w17.field).max_len`
+  // already imply).
+  optional int32 min_len = 1;
+  optional int32 max_len = 2;
+
+  // Numeric bounds. `gt` / `lt` are strict; `gte` / `lte` are inclusive.
+  // These can coexist (e.g. `gte: 0, lt: 100`) and are rendered as a single
+  // CHECK constraint per field.
+  optional double gt  = 3;
+  optional double gte = 4;
+  optional double lt  = 5;
+  optional double lte = 6;
+
+  // Regex pattern override. When set, replaces the default pattern that
+  // (w17.field).type would otherwise enforce (e.g. SLUG's `^[a-z0-9-]+$`).
+  // Empty string means "no override".
+  string pattern = 7;
+}

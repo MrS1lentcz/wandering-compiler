@@ -4,7 +4,14 @@ build:
 	@echo "TODO: go build -o srcgo/domains/compiler/bin/wc ./srcgo/domains/compiler/cmd/cli"
 
 schemagen:
-	@echo "TODO: compile proto/w17/*.proto -> srcgo/pb/w17/"
+	@mkdir -p srcgo/pb
+	protoc \
+		--proto_path=proto \
+		--go_out=srcgo/pb \
+		--go_opt=module=github.com/MrS1lentcz/wandering-compiler/srcgo/pb \
+		proto/w17/db.proto \
+		proto/w17/field.proto \
+		proto/w17/validate.proto
 
 test:
 	@echo "TODO: go test ./..."

@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package w17.db;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/db;dbpb";
+
+// Table marks a proto message as a DB table and carries table-level options.
+//
+// Usage:
+//   message Product {
+//     option (w17.db.table) = {
+//       name: "products",
+//       indexes: [
+//         { fields: ["slug"], unique: true }
+//       ]
+//     };
+//     ...
+//   }
+//
+// See docs/iteration-1.md §In scope.
+extend google.protobuf.MessageOptions {
+  Table table = 51000;
+}
+
+message Table {
+  string name = 1;
+  repeated Index indexes = 2;
+}
+
+message Index {
+  repeated string fields = 1;
+  bool unique = 2;
+}
