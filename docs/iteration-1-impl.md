@@ -41,7 +41,9 @@ wandering-compiler/
 │   │       └── field.proto              # (w17.pg.field) — Postgres dialect namespace (M1 rev3)
 │   └── domains/
 │       └── compiler/
-│           ├── types/                   # (iteration-1: empty; grows when compiler exposes gRPC types)
+│           ├── types/                   # compiler-internal proto (M2 rev2, 2026-04-21)
+│           │   ├── ir.proto             # IR: Schema/Table/Column/Index/ForeignKey/Check/Default/SourceLocation — D4
+│           │   └── plan.proto           # MigrationPlan + Op oneof (added in M3)
 │           └── services/                # (iteration-1: empty; later: service_compile.proto)
 │
 ├── srcgo/
@@ -50,7 +52,10 @@ wandering-compiler/
 │   ├── lib/                             # (iteration-1: empty)
 │   ├── x/                               # (iteration-1: empty)
 │   ├── pb/                              # generated from proto/ — gitignored, regenerated via `make schemagen`
-│   │   └── w17/                         # compiled w17 options
+│   │   ├── w17/                         # compiled w17 options
+│   │   └── domains/
+│   │       └── compiler/
+│   │           └── types/               # irpb (ir.pb.go), planpb (plan.pb.go) — M2 rev2+
 │   └── domains/
 │       └── compiler/
 │           ├── application.go           # package compiler — Application interface + module interfaces
@@ -63,18 +68,14 @@ wandering-compiler/
 │           │   └── cli/
 │           │       ├── main.go          # kong root + kongplete
 │           │       └── cmd_generate.go  # `wc generate` subcommand (built as binary `wc`)
+│           ├── diag/                    # domain-local — shared *diag.Error (file:line:col + why/fix)
+│           │   └── error.go
 │           ├── loader/                  # domain-local — parse .proto via bufbuild/protocompile, decode w17 options
-│           │   ├── loader.go
-│           │   └── options.go
-│           ├── ir/                      # domain-local — dialect-agnostic IR (D4)
-│           │   ├── schema.go            # Schema, Table, Column, Index, ForeignKey
-│           │   ├── checks.go            # Check tagged union: Length/Blank/Range/Regex
-│           │   ├── types.go             # ProtoCarrier, SemanticType enums
-│           │   └── build.go             # loader output → IR
+│           │   └── loader.go            # single file (options.go folded in; reparse helper is 15 lines)
+│           ├── ir/                      # domain-local — validator + helpers over generated *irpb types (D4)
+│           │   └── build.go             # loader.LoadedFile → *irpb.Schema; all D2/D7/D8 invariants enforced here
 │           ├── plan/                    # domain-local — differ (D4)
-│           │   ├── plan.go              # MigrationPlan, Op interface
-│           │   ├── ops.go               # AddTable (iteration-1 only)
-│           │   └── diff.go              # Diff(prev, curr *ir.Schema) *MigrationPlan
+│           │   └── diff.go              # Diff(prev, curr *irpb.Schema) *planpb.MigrationPlan
 │           ├── emit/                    # domain-local — per-dialect SQL emitters (D4)
 │           │   ├── dialect.go           # DialectEmitter interface
 │           │   ├── postgres/
@@ -121,10 +122,12 @@ Notes:
 | Package | Input | Output | Notes |
 |---|---|---|---|
 | `proto/w17/` | — | option descriptors | Source of truth for the authoring vocabulary. Compiles into `srcgo/pb/w17/`. |
-| `srcgo/domains/compiler/loader` | `*.proto` paths | parsed descriptors + decoded w17 option values keyed by message / field | Uses [`github.com/bufbuild/protocompile`](https://github.com/bufbuild/protocompile) — no shelling out to `protoc`. |
-| `.../compiler/ir` | loader output | `*ir.Schema` | Validates invariants (every field has `type`, `CHAR`/`SLUG` have `max_len`, FKs target exists, etc.). Invariant violations become loader errors with file:line. |
-| `.../compiler/plan` | two `*ir.Schema` (prev, curr) | `*plan.MigrationPlan` | Iteration-1: prev is always nil; output is one `AddTable` per table. |
-| `.../compiler/emit` | `*plan.MigrationPlan` + `DialectEmitter` | up SQL + down SQL strings | `DialectEmitter` is the interface; `postgres.Emitter` is the only real impl, `sqlite.Emitter` is the stub from AC #6. |
+| `proto/domains/compiler/types/` | — | `irpb`, `planpb` generated types | Compiler-internal schema / plan messages (D4 rev 2026-04-21). Private — not part of the user-facing vocabulary. |
+| `srcgo/domains/compiler/diag` | descriptor + msg | `*diag.Error` | Shared user-facing diagnostic type (file:line:col + `why:` + `fix:`). See feedback memory "user-friendly errors". |
+| `srcgo/domains/compiler/loader` | `*.proto` paths | `*LoadedFile` (Go struct wrapping `protoreflect.FileDescriptor` + decoded w17 options) | Uses [`github.com/bufbuild/protocompile`](https://github.com/bufbuild/protocompile) — no shelling out to `protoc`. Stays Go (not proto) because it carries non-serializable descriptor handles — the proto boundary starts at `ir.Build`. |
+| `.../compiler/ir` | loader output | `*irpb.Schema` | Validates invariants (every field has `type`, `CHAR`/`SLUG` have `max_len`, FKs target exists, etc.). Invariant violations become `*diag.Error` aggregated via `errors.Join`. Helpers are free Go functions over generated `irpb` types. |
+| `.../compiler/plan` | two `*irpb.Schema` (prev, curr) | `*planpb.MigrationPlan` | Iteration-1: prev is always nil; output is one `AddTable` op per table. |
+| `.../compiler/emit` | `*planpb.MigrationPlan` + `DialectEmitter` | up SQL + down SQL strings | `DialectEmitter` is the Go interface; `postgres.Emitter` is the only real impl, `sqlite.Emitter` is the stub from AC #6. |
 | `.../compiler/naming` | `[]plan.Op` + sequence | migration basename like `0001_create_products` | Sequence source for iteration-1 is the count of existing files in `out/migrations/`; the platform (later) will own sequencing server-side. |
 | `.../compiler/writer` | basename + up/down SQL | two files in `out/migrations/` | Only responsibility: write bytes. |
 | `.../compiler/application` | Config + options | `compiler.Application` (facade) | Constructed at startup by `cmd/cli/main.go`. Iteration-1 has essentially one module (output writer factory); more modules appear when gRPC / platform integration lands. |
@@ -313,7 +316,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-20).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 complete.
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 complete; **M2 rev2 pending** — spec shipped, implementation next.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -358,4 +361,20 @@ in code, not in docs:
   `ir/build_test.go` (happy path + 8 error-class fixtures under
   `ir/testdata/errors/`, each asserting `file:`, `why:`, `fix:` substrings).
 
-**Next:** M3 — plan (trivial differ: `nil → Schema` yields `AddTable` ops).
+- **M2 rev2 (pending, 2026-04-21) — IR as proto, not Go structs.** D4
+  revised (iteration-1.md) + tech-spec Strategic Decision #8 added.
+  Implementation steps: create `proto/domains/compiler/types/ir.proto`
+  (Schema/Table/Column/Index/ForeignKey/Check oneof / Default oneof /
+  SourceLocation; Carrier/SemType/FKAction/AutoKind as proto enums),
+  add to `Makefile schemagen`, delete
+  `srcgo/domains/compiler/ir/{schema,checks,types}.go`, rewrite
+  `ir.Build` to populate `*irpb.Schema` and store `SourceLocation`
+  messages (populated from `file.SourceLocations().ByDescriptor(fd)`)
+  instead of live `protoreflect.FieldDescriptor` handles. Rewrite
+  `build_test.go` to type-switch on generated `Check`/`Default` oneof
+  wrappers. `loader.LoadedFile` stays a Go struct (parse container holds
+  non-serializable descriptor handles; proto boundary starts at
+  `ir.Build`).
+
+**Next:** M2 rev2 implementation, then M3 — plan (trivial differ:
+`nil → Schema` yields `AddTable` ops, also proto).

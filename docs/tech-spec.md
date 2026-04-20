@@ -262,6 +262,7 @@ These resolve the biggest ambiguities in the spec and should be treated as fixed
 | 5 | Build-time vs. runtime | The product is a **compiler** (build-time). Runtime is thin: generated gRPC services + `protobridge`. No heavyweight framework to import. |
 | 6 | Gen model | `gen/` is untouchable. Skeletons land in `src/` via `wc pull` on first scaffold; subsequent changes go through `wc diff` / `wc apply`. |
 | 7 | Schema evolution | Compiler detects breaking proto changes semantically and warns before deploy. |
+| 8 | Inter-component data shapes | **Proto messages, not hand-rolled Go structs.** Any structured data crossing compiler layers — IR, migration plan and ops, RPC payloads, platform ↔ CLI ↔ deploy-client messages — is defined as a `.proto`. Public authoring vocabulary stays at `proto/w17/` or `proto/common/`; private/internal shapes live at `proto/domains/<domain>/types/<name>.proto`. Rationale: the compiler is itself a gRPC-addressable domain, future producers (visual editor, import-from-DB) and consumers (back-compat lint, changelog, visualization) must plug in wire-compat without speaking Go, and tagged unions are cleaner as proto `oneof` than as Go interfaces. Exception: parse-stage containers holding non-serializable handles (e.g. `protoreflect.FileDescriptor`) remain Go structs — the proto boundary starts at the next layer. |
 
 ## Implementation Plan — Phases
 

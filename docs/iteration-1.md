@@ -223,27 +223,53 @@ the proto honest and the developer in control. The follow-up open question
 (#4) is whether to add field-level `default` / `on_update` annotations so
 explicit timestamp fields are ergonomic to author.
 
-### D4 — Own IR + differ + per-dialect emitters (resolves open question #5)
+### D4 — Own IR + differ + per-dialect emitters (resolves open question #5; revised 2026-04-21)
 
 **Decision.** The compiler owns its whole migration pipeline. Ent and Atlas
 are **not used**. The pipeline has four layers:
 
-1. **IR:** dialect-agnostic Go types — `Schema` / `Table` / `Column` /
-   `Check` (tagged union: `LengthCheck`, `BlankCheck`, `RangeCheck`,
-   `RegexCheck`) / `Index` / `ForeignKey`. Checks carry semantic intent, not
-   SQL strings — the emitter renders them per dialect.
-2. **Differ:** `Diff(prev, curr *Schema) *MigrationPlan` → ordered `Op`s
-   (`AddTable`, later `DropTable`, `AddColumn`, `AlterColumn`, …).
-   Iteration-1 handles only `nil → Schema` (initial migration), which reduces
-   to one `AddTable` per table. Alter/rename/type-change ops are added
-   iteration-by-iteration as pilot projects surface real needs.
-3. **SQL emitter:** per-dialect, behind a `DialectEmitter` interface.
-   Iteration-1 ships only the Postgres emitter. Adding MySQL / SQLite later
-   is a new file, not a rearchitecture.
-4. **Sibling consumers of the plan (later iterations):** back-compat lint
-   (e.g., "AddColumn NOT NULL without default on non-empty table"),
-   changelog generator, schema visualization. All three operate on
-   `MigrationPlan.Ops`, so they are dialect-agnostic for free.
+1. **IR:** dialect-agnostic **proto messages** at
+   `proto/domains/compiler/types/ir.proto` (private/internal,
+   `go_package = ".../srcgo/pb/domains/compiler/types;irpb"`) —
+   `Schema` / `Table` / `Column` / `Index` / `ForeignKey` /
+   `PgOptions` / `SourceLocation`. Tagged unions are proto `oneof`:
+   `Check { oneof variant { LengthCheck … | BlankCheck … | RangeCheck …
+   | RegexCheck … | ChoicesCheck … } }` and `Default { oneof variant {
+   AutoDefault … | LiteralString … | LiteralInt … | LiteralDouble … }
+   }`. Dialect-independent enums (`Carrier`, `SemType`, `FKAction`,
+   `AutoKind`) are proto enums. Checks carry semantic intent, not SQL
+   strings — the emitter renders them per dialect. `SourceLocation`
+   replaces live `protoreflect.FieldDescriptor` storage (descriptors
+   aren't serializable; the IR is). See tech-spec strategic decision
+   #8 for the cross-cutting "proto, not Go structs" rule.
+2. **Differ:** `Diff(prev, curr *irpb.Schema) *planpb.MigrationPlan` →
+   ordered `Op`s (`AddTable`, later `DropTable`, `AddColumn`,
+   `AlterColumn`, …), also proto (`proto/domains/compiler/types/plan.proto`).
+   Iteration-1 handles only `nil → Schema` (initial migration), which
+   reduces to one `AddTable` per table. Alter/rename/type-change ops
+   are added iteration-by-iteration as pilot projects surface real
+   needs.
+3. **SQL emitter:** per-dialect, behind a `DialectEmitter` Go interface.
+   Emitters consume `*irpb.Schema` + `*planpb.MigrationPlan`; helpers
+   are free Go functions over the generated proto types. Iteration-1
+   ships only the Postgres emitter. Adding MySQL / SQLite later is a
+   new file, not a rearchitecture.
+4. **Sibling consumers of the plan (later iterations):** back-compat
+   lint (e.g., "AddColumn NOT NULL without default on non-empty
+   table"), changelog generator, schema visualization, platform UI.
+   All four operate on `MigrationPlan.Ops`, so they are
+   dialect-agnostic for free — and because the plan is proto, any of
+   them can live in a different process / language without re-serialising.
+
+> **Why proto IR, not Go structs (rev 2026-04-21):** The pre-rev shape
+> was hand-rolled Go (`srcgo/domains/compiler/ir/{schema,checks,types}.go`).
+> Most fields turned out to be 1:1 mirrors of the authoring proto
+> (`Nullable`, `PK`, `MaxLen`, …). More importantly, the compiler is
+> itself a gRPC-addressable domain (see project memory "compiler is a
+> domain"): visual editor, platform UI, future import-from-DB, and
+> sibling consumers (lint, changelog) all need to read/emit IR. Proto
+> gives them wire-compat in any language and cleaner tagged unions than
+> Go interfaces. See tech-spec strategic decision #8.
 
 **Rationale.**
 
