@@ -315,4 +315,9 @@ in code, not in docs:
   package `w17` → Go package `w17pb`. Flat `proto/w17/` authoring layout is
   preserved; split only affects Go output.
 
-**Next:** M2 — loader + IR builder.
+**Next:** M1 rev2 (pending — see `docs/iteration-1-m1-rev.md`): merge
+`(w17.validate)` into `(w17.field)`, introduce `(w17.db.column)` for
+storage-layer choices (`index`, `name`), expand temporal types
+(`DATE`/`TIME`/`DATETIME`/`INTERVAL`), resolve open question #4 with
+`oneof default` + `AutoDefault` enum. **Implement the rev doc verbatim.**
+After rev lands: M2 — loader + IR builder.
