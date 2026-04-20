@@ -1,0 +1,23 @@
+# Generated migrations — platform artifacts, not source-committed (D6)
+out/
+
+# Container volumes
+.volumes/
+
+# Compiled binaries — scoped per-domain, never at repo root
+srcgo/**/bin/
+
+# Generated Go from proto/
+srcgo/pb/
+
+# Generated code per domain (protobridge, proto stubs)
+srcgo/domains/**/gen/
+
+# Local env overrides
+.env
+
+# JetBrains IDEs (IntelliJ / GoLand / PyCharm / …)
+.idea/
+*.iml
+*.iws
+*.ipr

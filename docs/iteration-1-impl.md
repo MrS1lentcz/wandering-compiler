@@ -294,12 +294,15 @@ in code, not in docs:
 
 ## What "ready to start coding" looks like
 
-- This doc is committed.
-- `PROJECT_STAGE` stays absent (skeleton — per CLAUDE.md).
-- `srcgo/go.mod` is initialized with a module name.
-- `Makefile` has placeholder targets for `build`, `schemagen`, `test`,
-  `test-apply`.
-- `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`, `srcgo/**/bin/`,
-  `.volumes/`, `.env`.
+- [x] This doc is committed.
+- [x] `PROJECT_STAGE` stays absent (skeleton — per CLAUDE.md).
+- [x] `srcgo/go.mod` is initialized with a module name
+      (`github.com/MrS1lentcz/wandering-compiler/srcgo`, Go 1.26).
+- [x] `Makefile` has placeholder targets for `build`, `schemagen`, `test`,
+      `test-apply`.
+- [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
+      `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-At that point: M1 is next.
+**Status (2026-04-20).** Skeleton checklist complete — three-file minimum
+(`srcgo/go.mod`, `Makefile`, `.gitignore`) in place. No Go source yet.
+**Next:** M1 — `proto/w17/{db,field,validate}.proto` + `make schemagen`.
