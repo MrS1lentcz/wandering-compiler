@@ -5,11 +5,20 @@ package vocabtest;
 import "google/protobuf/timestamp.proto";
 import "w17/db.proto";
 import "w17/field.proto";
+import "w17/pg/field.proto";
 
 // Fixture for TestW17VocabularyCompiles. Exercises one of each w17 option
 // so a failure in the generated extension surface shows up immediately.
 // Intentionally minimal — shape validation is the IR builder's job (M2),
 // not this test's.
+
+enum ProductStatus {
+  PRODUCT_STATUS_UNSPECIFIED = 0;
+  DRAFT                      = 1;
+  ACTIVE                     = 2;
+  ARCHIVED                   = 3;
+}
+
 message Product {
   option (w17.db.table) = {
     name: "products",
@@ -20,16 +29,30 @@ message Product {
     ]
   };
 
-  string id             = 1 [(w17.field) = { type: UUID, pk: true, immutable: true, default_auto: UUID_V4 }];
+  int64  id             = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
   string slug           = 2 [(w17.field) = { type: SLUG, max_len: 120, unique: true }];
   string name           = 3 [(w17.field) = { type: CHAR, max_len: 255, default_string: "unnamed" }];
   double price          = 4 [(w17.field) = { type: MONEY, gte: 0 }];
-  double discount_rate  = 5 [(w17.field) = { type: RATIO, null: true }];
-  string category_id    = 6 [
-    (w17.field)     = { type: UUID, fk: "categories.id" },
+  string tax_rate       = 5 [(w17.field) = { type: DECIMAL, precision: 7, scale: 4 }];
+  double discount_rate  = 6 [(w17.field) = { type: RATIO, null: true }];
+  string status         = 7 [(w17.field) = { type: CHAR, max_len: 32, choices: "vocabtest.ProductStatus" }];
+  int64  category_id    = 8 [
+    (w17.field)     = { type: ID, fk: "categories.id", null: true, orphanable: true },
     (w17.db.column) = { index: true, name: "cat_id" }
   ];
-  int64  stock_qty      = 7 [(w17.field) = { type: COUNTER, default_int: 0 }];
-  bool   is_active      = 8 [(w17.field) = { default_auto: TRUE }];
-  google.protobuf.Timestamp created_at = 9 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+  int64  stock_qty      = 9 [(w17.field) = { type: COUNTER, default_int: 0 }];
+  bool   is_active      = 10 [(w17.field) = { default_auto: TRUE }];
+  google.protobuf.Timestamp created_at = 11 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+
+  // PG-specific: JSONB plus an escape-hatch vector column.
+  string metadata       = 12 [
+    (w17.field)    = { type: TEXT, blank: true },
+    (w17.pg.field) = { jsonb: true }
+  ];
+  string embedding      = 13 [
+    (w17.pg.field) = {
+      custom_type: "vector(1536)",
+      required_extensions: ["vector"]
+    }
+  ];
 }

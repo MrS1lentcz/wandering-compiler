@@ -25,6 +25,14 @@ package w17.catalog.products;
 import "google/protobuf/timestamp.proto";
 import "w17/db.proto";
 import "w17/field.proto";
+import "w17/pg/field.proto";
+
+enum ProductStatus {
+  PRODUCT_STATUS_UNSPECIFIED = 0;
+  DRAFT                      = 1;
+  ACTIVE                     = 2;
+  ARCHIVED                   = 3;
+}
 
 message Product {
   option (w17.db.table) = {
@@ -39,20 +47,28 @@ message Product {
   string name            = 3 [(w17.field) = { type: CHAR, max_len: 255 }];
   string description     = 4 [(w17.field) = { type: TEXT, blank: true }];
   double price           = 5 [(w17.field) = { type: MONEY, gte: 0 }];
-  double discount_rate   = 6 [(w17.field) = { type: RATIO, null: true }];
-  string category_id     = 7 [
-    (w17.field)     = { type: UUID, fk: "categories.id" },
+  string tax_rate        = 6 [(w17.field) = { type: DECIMAL, precision: 7, scale: 4 }];
+  double discount_rate   = 7 [(w17.field) = { type: RATIO, null: true }];
+  string status          = 8 [(w17.field) = { type: CHAR, max_len: 32, choices: "w17.catalog.products.ProductStatus" }];
+  string category_id     = 9 [
+    (w17.field)     = { type: UUID, fk: "categories.id", null: true, orphanable: true },
     (w17.db.column) = { index: true }
   ];
-  int64  stock_quantity  = 8 [(w17.field) = { type: COUNTER }];
-  bool   is_active       = 9 [(w17.field) = { default_auto: TRUE }];
+  int64  stock_quantity  = 10 [(w17.field) = { type: COUNTER, default_int: 0 }];
+  bool   is_active       = 11 [(w17.field) = { default_auto: TRUE }];
+
+  // PG-native JSONB metadata column.
+  string metadata        = 12 [
+    (w17.field)    = { type: TEXT, blank: true },
+    (w17.pg.field) = { jsonb: true }
+  ];
 
   // created_at: DB default NOW() at insert. updated_at: DB default NOW() at
   // insert only. Handlers mutating the row MUST set updated_at explicitly —
   // the compiler does not auto-update it. The future mandatory-mutation
   // contract (parked experiment) will verify all write RPCs touch it.
-  google.protobuf.Timestamp created_at = 10 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
-  google.protobuf.Timestamp updated_at = 11 [(w17.field) = { type: DATETIME, default_auto: NOW }];
+  google.protobuf.Timestamp created_at = 13 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+  google.protobuf.Timestamp updated_at = 14 [(w17.field) = { type: DATETIME, default_auto: NOW }];
 }
 ```
 
@@ -64,16 +80,23 @@ Notes on authoring surface in iteration 1:
 - **`w17.field` (merged vocabulary — data semantics):**
   - `type` (required for every carrier except `bool`; picks SQL column type and implicit constraints, see table below).
   - `pk` (primary key), `fk` (`"<table>.<column>"` string — no cross-domain/module wiring yet), `immutable` (for docs in iteration 1; enforcement comes with services).
+  - `orphanable` (optional bool, FK-only) — property describing whether the row can outlive its parent. `true` → `SET NULL` on parent delete (needs `null: true`); `false` → `CASCADE`; unset → inferred from `null`. See D8.
   - `null: true` — opt-out of `NOT NULL`. Column becomes nullable in DB, field becomes `optional` in internal proto (so presence survives), validator stops requiring a value. Default is `null: false` → NOT NULL + required.
   - `blank: true` — allow empty string for string types. Default is `blank: false` → `CHECK (col <> '')`. `blank` is orthogonal to `null` (null = "value may be missing"; blank = "if present, may be empty").
   - `unique: true` — data-level uniqueness. Renders as `CREATE UNIQUE INDEX`. Orthogonal to the storage-only `(w17.db.column).index` flag.
   - `max_len` / `min_len` — length bounds for string carriers; `max_len` is required for `CHAR` / `SLUG` and drives `VARCHAR(N)` sizing.
   - `gt` / `gte` / `lt` / `lte` — numeric bounds (optional, so `0` is distinguishable from unset).
   - `pattern` — regex, overrides the type's default regex (e.g. `SLUG`).
-  - `default` oneof — see D7. Literal branches `default_string` / `default_int` / `default_double`, or `default_auto: AutoDefault` for dynamically resolved defaults (`NOW`, `UUID_V4/V7`, `TRUE/FALSE`, `EMPTY_JSON_*`).
+  - `choices` — FQN of a proto enum reachable from this file; emits `CHECK (col IN ('VAL1', …))` with the enum's value *names*. Cross-file permitted. See D8.
+  - `precision` / `scale` — `type: DECIMAL` only; total digits + digits after the decimal point.
+  - `default` oneof — see D7. Literal branches `default_string` / `default_int` / `default_double`, or `default_auto: AutoDefault` for dynamically resolved defaults (`NOW`, `UUID_V4/V7`, `TRUE/FALSE`, `EMPTY_JSON_*`, `IDENTITY` for auto-increment PKs).
 - **`w17.db.column` (storage-only overrides, orthogonal to data semantics):**
   - `index: true` — single-field non-unique storage index (sugar for a single-column entry in `(w17.db.table).indexes`). Does **not** imply `UNIQUE`.
   - `name` — SQL column-name override (rare; mostly for adopting existing schemas with non-proto naming conventions).
+- **`w17.pg.field` (Postgres dialect namespace — see D9):**
+  - `jsonb` / `inet` / `tsvector` / `hstore` — curated PG-native types; each replaces the SQL column type that `(w17.field).type` would otherwise pick.
+  - `custom_type` — raw SQL column type passthrough (escape hatch for pgvector, PostGIS, custom DOMAINs). When set, the PG emitter bypasses the semantic-type dispatch for this column.
+  - `required_extensions` — Postgres extensions the emitter must `CREATE EXTENSION IF NOT EXISTS` before table creation.
 - **Out of scope:** projections, references into `common/`, cross-module FKs resolved via package paths, `on_update` auto-mutation side-effects (deliberately rejected — see D7 + parked mandatory-mutation-contract experiment).
 
 ### Semantic type enum
@@ -101,6 +124,7 @@ Semantic `type` is the Django-inspired "data refinement + basic constraints in o
 | `MONEY`      | `double`          | `NUMERIC(19, 4)`      | none (bounds via `(w17.field).gt/gte/lt/lte`). Currency code is a separate field. Wire format is lossy `double`; use int64-cents pattern if you need exact transport. |
 | `PERCENTAGE` | `double`          | `NUMERIC(5, 2)`       | `CHECK (col BETWEEN 0 AND 100)` — "human" 0–100 scale |
 | `RATIO`      | `double`          | `NUMERIC(5, 4)`       | `CHECK (col BETWEEN 0 AND 1)` — mathematical 0–1 fraction |
+| `DECIMAL`    | `string`          | `NUMERIC(precision, scale)` | Requires `(w17.field).precision` (> 0); `scale` optional (default 0). String carrier for lossless wire; bounds via `gt/gte/lt/lte` (double-typed, precision-limited by double's range). |
 
 **Temporal types** (proto carriers as noted):
 
@@ -247,13 +271,19 @@ Mapping rules applied:
 | `type: TIME`                                | `TIME` (Timestamp carrier)                      |
 | `type: DATETIME`                            | `TIMESTAMPTZ` (Timestamp carrier)               |
 | `type: INTERVAL`                            | `INTERVAL` (Duration carrier)                   |
+| `type: DECIMAL, precision: P, scale: S`     | `NUMERIC(P, S)` (string carrier)                |
 | `bool` carrier                              | `BOOLEAN`                                       |
 | `(w17.field) = { pk: true }`                | `PRIMARY KEY`                                   |
-| `(w17.field) = { fk: "t.c" }`               | `REFERENCES t(c)`                               |
+| `(w17.field) = { fk: "t.c" }`               | `REFERENCES t(c)` (delete action from `orphanable`) |
+| `(w17.field) = { fk, orphanable: true }`    | `ON DELETE SET NULL` (requires `null: true`)    |
+| `(w17.field) = { fk, orphanable: false }`   | `ON DELETE CASCADE`                             |
+| `(w17.field) = { fk }` (orphanable unset, NOT NULL) | inferred `ON DELETE CASCADE`            |
+| `(w17.field) = { fk, null: true }` (orphanable unset) | inferred `ON DELETE SET NULL`         |
 | `(w17.field) = { null: true }`              | drop `NOT NULL`; emit proto3 `optional`         |
 | `(w17.field) = { blank: false }` (default)  | `CHECK (col <> '')` on string types             |
 | `(w17.field) = { unique: true }`            | `CREATE UNIQUE INDEX` (single-column, data-level) |
 | `(w17.field) = { gt/gte/lt/lte/pattern }`   | `CHECK` constraint (merged from old `(w17.validate)`) |
+| `(w17.field) = { choices: "Path.To.Enum" }` | `CHECK (col IN ('VAL1', 'VAL2', …))` — enum value names |
 | `(w17.field) = { default_string: "x" }`     | column `DEFAULT 'x'`                            |
 | `(w17.field) = { default_int: N }`          | column `DEFAULT N`                              |
 | `(w17.field) = { default_double: X }`       | column `DEFAULT X`                              |
@@ -262,8 +292,13 @@ Mapping rules applied:
 | `(w17.field) = { default_auto: UUID_V7 }`   | `DEFAULT uuidv7()` (extension required; emitter flags if missing) |
 | `(w17.field) = { default_auto: TRUE/FALSE }`| `DEFAULT TRUE` / `DEFAULT FALSE`                |
 | `(w17.field) = { default_auto: EMPTY_JSON_* }` | `DEFAULT '[]'` / `DEFAULT '{}'`              |
+| `(w17.field) = { default_auto: IDENTITY }`  | `GENERATED BY DEFAULT AS IDENTITY` (PG / Oracle / DB2 / MSSQL); `AUTO_INCREMENT` (MySQL); `AUTOINCREMENT` (SQLite) |
 | `(w17.db.column) = { index: true }`         | `CREATE INDEX` (non-unique, single-column)      |
 | `(w17.db.column) = { name: "x" }`           | SQL column name override                        |
+| `(w17.pg.field) = { jsonb: true }`          | `JSONB` (overrides core type dispatch)          |
+| `(w17.pg.field) = { inet/tsvector/hstore }` | `INET` / `TSVECTOR` / `HSTORE` (ditto)          |
+| `(w17.pg.field) = { custom_type: "x" }`     | `x` verbatim (escape hatch); bypasses core type |
+| `(w17.pg.field) = { required_extensions: ["x"] }` | `CREATE EXTENSION IF NOT EXISTS "x"` prepended to migration (deduplicated) |
 | `indexes: [{ unique: true, fields }]`       | `CREATE UNIQUE INDEX`                           |
 | `indexes: [{ fields }]`                     | `CREATE INDEX`                                  |
 | `indexes: [{ fields, name: "x" }]`          | `CREATE INDEX x` (override auto-derived name)   |
@@ -310,17 +345,42 @@ type Column struct {
     Name       string       // SQL column name (proto field name 1:1 unless overridden via (w17.db.column).name)
     Carrier    ProtoCarrier // STRING | INT32 | INT64 | BOOL | DOUBLE | TIMESTAMP | DURATION
     SemType    SemanticType // UUID | CHAR | TEXT | EMAIL | URL | SLUG
-                            // | NUMBER | ID | COUNTER | MONEY | PERCENTAGE | RATIO
+                            // | NUMBER | ID | COUNTER | MONEY | PERCENTAGE | RATIO | DECIMAL
                             // | DATE | TIME | DATETIME | INTERVAL
                             // | (none — for bool carrier)
     MaxLen     int          // only for CHAR / SLUG
+    Precision  int          // only for DECIMAL (> 0)
+    Scale      int          // only for DECIMAL (0 <= Scale <= Precision)
     Null       bool         // default false → NOT NULL
     Blank      bool         // default false; string-only
     Unique     bool         // data-level uniqueness (w17.field.unique)
     StoreIndex bool         // storage-only index (w17.db.column.index); non-unique
     PK         bool
     Immutable  bool         // iteration-1: annotation only, not enforced
+    Choices    *EnumRef     // nil = no choices restriction; non-nil = enum value-name CHECK
     Default    Default      // tagged union, nil = no default; see below
+
+    // DialectSpecific carries per-dialect options the core IR doesn't model
+    // (e.g. (w17.pg.field).jsonb / custom_type / required_extensions). Each
+    // emitter reads only its own key; others pass through untouched. Keeps
+    // the IR dialect-agnostic — see D9.
+    DialectSpecific map[DialectKey]proto.Message
+}
+
+// Choices / enum resolution — proto enum reference captured after loader
+// resolution. Emitters render CHECK (col IN ('…', '…', …)) using Values.
+type EnumRef struct {
+    FQN    string
+    Values []string // enum value names, in declaration order
+}
+
+// ForeignKey gains the orphan-disposition field sourced from
+// (w17.field).orphanable (or inferred from Column.Null).
+type ForeignKey struct {
+    Column      string
+    RefTable    string
+    RefColumn   string
+    Orphanable  bool // true → ON DELETE SET NULL; false → ON DELETE CASCADE
 }
 
 // Default is a tagged union covering the oneof on (w17.field).
@@ -330,19 +390,13 @@ type Default interface{ defaultKind() }
 type DefaultString struct{ Value string }
 type DefaultInt    struct{ Value int64 }
 type DefaultDouble struct{ Value float64 }
-type DefaultAuto   struct{ Kind AutoDefaultKind } // NOW | UUID_V4 | UUID_V7 | EMPTY_JSON_ARRAY | EMPTY_JSON_OBJECT | TRUE | FALSE
+type DefaultAuto   struct{ Kind AutoDefaultKind } // NOW | UUID_V4 | UUID_V7 | EMPTY_JSON_ARRAY | EMPTY_JSON_OBJECT | TRUE | FALSE | IDENTITY
 
 type Index struct {
     Name    string   // stable, derived from table + fields unless overridden
     Fields  []string
     Unique  bool
     Include []string // Postgres INCLUDE (covering index); emitters that don't support it error on non-empty
-}
-
-type ForeignKey struct {
-    Column    string
-    RefTable  string
-    RefColumn string
 }
 
 // Check is a tagged union. Each variant carries the semantic intent, NOT a

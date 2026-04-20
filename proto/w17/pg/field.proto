@@ -1,0 +1,60 @@
+syntax = "proto3";
+
+package w17.pg;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/pg;pgpb";
+
+// (w17.pg.field) — Postgres-specific per-field options. Lives in its own
+// proto namespace so the core (w17.field) stays dialect-agnostic. The PG
+// emitter reads this extension; emitters for other dialects ignore it (or
+// error if non-empty flags are set — per-emitter call). See
+// docs/iteration-1.md D9 for the dialect-extension pattern.
+//
+// Usage:
+//   string payload = 5 [
+//     (w17.field)    = { type: TEXT },
+//     (w17.pg.field) = { jsonb: true }
+//   ];
+//
+//   // Escape hatch — pgvector column:
+//   string embedding = 6 [
+//     (w17.pg.field) = {
+//       custom_type: "vector(1536)"
+//       required_extensions: ["vector"]
+//     }
+//   ];
+extend google.protobuf.FieldOptions {
+  PgField field = 51003;
+}
+
+message PgField {
+  // --- Postgres-native semi-structured / text-search types ---
+  // Each flag replaces the SQL column type the core (w17.field).type would
+  // otherwise pick. Carrier of the proto field is typically `string`; the
+  // compiler does not re-encode the value.
+  bool jsonb    = 1;
+  bool inet     = 2;
+  bool tsvector = 3;
+  bool hstore   = 4;
+
+  // --- Escape hatch: raw SQL column type ---
+  // When non-empty, this string is used verbatim as the SQL column type and
+  // the emitter SKIPS the (w17.field).type dispatch for this column. Use for
+  // dialect extensions the vocabulary doesn't cover yet (pgvector, PostGIS
+  // geometry, custom DOMAINs). All other (w17.field) semantics — `null`,
+  // `unique`, bounds, CHECK constraints, defaults — still apply.
+  //
+  // Mandatory rule: no dialect is allowed to infer column type from
+  // `custom_type`. Every dialect namespace ships its own escape hatch.
+  string custom_type = 10;
+
+  // --- Extension prerequisites ---
+  // Postgres extensions that must exist for this column's type to resolve.
+  // The PG emitter prepends `CREATE EXTENSION IF NOT EXISTS "<name>"` to the
+  // migration up-script (deduplicated across columns). For iteration-1 this
+  // is a best-effort hint; the platform (future) will enforce it through a
+  // schema-level prerequisites manifest.
+  repeated string required_extensions = 11;
+}

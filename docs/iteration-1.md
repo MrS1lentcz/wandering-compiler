@@ -38,10 +38,12 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
 - **Semantic `type` enum (in `(w17.field)`):**
   - Strings: `CHAR`, `TEXT`, `UUID`, `EMAIL`, `URL`, `SLUG`.
   - Numbers: `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100), `RATIO` (0–1).
+  - Arbitrary-precision decimal: `DECIMAL` (carrier: `string` — lossless wire; requires `precision`, optional `scale`).
   - Temporal: `DATE`, `TIME`, `DATETIME` on Timestamp carrier; `INTERVAL` on Duration carrier.
 - **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not; with optional `name` override and `include` covering columns). No auto-generated fields — every DB column is a declared proto field.
-- **`(w17.field)` options (merged vocabulary):** `type` (required for every carrier except bool), `pk`, `fk`, `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), and a `default` oneof — see D7.
+- **`(w17.field)` options (merged vocabulary):** `type` (required for every carrier except bool), `pk`, `fk`, `orphanable` (FK survives parent delete — see D8), `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), `choices` (FQN of a proto enum — CHECK IN (…) — see D8), `precision` / `scale` (DECIMAL), and a `default` oneof — see D7.
 - **`(w17.db.column)` options (field-level storage overrides):** `index` (single-field non-unique storage index), `name` (SQL column-name override). Orthogonal to `(w17.field).unique`: `unique` is a data semantic, `index` is a pure optimisation.
+- **`(w17.pg.field)` options (Postgres dialect namespace — see D9):** `jsonb`, `inet`, `tsvector`, `hstore`, plus the `custom_type` + `required_extensions` escape hatch for dialect extensions the vocabulary doesn't cover yet (pgvector, PostGIS, custom DOMAINs).
 - **Output layer:** Postgres 14+ SQL via the PG dialect emitter. Tested against a real Postgres instance (SQLite acceptable for local dev loops only). The emitter sits behind a dialect interface — additional dialects (MySQL, SQLite-as-production, …) are additive, not disruptive.
 - **Intermediate representation:** own dialect-agnostic IR (`Schema` / `Table` / `Column` / `Check` as tagged union / `Index` / `ForeignKey`) + trivial differ (`nil → Schema` yields `AddTable` ops). See D4 and Stage 4 in `iteration-1-models.md`.
 - **Determinism:** same input always produces byte-identical output.
@@ -181,16 +183,20 @@ was dropped in M1 rev2 (see `docs/iteration-1-m1-rev.md`).
 | `int32` | one of `NUMBER, ID, COUNTER` — required |
 | `int64` | one of `NUMBER, ID, COUNTER` — required |
 | `double` | one of `NUMBER, MONEY, PERCENTAGE, RATIO` — required |
+| `string` (DECIMAL sub-case) | `DECIMAL` (requires `precision`; `scale` optional, default 0) |
 | `google.protobuf.Timestamp` | one of `DATE, TIME, DATETIME` — required |
 | `google.protobuf.Duration` | `INTERVAL` — unspecified permitted (infer) |
 
 Additional field-level rules enforced by the IR builder (M2):
 
 - `max_len` required iff `type ∈ {CHAR, SLUG}`; forbidden otherwise.
-- `min_len`, `pattern`, `blank` valid only for string carrier.
-- `gt`, `gte`, `lt`, `lte` valid only for numeric carrier.
+- `min_len`, `pattern`, `blank`, `choices` valid only for string carrier.
+- `gt`, `gte`, `lt`, `lte` valid only for numeric carrier (including DECIMAL — bounds are carried via double and are precision-limited by `double`'s range; acceptable for practical validation, not for arbitrary-scale decimals).
+- `precision` / `scale` valid only for `type: DECIMAL`; `precision > 0`, `0 <= scale <= precision`.
 - `pk` implies `unique` implicitly (no need to set both).
 - `fk` is `"<table>.<column>"`; same-file target required in iter-1.
+- `orphanable` valid only when `fk` is set. `orphanable: true` requires `null: true` (can't SET NULL a NOT NULL column).
+- `choices` is the FQN of a proto enum reachable from this file (cross-file permitted); the carrier must be `string` and `type` is typically `CHAR` (with `max_len` large enough for the longest enum value name) or `TEXT`.
 
 **Rationale.** Django-style: data refinement and basic validation in one
 annotation, human-readable. The separate `(w17.validate)` extension was
@@ -370,8 +376,9 @@ experiment (`docs/experiments/_parked/mandatory-mutation-contract.md`).
 |---|---|
 | `NOW` | Timestamp carrier (type = DATE / TIME / DATETIME) |
 | `UUID_V4`, `UUID_V7` | string carrier + type = UUID |
-| `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | string carrier + type = TEXT (CHAR permitted if `max_len` fits) |
+| `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | string carrier + type = TEXT (CHAR permitted if `max_len` fits); also valid on `(w17.pg.field).jsonb` columns |
 | `TRUE`, `FALSE` | bool carrier |
+| `IDENTITY` | int32 / int64 carrier + type = ID + pk = true (auto-increment PK) |
 
 Literal-branch carrier compatibility:
 
@@ -388,3 +395,119 @@ disabling the default entirely. Splitting `default` (data) from the
 parked mandatory-mutation-contract (behaviour) keeps each concern
 single-purpose and gives us a statically-audited, per-RPC opt-out for
 mutation-side-effects when we build that layer.
+
+`IDENTITY` lives in `AutoDefault` rather than as a new `Type` variant
+(`AUTO_ID`) because auto-increment *is* a default-value concern — the
+column type is plain `INTEGER` / `BIGINT`, what differs is who supplies
+the value at insert. Keeping it in the `default` channel avoids
+redundancy (no need to write `pk: true` AND `type: AUTO_ID` — the
+carrier + `type: ID` + `pk: true` + `default_auto: IDENTITY` combination
+reads top-down like every other default rule).
+
+### D8 — FK orphan behaviour + enumerated choices (added by M1 rev3, 2026-04-20)
+
+**Decision.** Two compact additions to `(w17.field)` that fill the most
+common Django-parity gaps without importing its full vocabulary.
+
+**`orphanable: optional bool`** — a *property* of the child row answering
+"can it outlive the parent it references?" Only meaningful when `fk` is
+set.
+
+- `true`  → yes. Parent delete leaves this row with FK column `SET NULL`. Requires `null: true`.
+- `false` → no. Parent delete `CASCADE`-removes this row.
+- unset → inferred from `null`: `null: true` → `true`; `null: false` → `false`.
+
+The richer Django vocabulary (`PROTECT`, `RESTRICT`, `SET_DEFAULT`,
+`DO_NOTHING`) is explicitly **not** in the schema. "Block a delete
+because the child would go stale" is an *application invariant*, not a
+data-contract property — it belongs in the platform's static-analysis /
+UI layer, where the operator sees the graph of impacted rows before they
+click "delete". Baking it into the schema forces every call site to
+negotiate with the DB's error behaviour instead of the product's rules.
+
+The field is named `orphanable` (not `on_delete`) on purpose: the
+vocabulary describes a *property* of the field, not a trigger-and-action
+pair. Reading `orphanable: true` says something about the row; the
+consequence follows from the property + nullability. Django's
+`on_delete=CASCADE` reads as an instruction tied to an event — we want
+the declarative phrasing.
+
+**`choices: string`** — fully-qualified name of a proto enum reachable
+from the authoring file (the loader's import graph). The IR builder
+resolves the path, reads the enum's value names, and emits
+`CHECK (col IN ('VAL1', 'VAL2', …))`. Carrier is `string`; the enum
+value *names* are stored, not their numeric tags (stable across renumbers,
+grep-friendly in DB backups). The enum itself is an ordinary proto
+declaration — no parallel vocabulary for choice values, no duplication.
+Cross-file enum references are permitted from day one (unlike `fk`,
+which is iter-1 same-file only — enums are pure data shape, no
+dependency cycle risk).
+
+**Rationale.**
+
+1. **Django parity where it's cheap.** `on_delete` (minus the cascade
+   family) and `choices` are the two most common Django model
+   declarations that rev2 couldn't express. Both admit a tight, property-
+   shaped form that avoids Django's coupling of trigger + action.
+2. **No new enum types for `orphanable`.** A bool + optional covers the
+   entire in-scope vocabulary. If future iterations need a third value
+   (e.g., `SET_DEFAULT`), a migration to a small enum is straightforward.
+3. **`choices` reuses proto enums, doesn't invent a parallel list.**
+   `choices: [string]` (Django-style inline list) would force developers
+   to restate values in schemas *and* in every consumer — the proto enum
+   is already the source of truth for the authoring surface. An IDE
+   plugin (future) then gets autocomplete and cross-references for free
+   because `choices` is just an enum path.
+
+### D9 — Dialect-specific extension namespace (added by M1 rev3, 2026-04-20)
+
+**Decision.** Each SQL dialect may ship its own proto namespace at
+`proto/w17/<dialect>/field.proto` with a `(w17.<dialect>.field)`
+extension on `FieldOptions`. The first such namespace is Postgres at
+`proto/w17/pg/field.proto` → `(w17.pg.field)`. Authors opt into
+dialect-specific features per field; the dialect's emitter reads its own
+namespace and ignores others (or errors when non-empty flags are set and
+the emitter can't honour them).
+
+**`(w17.pg.field)` ships with two layers:**
+
+1. **Curated PG-native flags** — `jsonb`, `inet`, `tsvector`, `hstore`.
+   Each flag replaces the SQL column type that the core
+   `(w17.field).type` would otherwise pick, while all other
+   `(w17.field)` semantics (`null`, `unique`, CHECK constraints,
+   defaults) still apply.
+2. **Escape hatch** — `custom_type: string` + `required_extensions:
+   [string]`. When `custom_type` is non-empty, the emitter uses that
+   string verbatim as the SQL column type and skips the semantic-type
+   dispatch. `required_extensions` are rendered as
+   `CREATE EXTENSION IF NOT EXISTS "<name>"` before `CREATE TABLE`
+   (deduplicated across columns). This is the primary path for pgvector,
+   PostGIS, custom DOMAINs, and anything the curated flags don't yet
+   cover.
+
+IR changes: `ir.Column` gains a `DialectSpecific
+map[DialectKey]proto.Message` — each emitter reads only its own key
+("pg", "mysql", …) and passes through everything else untouched. Keeps
+the core IR dialect-agnostic; dialect-specific emitters are the only
+ones that know about dialect-specific shapes.
+
+**Rationale.**
+
+1. **The escape hatch is mandatory** (CLAUDE.md non-negotiable #3).
+   `custom_type` is the field-level version of the doctrine — no generator
+   without a documented way to reach around it.
+2. **Namespacing per dialect keeps the core small.** Adding pgvector
+   support doesn't touch `(w17.field)`. Adding MySQL-specific types
+   doesn't touch the PG namespace. Each dialect's vocabulary grows
+   independently.
+3. **Curated flags first, escape hatch second.** `jsonb: true` is
+   preferable to `custom_type: "jsonb"` because the curated flag carries
+   semantic intent the compiler can use downstream (JSONB validators,
+   `default_auto: EMPTY_JSON_*` compatibility, future projections). The
+   escape hatch exists so users are never *blocked*, not so they reach
+   for it casually.
+4. **Forward-compat with custom extensions.** pgvector, PostGIS,
+   pg_trgm opclasses — each of these can start as `custom_type` + an
+   entry in `required_extensions`, then get promoted to a curated
+   `(w17.pg.vector)` / `(w17.pg.geometry)` extension of its own when a
+   real pilot makes the case.
