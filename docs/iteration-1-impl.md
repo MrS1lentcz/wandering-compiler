@@ -73,7 +73,8 @@ wandering-compiler/
 │           ├── loader/                  # domain-local — parse .proto via bufbuild/protocompile, decode w17 options
 │           │   └── loader.go            # single file (options.go folded in; reparse helper is 15 lines)
 │           ├── ir/                      # domain-local — validator + helpers over generated *irpb types (D4)
-│           │   └── build.go             # loader.LoadedFile → *irpb.Schema; all D2/D7/D8 invariants enforced here
+│           │   ├── build.go             # loader.LoadedFile → *irpb.Schema; all D2/D7/D8 invariants enforced here
+│           │   └── display.go           # carrier/sem/auto name helpers — strip proto enum prefixes for diagnostics
 │           ├── plan/                    # domain-local — differ (D4)
 │           │   └── diff.go              # Diff(prev, curr *irpb.Schema) *planpb.MigrationPlan
 │           ├── emit/                    # domain-local — per-dialect SQL emitters (D4)
@@ -316,7 +317,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 complete; **M2 rev2 pending** — spec shipped, implementation next.
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 complete; **M3 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -361,20 +362,25 @@ in code, not in docs:
   `ir/build_test.go` (happy path + 8 error-class fixtures under
   `ir/testdata/errors/`, each asserting `file:`, `why:`, `fix:` substrings).
 
-- **M2 rev2 (pending, 2026-04-21) — IR as proto, not Go structs.** D4
+- **M2 rev2 (shipped, 2026-04-21) — IR as proto, not Go structs.** D4
   revised (iteration-1.md) + tech-spec Strategic Decision #8 added.
-  Implementation steps: create `proto/domains/compiler/types/ir.proto`
-  (Schema/Table/Column/Index/ForeignKey/Check oneof / Default oneof /
-  SourceLocation; Carrier/SemType/FKAction/AutoKind as proto enums),
-  add to `Makefile schemagen`, delete
-  `srcgo/domains/compiler/ir/{schema,checks,types}.go`, rewrite
-  `ir.Build` to populate `*irpb.Schema` and store `SourceLocation`
-  messages (populated from `file.SourceLocations().ByDescriptor(fd)`)
-  instead of live `protoreflect.FieldDescriptor` handles. Rewrite
-  `build_test.go` to type-switch on generated `Check`/`Default` oneof
-  wrappers. `loader.LoadedFile` stays a Go struct (parse container holds
-  non-serializable descriptor handles; proto boundary starts at
-  `ir.Build`).
+  `proto/domains/compiler/types/ir.proto` now defines `Schema` / `Table` /
+  `Column` / `Index` / `ForeignKey` / `PgOptions` / `SourceLocation` plus
+  `Check` and `Default` oneof messages; `Carrier`, `SemType`, `FKAction`,
+  `AutoKind`, `RegexSource` are proto enums. `make schemagen` emits
+  `srcgo/pb/domains/compiler/types/ir.pb.go` (package `irpb`). The Go-
+  struct files (`schema.go`, `checks.go`, `types.go`) are gone; the IR
+  package is now `build.go` + a thin `display.go` with carrier/sem/auto
+  name helpers (proto's enum `String()` returns `SEM_CHAR` /
+  `CARRIER_STRING` / `AUTO_NOW` — trimmed to the authoring-surface form
+  for diagnostics). `ir.Build` returns `*irpb.Schema`, populates
+  `SourceLocation` via `file.SourceLocations().ByDescriptor(d)`, and
+  stores FK references by `proto_name` (not Go pointer) so the IR is
+  wire-safe. `loader.LoadedFile` stays a Go struct (parse container
+  holds non-serializable descriptor handles; proto boundary starts at
+  `ir.Build`). `build_test.go` type-switches on generated `Check` /
+  `Default` oneof wrappers (`ck.GetChoices()`, `def.GetAuto()`, …) — all
+  eight error-class fixtures + happy path still green.
 
-**Next:** M2 rev2 implementation, then M3 — plan (trivial differ:
-`nil → Schema` yields `AddTable` ops, also proto).
+**Next:** M3 — plan (trivial differ: `nil → Schema` yields `AddTable`
+ops, also proto at `proto/domains/compiler/types/plan.proto`).

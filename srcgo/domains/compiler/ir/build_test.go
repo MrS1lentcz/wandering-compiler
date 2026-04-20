@@ -10,6 +10,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/diag"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
+	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types"
 )
 
 const irProtoImportPath = "../../../../proto"
@@ -37,24 +38,24 @@ func TestBuildHappyPath(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	if got, want := len(schema.Tables), 2; got != want {
+	if got, want := len(schema.GetTables()), 2; got != want {
 		t.Fatalf("len(tables) = %d, want %d", got, want)
 	}
 
-	tables := map[string]*ir.Table{}
-	for _, tbl := range schema.Tables {
-		tables[tbl.Name] = tbl
+	tables := map[string]*irpb.Table{}
+	for _, tbl := range schema.GetTables() {
+		tables[tbl.GetName()] = tbl
 	}
 
 	customers := tables["customers"]
 	if customers == nil {
 		t.Fatal("customers table missing")
 	}
-	if got, want := len(customers.PrimaryKey), 1; got != want {
+	if got, want := len(customers.GetPrimaryKey()), 1; got != want {
 		t.Errorf("customers.PrimaryKey len = %d, want %d", got, want)
 	}
 	// email: unique -> one synthetic unique index
-	if !hasUniqueIdxOn(customers.Indexes, "email") {
+	if !hasUniqueIdxOn(customers.GetIndexes(), "email") {
 		t.Error("customers: synthesised UNIQUE INDEX on email missing")
 	}
 
@@ -62,93 +63,91 @@ func TestBuildHappyPath(t *testing.T) {
 	if orders == nil {
 		t.Fatal("orders table missing")
 	}
-	if got, want := len(orders.ForeignKeys), 1; got != want {
+	if got, want := len(orders.GetForeignKeys()), 1; got != want {
 		t.Fatalf("orders.ForeignKeys len = %d, want %d", got, want)
 	}
-	fk := orders.ForeignKeys[0]
-	if fk.Target.Table != "customers" || fk.Target.Column != "id" {
-		t.Errorf("fk target = %+v, want customers.id", fk.Target)
+	fk := orders.GetForeignKeys()[0]
+	if fk.GetTargetTable() != "customers" || fk.GetTargetColumn() != "id" {
+		t.Errorf("fk target = %s.%s, want customers.id", fk.GetTargetTable(), fk.GetTargetColumn())
 	}
-	if fk.OnDelete != ir.FKActionSetNull {
-		t.Errorf("fk.OnDelete = %s, want SET NULL (orphanable=true + null=true)", fk.OnDelete)
+	if fk.GetOnDelete() != irpb.FKAction_FK_ACTION_SET_NULL {
+		t.Errorf("fk.OnDelete = %s, want FK_ACTION_SET_NULL (orphanable=true + null=true)", fk.GetOnDelete())
 	}
 
 	// status: choices -> ChoicesCheck with non-zero enum values.
-	var status *ir.Column
-	for _, c := range orders.Columns {
-		if c.ProtoName == "status" {
+	var status *irpb.Column
+	for _, c := range orders.GetColumns() {
+		if c.GetProtoName() == "status" {
 			status = c
 		}
 	}
 	if status == nil {
 		t.Fatal("orders.status column missing")
 	}
-	var choices *ir.ChoicesCheck
-	for _, ck := range status.Checks {
-		if cc, ok := ck.(ir.ChoicesCheck); ok {
-			choices = &cc
+	var choices *irpb.ChoicesCheck
+	for _, ck := range status.GetChecks() {
+		if c := ck.GetChoices(); c != nil {
+			choices = c
 		}
 	}
 	if choices == nil {
 		t.Fatal("orders.status: ChoicesCheck not attached")
 	}
-	if got, want := choices.Values, []string{"PENDING", "PAID"}; !equalStrings(got, want) {
+	if got, want := choices.GetValues(), []string{"PENDING", "PAID"}; !equalStrings(got, want) {
 		t.Errorf("status.choices.Values = %v, want %v (UNSPECIFIED stripped)", got, want)
 	}
 
 	// total MONEY gte:0 -> one RangeCheck
-	var total *ir.Column
-	for _, c := range orders.Columns {
-		if c.ProtoName == "total" {
+	var total *irpb.Column
+	for _, c := range orders.GetColumns() {
+		if c.GetProtoName() == "total" {
 			total = c
 		}
 	}
 	if total == nil {
 		t.Fatal("orders.total missing")
 	}
-	if !hasRangeCheckGte(total.Checks, 0) {
+	if !hasRangeCheckGte(total.GetChecks(), 0) {
 		t.Error("orders.total: RangeCheck{Gte:0} not attached")
 	}
 
 	// created_at DATETIME + default_auto NOW
-	var createdAt *ir.Column
-	for _, c := range orders.Columns {
-		if c.ProtoName == "created_at" {
+	var createdAt *irpb.Column
+	for _, c := range orders.GetColumns() {
+		if c.GetProtoName() == "created_at" {
 			createdAt = c
 		}
 	}
 	if createdAt == nil {
 		t.Fatal("orders.created_at missing")
 	}
-	auto, ok := createdAt.Default.(ir.AutoDefault)
-	if !ok || auto.Kind != ir.AutoNow {
-		t.Errorf("orders.created_at.Default = %+v, want AutoDefault{NOW}", createdAt.Default)
+	def := createdAt.GetDefault()
+	if def == nil || def.GetAuto() != irpb.AutoKind_AUTO_NOW {
+		t.Errorf("orders.created_at.Default = %v, want AutoKind=AUTO_NOW", def)
 	}
-	if !createdAt.Immutable {
+	if !createdAt.GetImmutable() {
 		t.Error("orders.created_at.Immutable = false, want true")
 	}
 
 	// customer_id has (w17.db.column).index -> synthesised plain index
-	if !hasPlainIdxOn(orders.Indexes, "customer_id") {
+	if !hasPlainIdxOn(orders.GetIndexes(), "customer_id") {
 		t.Error("orders: synthesised storage index on customer_id missing")
 	}
 
-	// metadata: PgOptions.JSONB
-	var metadata *ir.Column
-	for _, c := range orders.Columns {
-		if c.ProtoName == "metadata" {
+	// metadata: PgOptions.Jsonb
+	var metadata *irpb.Column
+	for _, c := range orders.GetColumns() {
+		if c.GetProtoName() == "metadata" {
 			metadata = c
 		}
 	}
-	if metadata == nil || metadata.Pg == nil || !metadata.Pg.JSONB {
-		t.Errorf("orders.metadata.Pg.JSONB missing: %+v", metadata)
+	if metadata == nil || metadata.GetPg() == nil || !metadata.GetPg().GetJsonb() {
+		t.Errorf("orders.metadata.Pg.Jsonb missing: %+v", metadata)
 	}
 }
 
 // Error-class table: each entry names a fixture and the substrings we
-// expect to find in the joined error text. Checking substrings (not full
-// equality) because error order is stable per fixture but unicode hyphens
-// etc. can slip.
+// expect to find in the joined error text.
 func TestBuildErrors(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -269,9 +268,7 @@ func TestBuildErrors(t *testing.T) {
 
 			// Each surfaced error must be a *diag.Error so downstream
 			// tooling (LSP, kong output) can act on the structured form.
-			// errors.Join wraps multiple; verify at least one unwraps.
 			if _, ok := diag.AsDiag(err); !ok {
-				// errors.Join produces a []error via Unwrap; walk once.
 				if u, uok := err.(interface{ Unwrap() []error }); uok {
 					found := false
 					for _, e := range u.Unwrap() {
@@ -291,27 +288,27 @@ func TestBuildErrors(t *testing.T) {
 	}
 }
 
-func hasUniqueIdxOn(idx []*ir.Index, field string) bool {
+func hasUniqueIdxOn(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if i.Unique && len(i.Fields) == 1 && i.Fields[0] == field {
+		if i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0] == field {
 			return true
 		}
 	}
 	return false
 }
 
-func hasPlainIdxOn(idx []*ir.Index, field string) bool {
+func hasPlainIdxOn(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if !i.Unique && len(i.Fields) == 1 && i.Fields[0] == field {
+		if !i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0] == field {
 			return true
 		}
 	}
 	return false
 }
 
-func hasRangeCheckGte(checks []ir.Check, v float64) bool {
+func hasRangeCheckGte(checks []*irpb.Check, v float64) bool {
 	for _, c := range checks {
-		if rc, ok := c.(ir.RangeCheck); ok && rc.Gte != nil && *rc.Gte == v {
+		if rc := c.GetRange(); rc != nil && rc.Gte != nil && *rc.Gte == v {
 			return true
 		}
 	}

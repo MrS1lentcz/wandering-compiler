@@ -1,0 +1,226 @@
+syntax = "proto3";
+
+package w17.compiler.ir;
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types;irpb";
+
+// Compiler-internal IR. Produced by srcgo/domains/compiler/ir.Build, consumed
+// by the differ (plan), SQL emitters, and later sibling tools (back-compat
+// lint, changelog, visual editor). Private shape — not part of the user-
+// facing w17 vocabulary, lives under proto/domains/compiler/types/ per
+// tech-spec strategic decision #8 (proto, not Go structs) and
+// iteration-1.md D4 rev 2026-04-21.
+//
+// SourceLocation replaces live protoreflect.FieldDescriptor handles that
+// the first cut of this IR stored as Go fields; descriptors aren't
+// serializable and the IR must cross processes/languages.
+
+// Schema is a validated authoring input ready for the differ and emitters.
+message Schema {
+  repeated Table tables = 1;
+}
+
+// SourceLocation anchors an IR node to its originating position in the
+// source .proto. Populated from
+// protoreflect.FileDescriptor.SourceLocations().ByDescriptor(d) at build
+// time. Line / col are 1-based, 0 means "unknown" (source info missing).
+message SourceLocation {
+  string file = 1;
+  int32 line = 2;
+  int32 col  = 3;
+}
+
+message Table {
+  string name = 1;                     // SQL table name
+  string message_fqn = 2;              // FQN of the source proto message
+  SourceLocation location = 3;
+  repeated Column columns = 4;
+  repeated Index indexes = 5;
+  repeated ForeignKey foreign_keys = 6;
+  // proto_name of each PK column, in declaration order. Derived view over
+  // Columns with pk=true, kept explicit so consumers don't re-walk the list.
+  repeated string primary_key = 7;
+}
+
+message Column {
+  string name = 1;        // SQL column name (after (w17.db.column).name override)
+  string proto_name = 2;  // original proto field name (for indexes / FK refs)
+  SourceLocation location = 3;
+
+  Carrier carrier = 10;
+  SemType type = 11;
+  bool nullable = 12;
+  bool pk = 13;
+  bool unique = 14;        // data-level (UNIQUE INDEX)
+  bool immutable = 15;     // recorded for future iterations; not emitted in iter-1
+  // Sugar for a single-col entry in Table.indexes. Does NOT imply unique.
+  bool storage_index = 16;
+
+  // Size-driving fields. Retained on Column (not folded into LengthCheck)
+  // because emitters pick the column DDL type from these before any CHECK.
+  int32 max_len = 20;
+  int32 precision = 21;
+  optional int32 scale = 22;
+
+  // Default value at INSERT. Unset = no default.
+  Default default = 30;
+  // Postgres dialect passthrough (jsonb / inet / tsvector / hstore / escape).
+  PgOptions pg = 31;
+
+  repeated Check checks = 40;
+}
+
+// PgOptions mirrors (w17.pg.field). Interpretation is the PG emitter's job.
+message PgOptions {
+  bool jsonb = 1;
+  bool inet = 2;
+  bool tsvector = 3;
+  bool hstore = 4;
+  string custom_type = 10;
+  repeated string required_extensions = 11;
+}
+
+message Index {
+  string name = 1;              // auto-derived by the naming package when empty
+  repeated string fields = 2;
+  bool unique = 3;
+  repeated string include = 4;  // Postgres INCLUDE — covering-index columns
+}
+
+// ForeignKey references its owning column by proto_name (not by pointer, so
+// the IR is wire-safe). Emitters resolve the column within the table.
+message ForeignKey {
+  string column = 1;
+  string target_table = 2;
+  string target_column = 3;
+  FKAction on_delete = 4;
+}
+
+// Default is the tagged union over the (w17.field).default oneof.
+message Default {
+  oneof variant {
+    AutoKind auto           = 1;
+    string   literal_string = 2;
+    int64    literal_int    = 3;
+    double   literal_double = 4;
+  }
+}
+
+// Check is a column-level CHECK constraint. Variants cover the validation
+// surface from (w17.field) minus the facts that resolve into column
+// type/modifiers (pk, null, unique, max_len on CHAR/SLUG, precision/scale
+// on DECIMAL).
+message Check {
+  oneof variant {
+    LengthCheck  length  = 1;
+    BlankCheck   blank   = 2;
+    RangeCheck   range   = 3;
+    RegexCheck   regex   = 4;
+    ChoicesCheck choices = 5;
+  }
+}
+
+// LengthCheck — char_length bounds on string carriers whose column type
+// doesn't already enforce them. For CHAR/SLUG, VARCHAR(N) sizing covers the
+// upper bound and no LengthCheck is added for the max. min always renders
+// as a CHECK when set.
+message LengthCheck {
+  optional int32 min = 1;
+  optional int32 max = 2;
+}
+
+// BlankCheck — the implicit `col <> ''` on string carriers. Absent when the
+// author opted into (w17.field).blank = true, or when the column is nullable.
+message BlankCheck {}
+
+// RangeCheck — numeric bounds. Optional to distinguish 0 from unset.
+message RangeCheck {
+  optional double gt  = 1;
+  optional double gte = 2;
+  optional double lt  = 3;
+  optional double lte = 4;
+}
+
+// RegexCheck — author-supplied pattern OR the default pattern implied by
+// type (SLUG, UUID, EMAIL, URL).
+message RegexCheck {
+  string pattern = 1;
+  RegexSource source = 2;
+}
+
+// ChoicesCheck — resolved proto enum values for (w17.field).choices.
+message ChoicesCheck {
+  string enum_fqn = 1;
+  repeated string values = 2;
+}
+
+// Carrier is the proto wire-type underneath a field.
+enum Carrier {
+  CARRIER_UNSPECIFIED = 0;
+  CARRIER_BOOL = 1;
+  CARRIER_STRING = 2;
+  CARRIER_INT32 = 3;
+  CARRIER_INT64 = 4;
+  CARRIER_DOUBLE = 5;
+  CARRIER_TIMESTAMP = 6;
+  CARRIER_DURATION = 7;
+}
+
+// SemType is the semantic refinement of a Carrier.
+enum SemType {
+  SEM_UNSPECIFIED = 0;
+
+  // String carriers.
+  SEM_CHAR = 1;
+  SEM_TEXT = 2;
+  SEM_UUID = 3;
+  SEM_EMAIL = 4;
+  SEM_URL = 5;
+  SEM_SLUG = 6;
+
+  // Numeric carriers.
+  SEM_NUMBER = 10;
+  SEM_ID = 11;
+  SEM_COUNTER = 12;
+  SEM_MONEY = 13;
+  SEM_PERCENTAGE = 14;
+  SEM_RATIO = 15;
+
+  // Arbitrary-precision decimal (carrier: string).
+  SEM_DECIMAL = 16;
+
+  // Temporal.
+  SEM_DATE = 20;
+  SEM_TIME = 21;
+  SEM_DATETIME = 22;
+  SEM_INTERVAL = 30;
+}
+
+// FKAction — resolved ON DELETE behaviour derived from orphanable + null.
+enum FKAction {
+  FK_ACTION_UNSPECIFIED = 0;
+  FK_ACTION_CASCADE = 1;
+  FK_ACTION_SET_NULL = 2;
+}
+
+// AutoKind — the non-literal branches of (w17.field).default.
+enum AutoKind {
+  AUTO_UNSPECIFIED = 0;
+  AUTO_NOW = 1;
+  AUTO_UUID_V4 = 10;
+  AUTO_UUID_V7 = 11;
+  AUTO_EMPTY_JSON_ARRAY  = 20;
+  AUTO_EMPTY_JSON_OBJECT = 21;
+  AUTO_TRUE = 30;
+  AUTO_FALSE = 31;
+  AUTO_IDENTITY = 40;
+}
+
+// RegexSource — whether a RegexCheck came from the author's `pattern` or was
+// derived from the semantic type (SLUG/UUID/EMAIL/URL). Emitters treat both
+// identically; kept for --verbose labeling.
+enum RegexSource {
+  REGEX_SOURCE_UNSPECIFIED = 0;
+  REGEX_FROM_TYPE = 1;
+  REGEX_FROM_PATTERN = 2;
+}
