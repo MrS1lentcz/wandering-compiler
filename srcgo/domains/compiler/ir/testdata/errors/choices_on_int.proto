@@ -1,0 +1,17 @@
+syntax = "proto3";
+package irtest;
+import "w17/db.proto";
+import "w17/field.proto";
+
+enum Color {
+  COLOR_UNSPECIFIED = 0;
+  RED               = 1;
+  BLUE              = 2;
+}
+
+message Thing {
+  option (w17.db.table) = { name: "things" };
+  int64 id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // choices forbidden on integer carrier
+  int64 color = 2 [(w17.field) = { type: NUMBER, choices: "irtest.Color" }];
+}

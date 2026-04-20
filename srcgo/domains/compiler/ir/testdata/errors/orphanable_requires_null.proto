@@ -1,0 +1,16 @@
+syntax = "proto3";
+package irtest;
+import "w17/db.proto";
+import "w17/field.proto";
+
+message Parent {
+  option (w17.db.table) = { name: "parents" };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}
+
+message Child {
+  option (w17.db.table) = { name: "children" };
+  int64 id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // orphanable=true but null unset (defaults to false) -> SET NULL on NOT NULL
+  int64 parent_id = 2 [(w17.field) = { type: ID, fk: "parents.id", orphanable: true }];
+}

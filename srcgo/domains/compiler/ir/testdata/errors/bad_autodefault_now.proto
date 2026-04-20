@@ -1,0 +1,11 @@
+syntax = "proto3";
+package irtest;
+import "w17/db.proto";
+import "w17/field.proto";
+
+message Thing {
+  option (w17.db.table) = { name: "things" };
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // NOW requires Timestamp carrier; string+CHAR is a type mismatch.
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 40, default_auto: NOW }];
+}

@@ -313,7 +313,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-20).** Skeleton + M1 + M1 rev2 + M1 rev3 complete.
+**Status (2026-04-20).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 complete.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -347,4 +347,15 @@ in code, not in docs:
   `proto/w17/field.proto` → `w17` / `w17pb`; `proto/w17/pg/field.proto` →
   `w17.pg` / `pgpb` (subdir). Each new dialect namespace is a new subdir.
 
-**Next:** M2 — loader + IR builder.
+- M2 lands `srcgo/domains/compiler/loader` (single-file `loader.go` —
+  `options.go` folded in; the typed-options helper is 15 lines),
+  `srcgo/domains/compiler/ir` (`types.go`, `schema.go`, `checks.go`,
+  `build.go`), plus a new `srcgo/domains/compiler/diag` package carrying
+  the shared user-facing `*diag.Error` type (file:line:col + `why:` + `fix:`
+  — see feedback memory). `ir.Build` enforces every D2 / D7 / D8 / D9
+  invariant and aggregates errors via `errors.Join` so one run surfaces
+  every problem. Tests: `loader/loader_test.go` (happy-path shape),
+  `ir/build_test.go` (happy path + 8 error-class fixtures under
+  `ir/testdata/errors/`, each asserting `file:`, `why:`, `fix:` substrings).
+
+**Next:** M3 — plan (trivial differ: `nil → Schema` yields `AddTable` ops).

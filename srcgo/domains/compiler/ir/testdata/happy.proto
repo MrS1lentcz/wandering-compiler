@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package irtest;
+
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+import "w17/pg/field.proto";
+
+// Happy-path fixture: broad enough to exercise carrier×type, defaults,
+// checks, indexes, FK, pg passthrough. Narrow enough to stay readable.
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  PENDING                  = 1;
+  PAID                     = 2;
+}
+
+message Customer {
+  option (w17.db.table) = { name: "customers" };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name  = 2 [(w17.field) = { type: CHAR, max_len: 120 }];
+  string email = 3 [(w17.field) = { type: EMAIL, max_len: 255, unique: true }];
+}
+
+message Order {
+  option (w17.db.table) = {
+    name: "orders",
+    indexes: [
+      { fields: ["customer_id", "status"] }
+    ]
+  };
+
+  int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  customer_id = 2 [
+    (w17.field)     = { type: ID, fk: "customers.id", null: true, orphanable: true },
+    (w17.db.column) = { index: true }
+  ];
+  string status      = 3 [(w17.field) = { type: CHAR, max_len: 16, choices: "irtest.OrderStatus" }];
+  double total       = 4 [(w17.field) = { type: MONEY, gte: 0 }];
+  string notes       = 5 [(w17.field) = { type: TEXT, blank: true, max_len: 4000 }];
+  google.protobuf.Timestamp created_at = 6 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+  string metadata    = 7 [
+    (w17.field)    = { type: TEXT, blank: true },
+    (w17.pg.field) = { jsonb: true }
+  ];
+}
