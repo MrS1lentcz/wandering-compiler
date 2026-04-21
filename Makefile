@@ -20,4 +20,24 @@ test:
 	cd srcgo && go test ./...
 
 test-apply:
-	@echo "TODO: apply out/migrations/*.up.sql then *.down.sql against ephemeral postgres:16-alpine"
+	@set -eu; \
+	command -v docker >/dev/null 2>&1 || { echo "test-apply: docker not found"; exit 1; }; \
+	echo "test-apply: starting ephemeral postgres:18-alpine"; \
+	CID=$$(docker run --rm -d -e POSTGRES_PASSWORD=test postgres:18-alpine); \
+	trap "docker kill $$CID >/dev/null 2>&1 || true" EXIT; \
+	for i in $$(seq 1 60); do \
+		docker exec $$CID pg_isready -U postgres -q 2>/dev/null && break; \
+		sleep 1; \
+	done; \
+	docker exec $$CID pg_isready -U postgres -q >/dev/null || { echo "test-apply: postgres never became ready"; exit 1; }; \
+	for dir in srcgo/domains/compiler/testdata/*/; do \
+		name=$$(basename $$dir); \
+		db=test_$$name; \
+		echo "--- $$name ---"; \
+		docker exec $$CID psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $$db;" >/dev/null; \
+		for phase in up down up; do \
+			echo "  $$phase"; \
+			docker exec -i $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 < $${dir}expected.$${phase}.sql >/dev/null; \
+		done; \
+	done; \
+	echo "test-apply: all fixtures applied and rolled back cleanly"

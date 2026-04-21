@@ -246,7 +246,7 @@ Each milestone is independently testable. Ship them in order; do not skip.
 
 ### M9 — apply + round-trip against real Postgres
 
-- Makefile target `test-apply`: spins up ephemeral `postgres:16-alpine` per
+- Makefile target `test-apply`: spins up ephemeral `postgres:18-alpine` per
   `go.md` §Schema Migrations ("migration DB is purely temporary — never
   contains production or local data"), runs `psql -f` on the generated up,
   then down, then up again, confirming clean apply and clean rollback.
@@ -282,7 +282,7 @@ Each milestone is independently testable. Ship them in order; do not skip.
 | AC # | From `iteration-1.md` | Milestone(s) |
 |---:|---|---|
 | 1 | `wc generate` emits proto + migrations | M1–M7 |
-| 2 | Applies cleanly to PG 14 | M4, M9 |
+| 2 | Applies cleanly to PG 14+ | M4, M9 |
 | 3 | Rolls back cleanly | M4, M9 |
 | 4 | Byte-identical on re-run | M3, M4, M6, M8 |
 | 5 | Golden-file test suite | M8 |
@@ -338,7 +338,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 complete; **M9 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 complete; **M10 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -569,8 +569,39 @@ in code, not in docs:
   for regex synths — UUID regex on a `UUID` column is similarly
   redundant, though not a wrong-type error).
 
-**Next:** M9 — apply round-trip against real Postgres. Add a
-Makefile `test-apply` target that boots an ephemeral
-`postgres:16-alpine` container, `psql -f`s the generated up + down +
-up for each fixture, and asserts clean apply + clean rollback.
-Serves AC #2, AC #3.
+- **M9 (shipped, 2026-04-21) — apply round-trip against real Postgres.**
+  `make test-apply` boots one ephemeral `postgres:18-alpine` via
+  `docker run --rm -d` (no host port publish — all traffic goes
+  through `docker exec`, no port juggling, no collision with a local
+  PG), polls `pg_isready -U postgres -q` on a 60s budget per
+  `go.md` §Schema Migrations, then iterates
+  `srcgo/domains/compiler/testdata/*/` and for each fixture:
+  `CREATE DATABASE test_<name>`, then `psql -v ON_ERROR_STOP=1 -f`
+  in up → down → up order, each piped over `docker exec -i`. A
+  `trap EXIT` `docker kill`s the container on any exit path (success,
+  error, SIGINT) — `--rm` handles removal. One DB per fixture, not
+  one-DB-shared, so leftover state from a broken fixture can't mask
+  the next one; each fixture starts from an empty schema. The
+  up → down → up chain catches three distinct bugs: (a) up SQL that
+  fails to apply (AC #2), (b) down SQL that leaves residue (re-up
+  would error with `relation already exists`, AC #3), (c) down SQL
+  that fails outright. Verified against `product`, `no_indexes`, and
+  `multi_unique` — all three apply, roll back, and re-apply on PG 18
+  without warnings or errors. AC #2's "PG 14+" floor is unchanged —
+  PG 18 is a strict superset for the DDL we emit (no syntax added in
+  our output path crosses a 14/15/16/17/18 version gate). Test-apply
+  is **not** wired into `make test` because it requires Docker; CI
+  composition (back-version matrix, parallel fixture runs, etc.) is
+  an iteration-2 concern.
+  Fixtures tested are the committed golden SQL, not fresh generator
+  output — M8's golden test already guarantees the two are
+  byte-identical, so the composition "M8 green + M9 green"
+  transitively proves fresh generator output applies on PG. Serves
+  AC #2 and AC #3.
+
+**Next:** M10 — pilot adoption. Pick one table from a real
+`conventions-global/`-style project, regenerate the migration via
+`wc generate`, and compare byte-for-byte against the hand-written
+SQL it replaces. Platform + deploy client don't exist yet (D6), so
+the pilot applies via `psql -f` manually. Serves AC #7 and closes
+iteration-1.

@@ -450,7 +450,7 @@ func (SessionStatus) Annotations() []schema.Annotation {
 
 **`make makemigrations` flow:**
 
-1. Starts an ephemeral `postgres:16-alpine` container with a random host port (auto-assigned via `-P`)
+1. Starts an ephemeral `postgres:18-alpine` container with a random host port (auto-assigned via `-P`)
 2. Waits for Postgres to become ready (bounded 60s timeout)
 3. Runs `go run ./domains/forge/cmd/cli migrate diff` — computes the SQL diff between the current DB state and the desired `ent` schema
 4. Removes the container
