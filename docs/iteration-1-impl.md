@@ -334,7 +334,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 complete; **M6 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 complete; **M7 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -463,12 +463,26 @@ in code, not in docs:
   and produces no partial SQL, and that `emit.Emit` wraps the stub error
   with the dialect name (no silent swallowing).
 
-**Next:** M6 — naming + writer (timestamp-based per D5 rev2).
-`naming.Name(at time.Time)` returns compact UTC ISO-8601
-(`20260421T143015Z`); no sequence, no slug, no op dispatch — D5 rev2
-drops all of that because D6 puts review in the UI and gitignored
-`out/` can't hold a cross-machine sequence counter.
-`writer.Write(dir, basename, up, down)` `os.MkdirAll`s the dir and
-writes the two `.sql` files, returning absolute paths for CLI
-diagnostics. Serves AC #5 (unique, sortable file names) + AC #4
-(byte-identical SQL content).
+- **M6 (shipped, 2026-04-21) — naming + writer.**
+  `srcgo/domains/compiler/naming/name.go` is a two-function package:
+  `Name(at time.Time) string` → compact UTC ISO-8601
+  (`20260421T143015Z`) via `time.Format` on a fixed layout. Per D5
+  rev2 there is no op dispatch, no slug, no sequence state — review
+  happens in the platform UI (D6) and timestamps sidestep the
+  cross-machine sequence drift that gitignored `out/` would otherwise
+  cause. Tests pin the exact format, exercise a non-UTC input to prove
+  the UTC normalisation, and regex-guard the fixed-width shape.
+  `srcgo/domains/compiler/writer/writer.go` exposes
+  `Write(dir, basename, up, down) (upPath, downPath, err)`: `os.MkdirAll`
+  the dir (creates missing parents), write the two `.sql` files at
+  0644, return absolute paths for CLI diagnostics. Guards reject empty
+  basenames, path-traversal attempts (`/`, `..`), and empty SQL bodies.
+  Tests cover happy path + TempDir layout, auto-create of missing
+  parent chain, overwrite idempotency, traversal rejections, empty-body
+  rejection, and AC #4 determinism across two writes.
+
+**Next:** M7 — CLI + Application. `application.go` minimal interface
+(output-dir getter), `application/` facade + `New()` + one
+`module_output.go`, `cmd/cli/main.go` kong root, `cmd_generate.go`
+wiring `loader → ir.Build → plan.Diff → emit → naming → writer` behind
+`wc generate --iteration-1 <proto>… [--out ./out]`. Binary `wc`.
