@@ -182,6 +182,9 @@ enum Carrier {
   CARRIER_DOUBLE = 5;
   CARRIER_TIMESTAMP = 6;
   CARRIER_DURATION = 7;
+  // Raw binary blob. Proto `bytes` carrier → PG BYTEA / MySQL BLOB /
+  // SQLite BLOB. Like bool, carries no semantic subtype.
+  CARRIER_BYTES = 8;
 }
 
 // SemType is the semantic refinement of a Carrier.
@@ -214,11 +217,16 @@ enum SemType {
   SEM_INTERVAL = 30;
 }
 
-// FKAction — resolved ON DELETE behaviour derived from orphanable + null.
+// FKAction — resolved ON DELETE behaviour. Populated from
+// (w17.db.column).deletion_rule with inference from (w17.field).null
+// when the rule is unspecified. Emitters map to the dialect-native
+// clause (PG: CASCADE / SET NULL / RESTRICT / SET DEFAULT).
 enum FKAction {
   FK_ACTION_UNSPECIFIED = 0;
   FK_ACTION_CASCADE = 1;
   FK_ACTION_SET_NULL = 2;
+  FK_ACTION_RESTRICT = 3;      // DeletionRule.BLOCK — parent delete refused
+  FK_ACTION_SET_DEFAULT = 4;   // DeletionRule.RESET  — child FK reverts to default_*
 }
 
 // AutoKind — the non-literal branches of (w17.field).default.

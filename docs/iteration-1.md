@@ -34,15 +34,15 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
 
 ## In scope
 
-- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `google.protobuf.Timestamp`, `google.protobuf.Duration`.
+- **Proto carriers:** `string`, `int32`, `int64`, `bool`, `double`, `bytes`, `google.protobuf.Timestamp`, `google.protobuf.Duration`.
 - **Semantic `type` enum (in `(w17.field)`):**
   - Strings: `CHAR`, `TEXT`, `UUID`, `EMAIL`, `URL`, `SLUG`.
   - Numbers: `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100), `RATIO` (0–1).
   - Arbitrary-precision decimal: `DECIMAL` (carrier: `string` — lossless wire; requires `precision`, optional `scale`).
   - Temporal: `DATE`, `TIME`, `DATETIME` on Timestamp carrier; `INTERVAL` on Duration carrier.
 - **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not; with optional `name` override and `include` covering columns), `raw_checks` + `raw_indexes` (escape hatches — see D11). No auto-generated fields — every DB column is a declared proto field.
-- **`(w17.field)` options (merged vocabulary):** `type` (required for every carrier except bool), `pk`, `fk`, `orphanable` (FK survives parent delete — see D8), `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), `choices` (FQN of a proto enum — CHECK IN (…) — see D8), `precision` / `scale` (DECIMAL), and a `default` oneof — see D7.
-- **`(w17.db.column)` options (field-level storage overrides):** `index` (single-field non-unique storage index), `name` (SQL column-name override). Orthogonal to `(w17.field).unique`: `unique` is a data semantic, `index` is a pure optimisation.
+- **`(w17.field)` options (data semantics):** `type` (required for every carrier except bool / bytes), `pk`, `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), `choices` (FQN of a proto enum — CHECK IN (…) — see D8), `precision` / `scale` (DECIMAL), and a `default` oneof — see D7.
+- **`(w17.db.column)` options (DB-level rules):** `index` (single-field non-unique storage index), `name` (SQL column-name override), `fk` (foreign key `"<table>.<column>"` — same-file only in iter-1), `deletion_rule` (ON DELETE behaviour — CASCADE / ORPHAN / BLOCK / RESET — see D12). `fk` + `deletion_rule` live here (not on `(w17.field)`) because foreign keys and their deletion semantics are DB-engine rules, same category as indexes and CHECK constraints. `(w17.field).unique` stays a data semantic (author declares "this field uniquely identifies the row"), orthogonal to the pure-optimisation `index` flag.
 - **`(w17.pg.field)` options (Postgres dialect namespace — see D9):** `jsonb`, `inet`, `tsvector`, `hstore`, plus the `custom_type` + `required_extensions` escape hatch for dialect extensions the vocabulary doesn't cover yet (pgvector, PostGIS, custom DOMAINs).
 - **Output layer:** Postgres 14+ SQL via the PG dialect emitter. Tested against a real Postgres instance (SQLite acceptable for local dev loops only). The emitter sits behind a dialect interface — additional dialects (MySQL, SQLite-as-production, …) are additive, not disruptive.
 - **Intermediate representation:** own dialect-agnostic IR (`Schema` / `Table` / `Column` / `Check` as tagged union / `Index` / `ForeignKey`) + trivial differ (`nil → Schema` yields `AddTable` ops). See D4 and Stage 4 in `iteration-1-models.md`.
@@ -527,33 +527,36 @@ redundancy (no need to write `pk: true` AND `type: AUTO_ID` — the
 carrier + `type: ID` + `pk: true` + `default_auto: IDENTITY` combination
 reads top-down like every other default rule).
 
-### D8 — FK orphan behaviour + enumerated choices (added by M1 rev3, 2026-04-20)
+### D8 — FK orphan behaviour + enumerated choices (added by M1 rev3, 2026-04-20; superseded by D12 rev 2026-04-21 for the FK axis)
 
-**Decision.** Two compact additions to `(w17.field)` that fill the most
-common Django-parity gaps without importing its full vocabulary.
+**Decision.** Two compact additions to the authoring vocabulary that
+fill the most common Django-parity gaps without importing its full
+surface. The FK-behaviour half (`orphanable`) was replaced by D12's
+richer `deletion_rule` enum on 2026-04-21 — the section below keeps
+the original rationale for history, and the `choices` half stays
+unchanged.
 
-**`orphanable: optional bool`** — a *property* of the child row answering
-"can it outlive the parent it references?" Only meaningful when `fk` is
-set.
+**(Historical, superseded.) `orphanable: optional bool`** — a
+*property* of the child row answering "can it outlive the parent it
+references?" Only meaningful when `fk` is set.
 
 - `true`  → yes. Parent delete leaves this row with FK column `SET NULL`. Requires `null: true`.
 - `false` → no. Parent delete `CASCADE`-removes this row.
 - unset → inferred from `null`: `null: true` → `true`; `null: false` → `false`.
 
-The richer Django vocabulary (`PROTECT`, `RESTRICT`, `SET_DEFAULT`,
-`DO_NOTHING`) is explicitly **not** in the schema. "Block a delete
-because the child would go stale" is an *application invariant*, not a
-data-contract property — it belongs in the platform's static-analysis /
-UI layer, where the operator sees the graph of impacted rows before they
-click "delete". Baking it into the schema forces every call site to
-negotiate with the DB's error behaviour instead of the product's rules.
+In M1 rev3 the richer Django vocabulary (`PROTECT`, `RESTRICT`,
+`SET_DEFAULT`, `DO_NOTHING`) was explicitly parked as an application
+invariant, not a data-contract property. **D12 reversed that call**
+after the Django-parity audit showed real schemas that legitimately
+need DB-level `RESTRICT` — e.g., "cannot delete Customer while Invoice
+rows reference it, regardless of application code path". D12's
+`deletion_rule` enum supersedes `orphanable` entirely (skeleton
+stage, no back-compat).
 
-The field is named `orphanable` (not `on_delete`) on purpose: the
-vocabulary describes a *property* of the field, not a trigger-and-action
-pair. Reading `orphanable: true` says something about the row; the
-consequence follows from the property + nullability. Django's
-`on_delete=CASCADE` reads as an instruction tied to an event — we want
-the declarative phrasing.
+The `orphanable` naming discipline (noun-shape, not
+hook-shape) carries over: `deletion_rule: CASCADE / ORPHAN / BLOCK /
+RESET` — same anti-`on_*` framing, now extended to the full DB-level
+palette.
 
 **`choices: string`** — fully-qualified name of a proto enum reachable
 from the authoring file (the loader's import graph). The IR builder
@@ -749,6 +752,87 @@ indexes have no equivalent surface yet. Iter-1 users annotate one
 of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
+
+### D12 — FK relocation + deletion_rule enum (added 2026-04-21, supersedes D8's `orphanable` half)
+
+**Decision.** Two changes to the FK vocabulary:
+
+1. **`fk` moves from `(w17.field)` to `(w17.db.column)`.** A foreign
+   key is a *DB-engine rule* in the same family as indexes, CHECK
+   constraints, and `(w17.db.column).index` — not a general "what
+   shape is this field" semantic. `(w17.field)` shrinks to pure data
+   shape (type, null, blank, validators, default, max_len/min_len,
+   precision/scale, choices, unique, pk, immutable); `(w17.db.column)`
+   carries the DB-rule knobs (`name`, `index`, `fk`, `deletion_rule`).
+   The resulting authoring surface reads as two coherent layers
+   instead of one kitchen-sink option message.
+
+2. **`orphanable: optional bool` is replaced by `deletion_rule: enum`
+   on `(w17.db.column)`.** The Django-parity audit in the iter-1
+   polish cycle surfaced real schemas that need DB-level RESTRICT
+   (`BLOCK`) and SET DEFAULT (`RESET`); `orphanable`'s CASCADE/SET NULL
+   binary was too narrow. The enum values stay in the noun-shape,
+   non-hook idiom D8 established:
+
+   ```
+   enum DeletionRule {
+     DELETION_RULE_UNSPECIFIED = 0;  // inferred: null:true → ORPHAN, else CASCADE
+     CASCADE = 1;  // child deleted with parent
+     ORPHAN  = 2;  // child's FK becomes NULL (requires null: true) — renamed SET NULL
+     BLOCK   = 3;  // parent delete refused (SQL: RESTRICT)
+     RESET   = 4;  // child's FK becomes its declared default (SQL: SET DEFAULT; requires default_*)
+   }
+   ```
+
+   `ORPHAN` preserves the `orphanable` idiom (a property of the child
+   row — "does it get orphaned?") now as an enum variant. `BLOCK` and
+   `RESET` are verbs of the rule itself, never of an event-handler.
+   Under no circumstance does the vocabulary grow an `on_*` prefix.
+
+**Rationale.**
+
+1. **The 2026-04-21 Django-parity audit invalidated D8's "PROTECT is
+   app-level" stance.** The argument was sound when we were thinking
+   about cascade sequences as application-invariant enforcement — and
+   the platform's static analysis will still own the cross-domain
+   "should this delete even be allowed" question. But DB-level
+   `RESTRICT` is a different guarantee: it survives bypassing the
+   application entirely (direct SQL, read replicas with write access,
+   ops engineers running `DELETE` during incident response). Schemas
+   that rely on this guarantee — invoicing, audit trails, historical
+   records — need it at the DB layer, not the app layer. D8 was wrong
+   to park it.
+
+2. **`fk` was always a DB concept, never a field concept.** The
+   original placement on `(w17.field)` was a convenience, not a design
+   call. A field described by a proto has no FK semantics — FKs are
+   constraints that only exist at the DB layer. Moving `fk` to
+   `(w17.db.column)` makes the layer boundary honest: `(w17.field)` is
+   the authoring surface a form builder / API validator / Django
+   admin can interpret; `(w17.db.column)` is the surface a migration
+   generator interprets. Both layers consume `(w17.field)`; only the
+   migration generator consumes `(w17.db.column)`.
+
+3. **Zero-backcompat skeleton stage.** No real users, no published
+   fixtures outside the repo, no deployments. The vocabulary change is
+   a single-commit rewrite — relocating `fk`, removing `orphanable`,
+   naturalising every fixture. Doing this after iter-1 signs off
+   would be a painful v2 migration; doing it now is a morning's work.
+
+4. **Validator gates match the enum semantics.** `ORPHAN` rejects
+   without `null: true` (can't SET NULL a NOT NULL column). `RESET`
+   rejects without a `default_*` value (SET DEFAULT with no default is
+   a contradictory clause). `BLOCK` and `CASCADE` have no additional
+   requirements. Matches the principle "validate at IR, not at PG
+   apply, so the diag points at the proto source".
+
+**Inference (when deletion_rule is unspecified).** To keep the
+"reasonable default" feel of the old `orphanable` inference: a nullable
+FK column is assumed orphanable (`null: true` → `ORPHAN`); a non-null
+FK column is assumed cascading (`null: false` → `CASCADE`). Explicit
+`deletion_rule` overrides inference in every direction — you can spell
+`null: true, deletion_rule: CASCADE` and get cascade on a nullable FK
+if that's what you want.
 
 **Parked implementation work (iter-2+).** `irpb.Column` needs a
 `int32 number` field, populated from `protoreflect.FieldDescriptor.Number()`

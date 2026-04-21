@@ -6,5 +6,8 @@ import "w17/field.proto";
 message Child {
   option (w17.db.table) = { name: "children" };
   int64 id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-  int64 parent_id = 2 [(w17.field) = { type: ID, fk: "parents.id", null: true }];
+  int64 parent_id = 2 [
+    (w17.field)     = { type: ID, null: true },
+    (w17.db.column) = { fk: "parents.id" }
+  ];
 }

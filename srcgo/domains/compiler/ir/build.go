@@ -27,6 +27,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	w17pb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17"
+	dbpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/db"
 )
 
 // Build converts a loaded .proto into a validated *irpb.Schema.
@@ -92,33 +93,26 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		}
 	}
 
-	// Parse FK references; target resolution runs later in resolveFKs.
+	// Parse FK references from (w17.db.column). Target resolution runs
+	// later in resolveFKs. deletion_rule wins over the null-based
+	// inference; if unspecified, nullable columns infer ORPHAN (SET NULL)
+	// and non-nullable columns infer CASCADE.
 	for _, col := range tbl.Columns {
 		f := findLoadedField(msg, col.GetProtoName())
-		if f == nil || f.Field == nil || f.Field.GetFk() == "" {
+		if f == nil || f.Column == nil || f.Column.GetFk() == "" {
 			continue
 		}
-		ref, ok := parseFKRef(f.Field.GetFk())
+		ref, ok := parseFKRef(f.Column.GetFk())
 		if !ok {
-			b.err(diag.Atf(f.Desc, `field %q: fk must be "<table>.<column>", got %q`, col.GetProtoName(), f.Field.GetFk()).
+			b.err(diag.Atf(f.Desc, `field %q: fk must be "<table>.<column>", got %q`, col.GetProtoName(), f.Column.GetFk()).
 				WithWhy("iteration-1 supports only same-file references in the short form — cross-module package paths arrive later").
-				WithFix(`set fk: "categories.id" (two segments, table and column, separated by a single dot)`))
+				WithFix(`set (w17.db.column) = { fk: "categories.id" } (two segments, table and column, separated by a single dot)`))
 			continue
 		}
-		action := irpb.FKAction_FK_ACTION_CASCADE
-		if f.Field.Orphanable != nil {
-			if *f.Field.Orphanable && !f.Field.GetNull() {
-				b.err(diag.Atf(f.Desc, "field %q: orphanable=true requires null=true", col.GetProtoName()).
-					WithWhy("SET NULL on a NOT NULL column would violate the column's own constraint during a parent delete").
-					WithFix(`either set null: true on (w17.field), or drop orphanable and let the parent delete cascade`))
-				continue
-			}
-			if *f.Field.Orphanable {
-				action = irpb.FKAction_FK_ACTION_SET_NULL
-			}
-		} else if f.Field.GetNull() {
-			// Inferred: nullable child rows survive parent deletes.
-			action = irpb.FKAction_FK_ACTION_SET_NULL
+		action, actionErr := resolveFKAction(f, col)
+		if actionErr != nil {
+			b.err(actionErr)
+			continue
 		}
 		tbl.ForeignKeys = append(tbl.ForeignKeys, &irpb.ForeignKey{
 			Column:       col.GetProtoName(),
@@ -330,11 +324,12 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	// Pull data-level options from (w17.field), if present.
 	fieldOpt := lf.Field
 	if fieldOpt == nil {
-		// bool carrier is allowed to lack (w17.field) (it has no SemType);
-		// every other carrier requires at least a `type:`.
-		if carrier != irpb.Carrier_CARRIER_BOOL {
+		// bool and bytes carriers are allowed to lack (w17.field) — they have
+		// no SemType refinement (single-channel storage: BOOLEAN / BYTEA).
+		// Every other carrier requires at least a `type:`.
+		if carrier != irpb.Carrier_CARRIER_BOOL && carrier != irpb.Carrier_CARRIER_BYTES {
 			b.err(diag.Atf(desc, "field %q: missing (w17.field) option", protoName).
-				WithWhy("every non-bool column needs a semantic type so the emitter can pick a concrete SQL column type — carrier alone is ambiguous (e.g. int64 could be ID, NUMBER, or COUNTER)").
+				WithWhy("every non-bool / non-bytes column needs a semantic type so the emitter can pick a concrete SQL column type — carrier alone is ambiguous (e.g. int64 could be ID, NUMBER, or COUNTER)").
 				WithFix(fmt.Sprintf(`annotate the field, e.g. %s %s = %d [(w17.field) = { type: %s }];`,
 					describeKind(desc), protoName, desc.Number(), suggestedTypeFor(carrier))))
 			return nil
@@ -382,11 +377,13 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		col.Immutable = fieldOpt.GetImmutable()
 	}
 
-	// orphanable validity — must accompany fk.
-	if fieldOpt != nil && fieldOpt.Orphanable != nil && fieldOpt.GetFk() == "" {
-		b.err(diag.Atf(desc, "field %q: orphanable set without fk", protoName).
-			WithWhy("orphanable declares what happens to this row when its *parent* row is deleted — meaningless without an fk pointing at a parent").
-			WithFix(`either add fk: "<table>.<column>" on (w17.field), or remove orphanable`))
+	// deletion_rule validity — must accompany fk on the same column.
+	// Catches `(w17.db.column) = { deletion_rule: BLOCK }` without `fk:` —
+	// the rule has no referenced parent to act on.
+	if lf.Column != nil && lf.Column.GetDeletionRule() != dbpb.DeletionRule_DELETION_RULE_UNSPECIFIED && lf.Column.GetFk() == "" {
+		b.err(diag.Atf(desc, "field %q: deletion_rule set without fk", protoName).
+			WithWhy("deletion_rule declares what happens to this row when its *parent* row is deleted — meaningless without an fk pointing at a parent").
+			WithFix(`either add fk: "<table>.<column>" on (w17.db.column), or remove deletion_rule`))
 	}
 
 	// max_len: required for CHAR/SLUG; string-only for all other types.
@@ -741,6 +738,54 @@ func (b *builder) resolveFKs(schema *irpb.Schema) {
 	}
 }
 
+// resolveFKAction turns a (w17.db.column).deletion_rule + (w17.field).null
+// combination into the concrete irpb.FKAction emitted into the plan. The
+// rule wins when set; otherwise infer from null (null:true → ORPHAN,
+// else CASCADE). Each explicit rule has a validation gate — ORPHAN
+// needs null:true (you can't SET NULL a NOT NULL column), RESET needs a
+// default_* value (PG would leave the column in a no-default-available
+// state when the parent vanishes).
+func resolveFKAction(f *loader.LoadedField, col *irpb.Column) (irpb.FKAction, *diag.Error) {
+	rule := dbpb.DeletionRule_DELETION_RULE_UNSPECIFIED
+	if f.Column != nil {
+		rule = f.Column.GetDeletionRule()
+	}
+	nullable := col.GetNullable()
+
+	switch rule {
+	case dbpb.DeletionRule_DELETION_RULE_UNSPECIFIED:
+		if nullable {
+			return irpb.FKAction_FK_ACTION_SET_NULL, nil
+		}
+		return irpb.FKAction_FK_ACTION_CASCADE, nil
+
+	case dbpb.DeletionRule_CASCADE:
+		return irpb.FKAction_FK_ACTION_CASCADE, nil
+
+	case dbpb.DeletionRule_ORPHAN:
+		if !nullable {
+			return irpb.FKAction_FK_ACTION_UNSPECIFIED, diag.Atf(f.Desc, "field %q: deletion_rule: ORPHAN requires null: true", col.GetProtoName()).
+				WithWhy("ORPHAN sets the child FK to NULL when the parent is deleted — a NOT NULL column would violate its own constraint during the SET NULL step").
+				WithFix(`either set null: true on (w17.field), or pick deletion_rule: CASCADE (child deleted with parent) / BLOCK (refuse parent delete) / RESET (child FK → default_*)`)
+		}
+		return irpb.FKAction_FK_ACTION_SET_NULL, nil
+
+	case dbpb.DeletionRule_BLOCK:
+		return irpb.FKAction_FK_ACTION_RESTRICT, nil
+
+	case dbpb.DeletionRule_RESET:
+		if col.GetDefault() == nil {
+			return irpb.FKAction_FK_ACTION_UNSPECIFIED, diag.Atf(f.Desc, "field %q: deletion_rule: RESET requires a (w17.field).default_* value", col.GetProtoName()).
+				WithWhy("RESET maps to ON DELETE SET DEFAULT — PG needs a value to write back into the FK column; without default_* the SET DEFAULT clause has nothing to set").
+				WithFix(`add default_int / default_string / default_auto to (w17.field), or pick deletion_rule: ORPHAN (FK → NULL, requires null: true) / BLOCK (refuse parent delete) / CASCADE (child deleted with parent)`)
+		}
+		return irpb.FKAction_FK_ACTION_SET_DEFAULT, nil
+	}
+	return irpb.FKAction_FK_ACTION_UNSPECIFIED, diag.Atf(f.Desc, "field %q: unknown deletion_rule %s", col.GetProtoName(), rule).
+		WithWhy("this is a compiler bug — deletion_rule enum grew a variant the IR builder doesn't handle").
+		WithFix("please file an issue")
+}
+
 // fkTargetColumnIsUnique returns true when the target column is addressable
 // as a PG FK target: single-col PK, OR covered by a single-col UNIQUE index
 // (table-level or synth'd from `(w17.field).unique`). Composite-PK member
@@ -791,6 +836,8 @@ func protoKindToCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bool) {
 		return irpb.Carrier_CARRIER_BOOL, true
 	case protoreflect.StringKind:
 		return irpb.Carrier_CARRIER_STRING, true
+	case protoreflect.BytesKind:
+		return irpb.Carrier_CARRIER_BYTES, true
 	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
 		return irpb.Carrier_CARRIER_INT32, true
 	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
@@ -908,6 +955,12 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 			return diag.Atf(desc, "field %q: bool carrier must not set a semantic type (got %s)", name, displaySemType(sem)).
 				WithWhy("bool has exactly one column shape (BOOLEAN) — there is no semantic refinement to pick").
 				WithFix("drop type: from (w17.field); for a default value use default_auto: TRUE or FALSE")
+		}
+	case irpb.Carrier_CARRIER_BYTES:
+		if sem != irpb.SemType_SEM_UNSPECIFIED {
+			return diag.Atf(desc, "field %q: bytes carrier must not set a semantic type (got %s)", name, displaySemType(sem)).
+				WithWhy("bytes has exactly one column shape (BYTEA on PG, BLOB on MySQL/SQLite) — no semantic refinement applies").
+				WithFix("drop type: from (w17.field); bytes stores raw binary blobs")
 		}
 	case irpb.Carrier_CARRIER_STRING:
 		switch sem {

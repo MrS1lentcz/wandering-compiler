@@ -152,24 +152,22 @@ func TestW17VocabularyCompiles(t *testing.T) {
 		t.Errorf("status.field.choices = %q, want %q", got, want)
 	}
 
-	// --- category_id: int64 ID, fk, null:true, orphanable:true; (w17.db.column) index + name ---
+	// --- category_id: int64 ID, null:true on Field; fk + deletion_rule: ORPHAN + index + name on Column ---
 	catOpts := fieldOptions(t, product, "category_id")
 	catFieldExt := proto.GetExtension(catOpts, w17pb.E_Field).(*w17pb.Field)
 	if got, want := catFieldExt.GetType(), w17pb.Type_ID; got != want {
 		t.Errorf("category_id.field.type = %v, want %v", got, want)
 	}
-	if got, want := catFieldExt.GetFk(), "categories.id"; got != want {
-		t.Errorf("category_id.field.fk = %q, want %q", got, want)
-	}
 	if !catFieldExt.GetNull() {
 		t.Error("category_id.field.null = false, want true")
 	}
-	if catFieldExt.Orphanable == nil {
-		t.Error("category_id.field.orphanable unset, want present (true)")
-	} else if !*catFieldExt.Orphanable {
-		t.Error("category_id.field.orphanable = false, want true")
-	}
 	catColExt := proto.GetExtension(catOpts, dbpb.E_Column).(*dbpb.Column)
+	if got, want := catColExt.GetFk(), "categories.id"; got != want {
+		t.Errorf("category_id.db.column.fk = %q, want %q", got, want)
+	}
+	if got, want := catColExt.GetDeletionRule(), dbpb.DeletionRule_ORPHAN; got != want {
+		t.Errorf("category_id.db.column.deletion_rule = %v, want %v", got, want)
+	}
 	if !catColExt.GetIndex() {
 		t.Error("category_id.db.column.index = false, want true")
 	}

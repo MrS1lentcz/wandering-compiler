@@ -37,8 +37,8 @@ message Product {
   double discount_rate  = 6 [(w17.field) = { type: RATIO, null: true }];
   string status         = 7 [(w17.field) = { type: CHAR, max_len: 32, choices: "vocabtest.ProductStatus" }];
   int64  category_id    = 8 [
-    (w17.field)     = { type: ID, fk: "categories.id", null: true, orphanable: true },
-    (w17.db.column) = { index: true, name: "cat_id" }
+    (w17.field)     = { type: ID, null: true },
+    (w17.db.column) = { fk: "categories.id", deletion_rule: ORPHAN, index: true, name: "cat_id" }
   ];
   int64  stock_qty      = 9 [(w17.field) = { type: COUNTER, default_int: 0 }];
   bool   is_active      = 10 [(w17.field) = { default_auto: TRUE }];

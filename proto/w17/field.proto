@@ -22,16 +22,13 @@ extend google.protobuf.FieldOptions {
 }
 
 message Field {
-  // Semantic subtype. Required for every carrier except bool; for Timestamp
-  // must be DATE / TIME / DATETIME; for Duration defaults to INTERVAL.
+  // Semantic subtype. Required for every carrier except bool / bytes;
+  // for Timestamp must be DATE / TIME / DATETIME; for Duration defaults
+  // to INTERVAL.
   Type type = 1;
 
   // Primary key.
   bool pk = 2;
-
-  // Foreign key, "<table>.<column>" form. Iteration-1 supports same-file
-  // references only.
-  string fk = 3;
 
   // Annotation for future iterations; not enforced in SQL in iter-1.
   bool immutable = 4;
@@ -68,19 +65,6 @@ message Field {
   // Empty string = no override.
   string pattern = 14;
 
-  // --- FK orphan behaviour (property, not an operation) ---
-  // Only meaningful when `fk` is set. Expresses a property of this row:
-  // "can it outlive the parent it references?"
-  //   true  → yes. When the parent is deleted, this row stays and the FK
-  //            column is SET NULL. Requires null: true (you can't null a
-  //            NOT NULL column).
-  //   false → no. When the parent is deleted, this row is CASCADE-removed.
-  //   unset → inferred from `null`: null: true → true; null: false → false.
-  // This is the entire FK-delete vocabulary by design. Richer behaviours
-  // (PROTECT, RESTRICT, SET_DEFAULT, DO_NOTHING) are UI / static-analysis
-  // concerns and are NOT part of the schema vocabulary. See D8.
-  optional bool orphanable = 15;
-
   // --- Enumerated choices (string carriers) ---
   // FQN of a proto enum reachable from this file. The IR builder resolves
   // the path, reads the enum's value names, and emits
@@ -106,6 +90,12 @@ message Field {
     double      default_double = 22;
     AutoDefault default_auto   = 23;
   }
+
+  // Field numbers 3 (fk) and 15 (orphanable) have moved to
+  // (w17.db.column) — they're DB-specific rules (like indexes /
+  // constraints), not data semantics. See D8 rev 2026-04-21 and D12.
+  reserved 3, 15;
+  reserved "fk", "orphanable";
 }
 
 // Type — semantic subtype refining the proto carrier into a SQL column type

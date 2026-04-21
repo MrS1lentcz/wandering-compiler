@@ -36,6 +36,12 @@ message Tag {
 message ProductTag {
   option (w17.db.table) = { name: "product_tags" };
 
-  int64 product_id = 1 [(w17.field) = { type: ID, pk: true, fk: "products.id" }];
-  int64 tag_id     = 2 [(w17.field) = { type: ID, pk: true, fk: "tags.id" }];
+  int64 product_id = 1 [
+    (w17.field)     = { type: ID, pk: true },
+    (w17.db.column) = { fk: "products.id" }
+  ];
+  int64 tag_id     = 2 [
+    (w17.field)     = { type: ID, pk: true },
+    (w17.db.column) = { fk: "tags.id" }
+  ];
 }

@@ -34,15 +34,15 @@ message Order {
 
   int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
   int64  customer_id = 2 [
-    (w17.field)     = { type: ID, fk: "customers.id", null: true, orphanable: true },
-    (w17.db.column) = { index: true }
+    (w17.field)     = { type: ID, null: true },
+    (w17.db.column) = { fk: "customers.id", deletion_rule: ORPHAN, index: true }
   ];
   string status      = 3 [(w17.field) = { type: CHAR, max_len: 16, choices: "irtest.OrderStatus" }];
   double total       = 4 [(w17.field) = { type: MONEY, gte: 0 }];
   string notes       = 5 [(w17.field) = { type: TEXT, blank: true, max_len: 4000 }];
   google.protobuf.Timestamp created_at = 6 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
   string metadata    = 7 [
-    (w17.field)    = { type: TEXT, blank: true },
+    (w17.field)    = { type: TEXT, null: true },
     (w17.pg.field) = { jsonb: true }
   ];
 }

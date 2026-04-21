@@ -18,5 +18,8 @@ message ProductTag {
 message Audit {
   option (w17.db.table) = { name: "audits" };
   int64 id             = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-  int64 target_product = 2 [(w17.field) = { type: ID, fk: "product_tags.product_id" }];
+  int64 target_product = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "product_tags.product_id" }
+  ];
 }

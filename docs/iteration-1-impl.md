@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches complete; **iteration-1 closed.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier complete; **iteration-1 closed.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -785,12 +785,72 @@ in code, not in docs:
   All 11 grand-tour fixtures (3 original + 7 M10 + 1 new) stay green
   on M8 goldens and M9 `make test-apply` against `postgres:18-alpine`.
 
+- **D12 FK relocation + deletion_rule + bytes (shipped, 2026-04-21)
+  — final Django-parity close-out for iter-1.** Three coordinated
+  vocabulary changes:
+
+  - `fk` moves from `(w17.field)` to `(w17.db.column)`. FKs are
+    DB-engine rules (same family as `index`, `raw_indexes`,
+    `raw_checks`), not data-shape semantics that a form builder or
+    API validator would interpret. `(w17.field)` is now the
+    authoring-surface layer ANY consumer can read (types, nullability,
+    validators, defaults); `(w17.db.column)` is the migration-generator
+    layer.
+  - `orphanable: optional bool` is replaced by `deletion_rule: enum`
+    on `(w17.db.column)`, extended to the full palette:
+    `CASCADE / ORPHAN / BLOCK / RESET`. `ORPHAN` preserves the
+    property-shape idiom as an enum variant; `BLOCK` (SQL RESTRICT)
+    and `RESET` (SQL SET DEFAULT) close the real Django-parity gaps
+    the audit surfaced. Naming stays non-hook (no `on_*` prefix).
+    IR inference keeps the old default: unspecified rule →
+    `null:true` maps to ORPHAN, else CASCADE.
+  - `bytes` carrier lands. Maps to `BYTEA` on Postgres; like `bool`,
+    carries no `type:` refinement (single-channel storage). `(w17.field)`
+    is optional on bytes columns the same way it is on bools.
+
+  IR changes: `irpb.Carrier` gains `CARRIER_BYTES`; `irpb.FKAction`
+  gains `FK_ACTION_RESTRICT` + `FK_ACTION_SET_DEFAULT`. PG emitter
+  gains `BYTEA` mapping + `RESTRICT` / `SET DEFAULT` on-delete clauses.
+  `resolveFKAction` helper converts `(w17.db.column).deletion_rule`
+  + (w17.field).null inference into the concrete FKAction, rejecting
+  `ORPHAN` without null and `RESET` without default_*.
+
+  Two new positive fixtures, one error fixture renamed + one added:
+
+  - `testdata/bytes_column/` — bare `bytes` + `bytes [(w17.field) = { null: true }]`
+    → `BYTEA NOT NULL` / `BYTEA NULL`.
+  - `testdata/shared_pk_one_to_one/` — UserProfile + AdminExtra where
+    the child's `profile_id` is both PK and FK. The only Django
+    multi-table-inheritance shape that survives the "no schema
+    inheritance" constraint; works with existing vocabulary, this
+    fixture pins the pattern as a regression guard.
+  - `fks_parent_child` extended with `auditor_id` (deletion_rule:
+    BLOCK) and `fulfilled_by_id` (deletion_rule: RESET + default_int)
+    so every variant of the enum ends up in at least one apply
+    roundtrip.
+  - `orphanable_requires_null.proto` → renamed to
+    `orphan_requires_null.proto`; message + fix updated for
+    `deletion_rule: ORPHAN`.
+  - `reset_requires_default.proto` — new error fixture for
+    `deletion_rule: RESET` without `default_*`.
+
+  Every fixture that used `fk` on `(w17.field)` migrated:
+  `happy.proto`, `vocab_fixture.proto`, `fks_parent_child`, `m2m_join`,
+  `examples/iteration-1/happy.proto`, two existing FK-error fixtures.
+
+  All 13 grand-tour fixtures (3 original + 7 M10 + 1 D11 + 2 D12
+  new) green on M8 goldens + M9 `make test-apply` against
+  `postgres:18-alpine`.
+
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production
 emitters, `wc lint` / `diff` / `viz` / `changelog`, projections,
-`immutable` runtime enforcement, CHECK-verbosity flag, **structured
+`immutable` runtime enforcement, CHECK-verbosity flag, structured
 message shapes for the common raw-index patterns — GinIndex /
-PartialIndex / ExpressionIndex** — D11 writeup explains the
-graduation path) sits cleanly on top of a reliability-sealed iter-1
-with Django-parity escape hatches in place. No known silent-failure
-scenarios remain in the core pipeline.
+PartialIndex / ExpressionIndex — D11 writeup explains the
+graduation path, COMMENT ON from proto doc strings alongside
+admin/UI generation) sits cleanly on top of a reliability-sealed
+iter-1 with Django-parity vocabulary closed. No known silent-failure
+scenarios remain in the core pipeline; `(w17.field)` and
+`(w17.db.column)` form a coherent two-layer surface that matches
+the "data semantic vs DB-engine rule" split.

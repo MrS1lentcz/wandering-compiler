@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package m10.bytes_column;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: bytes carrier → BYTEA (PG). Exercises both nullable
+// and NOT NULL bytes columns and the bare-annotation path (bytes has no
+// SemType refinement, so (w17.field) is optional the same way it is on
+// bool carriers).
+message Attachment {
+  option (w17.db.table) = { name: "attachments" };
+
+  int64 id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Bare bytes column — no (w17.field) needed. NOT NULL by default.
+  bytes signature = 2;
+
+  // Nullable bytes column via (w17.field).null.
+  bytes preview   = 3 [(w17.field) = { null: true }];
+}

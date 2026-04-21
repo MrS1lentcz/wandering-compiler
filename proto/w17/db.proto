@@ -119,4 +119,47 @@ message Column {
   // SQL column name override. Default = proto field name 1:1. Rare — mostly
   // for adopting existing schemas with non-proto naming conventions.
   string name = 2;
+
+  // Foreign key, "<table>.<column>" form. Moved here from (w17.field) in
+  // D8 rev 2026-04-21: FKs are a DB-level rule (like indexes and CHECK
+  // constraints), not a general field semantic. Iteration-1 supports
+  // same-file references only.
+  string fk = 3;
+
+  // Deletion rule — what happens to rows carrying this FK when the
+  // referenced parent row is deleted. Applies only when `fk` is set.
+  // Unspecified infers from (w17.field).null:
+  //   null: true  → ORPHAN (child survives, FK becomes NULL)
+  //   null: false → CASCADE (child is deleted with parent)
+  // Explicit value wins over inference. See D12.
+  DeletionRule deletion_rule = 4;
+}
+
+// DeletionRule expresses the post-parent-deletion behaviour as a rule of
+// the relationship, not a handler. Named deliberately without `on_*` to
+// avoid hook-shaped framing (same discipline as `orphanable` was).
+enum DeletionRule {
+  DELETION_RULE_UNSPECIFIED = 0;
+
+  // Child row is deleted along with the parent. The default when the FK
+  // column is NOT NULL and no rule is explicit.
+  CASCADE = 1;
+
+  // Child row survives; its FK column is set to NULL. Requires
+  // (w17.field).null: true on the FK column — can't null a NOT NULL
+  // column. Replaces the previous `orphanable: true` boolean.
+  ORPHAN = 2;
+
+  // Parent delete is prevented while any child references it — PG emits
+  // ON DELETE RESTRICT. Client sees a constraint violation and must
+  // remove or re-point children first. Replaces Django's PROTECT /
+  // RESTRICT at the DB layer (app-level ProtectedError is a layer the
+  // hosted platform owns).
+  BLOCK = 3;
+
+  // Child's FK column is set to its declared default at parent-delete
+  // time — PG emits ON DELETE SET DEFAULT. Requires a default_* value
+  // on the FK column, otherwise the reset would leave the FK null-ish
+  // on a NOT NULL column.
+  RESET = 4;
 }

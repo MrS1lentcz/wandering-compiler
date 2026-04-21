@@ -11,6 +11,10 @@ message Parent {
 message Child {
   option (w17.db.table) = { name: "children" };
   int64 id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-  // orphanable=true but null unset (defaults to false) -> SET NULL on NOT NULL
-  int64 parent_id = 2 [(w17.field) = { type: ID, fk: "parents.id", orphanable: true }];
+  // deletion_rule: RESET (ON DELETE SET DEFAULT) with no default_* on the
+  // column — PG would have nothing to write back into the FK. IR rejects.
+  int64 parent_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "parents.id", deletion_rule: RESET }
+  ];
 }

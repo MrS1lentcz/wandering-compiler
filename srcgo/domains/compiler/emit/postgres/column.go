@@ -94,6 +94,9 @@ func columnType(col *irpb.Column) (string, error) {
 	case irpb.Carrier_CARRIER_BOOL:
 		return "BOOLEAN", nil
 
+	case irpb.Carrier_CARRIER_BYTES:
+		return "BYTEA", nil
+
 	case irpb.Carrier_CARRIER_STRING:
 		switch col.GetType() {
 		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
@@ -237,6 +240,10 @@ func fkActionSQL(a irpb.FKAction) string {
 		return "CASCADE"
 	case irpb.FKAction_FK_ACTION_SET_NULL:
 		return "SET NULL"
+	case irpb.FKAction_FK_ACTION_RESTRICT:
+		return "RESTRICT"
+	case irpb.FKAction_FK_ACTION_SET_DEFAULT:
+		return "SET DEFAULT"
 	}
 	return ""
 }

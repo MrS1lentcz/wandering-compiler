@@ -167,15 +167,28 @@ func TestBuildErrors(t *testing.T) {
 			},
 		},
 		{
-			name:    "orphanable=true requires null=true",
-			fixture: "testdata/errors/orphanable_requires_null.proto",
+			name:    "deletion_rule: ORPHAN requires null: true",
+			fixture: "testdata/errors/orphan_requires_null.proto",
 			wants: []string{
-				`orphanable_requires_null.proto:`,
-				`orphanable=true requires null=true`,
+				`orphan_requires_null.proto:`,
+				`deletion_rule: ORPHAN requires null: true`,
 				`why:`,
-				`SET NULL on a NOT NULL column`,
+				`SET NULL`,
+				`NOT NULL`,
 				`fix:`,
 				`null: true`,
+			},
+		},
+		{
+			name:    "deletion_rule: RESET requires default_*",
+			fixture: "testdata/errors/reset_requires_default.proto",
+			wants: []string{
+				`reset_requires_default.proto:`,
+				`deletion_rule: RESET requires a (w17.field).default_* value`,
+				`why:`,
+				`ON DELETE SET DEFAULT`,
+				`fix:`,
+				`default_int`,
 			},
 		},
 		{

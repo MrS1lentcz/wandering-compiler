@@ -5,21 +5,20 @@ package m10.fks_parent_child;
 import "w17/db.proto";
 import "w17/field.proto";
 
-// Grand-tour fixture: FK shapes that DON'T need composite PK.
-//   - CASCADE-inferred via orphanable=unset on a NOT NULL column
-//     (Customer.orders' customer_id).
-//   - SET NULL via orphanable: true + null: true (Order.assigned_to).
-//   - Self-referencing FK (Category.parent_id → Category.id).
+// Grand-tour fixture: every deletion_rule variant.
+//   - CASCADE inferred (rule unspecified, NOT NULL column) — customer_id
+//   - ORPHAN via deletion_rule: ORPHAN + null: true (assigned_to)
+//   - BLOCK via deletion_rule: BLOCK (auditor_id) — RESTRICT at SQL
+//   - RESET via deletion_rule: RESET + default_int (fulfilled_by_id)
+//   - Self-referencing FK (Category.parent_id → Category.id, ORPHAN)
 //   - Covering INCLUDE index on (customer_id, status) INCLUDE (total),
-//     which exercises emit/postgres/index.go's INCLUDE branch.
+//     exercises emit/postgres/index.go's INCLUDE branch.
 //   - Single-col storage index via (w17.db.column).index on
 //     Order.assigned_to, co-existing with the FK — proves the two
 //     synth paths compose.
 //
 // FK-dependency topo sort (plan.diff) is exercised here too: `orders`
-// depends on `customers`, so Diff must emit customers before orders
-// even though `orders` sorts lexically earlier via some alphabets
-// (here it doesn't, but the m2m_join fixture picks up that case).
+// depends on `customers`, so Diff must emit customers before orders.
 
 message Customer {
   option (w17.db.table) = { name: "customers" };
@@ -36,20 +35,34 @@ message Order {
     ]
   };
 
-  int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-  int64  customer_id = 2 [(w17.field) = { type: ID, fk: "customers.id" }];
-  int64  assigned_to = 3 [
-    (w17.field)     = { type: ID, fk: "customers.id", null: true, orphanable: true },
-    (w17.db.column) = { index: true }
+  int64  id               = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  customer_id      = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "customers.id" }
   ];
-  string status      = 4 [(w17.field) = { type: CHAR, max_len: 16 }];
-  double total       = 5 [(w17.field) = { type: MONEY }];
+  int64  assigned_to      = 3 [
+    (w17.field)     = { type: ID, null: true },
+    (w17.db.column) = { fk: "customers.id", deletion_rule: ORPHAN, index: true }
+  ];
+  int64  auditor_id       = 4 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "customers.id", deletion_rule: BLOCK }
+  ];
+  int64  fulfilled_by_id  = 5 [
+    (w17.field)     = { type: ID, default_int: 0 },
+    (w17.db.column) = { fk: "customers.id", deletion_rule: RESET }
+  ];
+  string status           = 6 [(w17.field) = { type: CHAR, max_len: 16 }];
+  double total            = 7 [(w17.field) = { type: MONEY }];
 }
 
 message Category {
   option (w17.db.table) = { name: "categories" };
 
   int64  id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-  int64  parent_id = 2 [(w17.field) = { type: ID, fk: "categories.id", null: true, orphanable: true }];
+  int64  parent_id = 2 [
+    (w17.field)     = { type: ID, null: true },
+    (w17.db.column) = { fk: "categories.id", deletion_rule: ORPHAN }
+  ];
   string name      = 3 [(w17.field) = { type: CHAR, max_len: 80 }];
 }
