@@ -33,11 +33,6 @@ wandering-compiler/
 │
 ├── docs/                                # (already exists)
 │
-├── examples/                            # user-facing runnable examples (M7)
-│   └── iteration-1/
-│       └── happy.proto                  # copy of srcgo/domains/compiler/ir/testdata/happy.proto;
-│                                        # `out/` appears alongside when the CLI runs against it
-│
 ├── proto/
 │   ├── w17/                             # authoring vocabulary — published to users; consumed by loader
 │   │   ├── db.proto                     # (w17.db.table), (w17.db.column)
@@ -109,6 +104,10 @@ wandering-compiler/
 │           │   │   └── expected.down.sql
 │           │   ├── no_indexes/
 │           │   └── multi_unique/
+│           ├── examples/                # user-facing runnable examples (M7)
+│           │   └── iteration-1/
+│           │       └── happy.proto      # copy of ir/testdata/happy.proto;
+│           │                            # `out/` appears alongside when wc runs against it
 │           ├── gen/                     # protobridge / proto stub output (iteration-1: empty) — gitignored
 │           └── bin/                     # compiled binaries — gitignored
 │
@@ -519,9 +518,13 @@ in code, not in docs:
   `ir/testdata/happy.proto` — generated SQL matches the postgres
   emitter's own pipeline test (M4) byte-for-byte, filenames are
   `YYYYMMDDTHHMMSSZ.{up,down}.sql` per D5 rev2. Pilot-facing copy
-  lives at `examples/iteration-1/happy.proto` (duplicated rather than
+  lives at `srcgo/domains/compiler/examples/iteration-1/happy.proto`
+  — domain-local, not a repo-root `examples/`, because the compiler
+  is a domain and keeping examples next to the code they exercise is
+  the only layout that stays correct when later components add Go
+  example functions or runnable demos. Duplicated rather than
   symlinked — `testdata/` is the test fixture, `examples/` is the
-  user's entry point; the two rot at different speeds). The
+  user's entry point; the two rot at different speeds. The
   generator's `out/` directory lands next to whatever proto the user
   runs from, covered by the repo-root `.gitignore out/` pattern which
   matches at any depth.
