@@ -152,9 +152,11 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		})
 	}
 
-	// Synthesise UNIQUE INDEXes for (w17.field).unique columns.
+	// Synthesise UNIQUE INDEXes for (w17.field).unique columns. PK columns
+	// are skipped — every SQL dialect auto-indexes the PRIMARY KEY, and a
+	// duplicate unique index would clutter the migration and pg_indexes.
 	for _, col := range tbl.Columns {
-		if !col.GetUnique() {
+		if !col.GetUnique() || col.GetPk() {
 			continue
 		}
 		if hasSingleColUniqueIndex(tbl.Indexes, col.GetProtoName()) {
