@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package m8test;
+
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Golden: single-table schema focused on types the happy fixture barely
+// covers — SLUG (regex), URL (regex), DATE with CURRENT_DATE default,
+// PERCENTAGE with author-supplied bounds, COUNTER.
+//
+// UUID pk and DECIMAL are deliberately NOT used here: both are
+// string-carrier in IR (so the blank-check synth fires) but render as
+// non-string SQL types (UUID / NUMERIC), so the emitted `CHECK (col <>
+// '')` would fail at apply time. That's a pipeline gap — see
+// docs/iteration-1-impl.md "Known gaps" — not something the golden
+// should canonise.
+message Product {
+  option (w17.db.table) = { name: "products" };
+
+  int64  id       = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string slug     = 2 [(w17.field) = { type: SLUG, max_len: 120, unique: true }];
+  string title    = 3 [(w17.field) = { type: CHAR, max_len: 200 }];
+  string homepage = 4 [(w17.field) = { type: URL }];
+  double discount = 5 [(w17.field) = { type: PERCENTAGE, gte: 0, lte: 75 }];
+  int64  sold     = 6 [(w17.field) = { type: COUNTER }];
+
+  google.protobuf.Timestamp launch_date = 7 [(w17.field) = { type: DATE,     default_auto: NOW }];
+  google.protobuf.Timestamp created_at  = 8 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+}

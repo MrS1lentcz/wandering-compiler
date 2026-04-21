@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS products_slug_uidx;
+DROP TABLE IF EXISTS products;

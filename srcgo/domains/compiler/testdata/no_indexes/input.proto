@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package m8test;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Golden: minimal table with no indexes of any flavour — no unique, no
+// (w17.db.column).index, no (w17.db.table).indexes, no FK. Exercises the
+// "up has no CREATE INDEX / down has no DROP INDEX" branch of emission.
+message Event {
+  option (w17.db.table) = { name: "events" };
+
+  int64  id      = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string kind    = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+  string payload = 3 [(w17.field) = { type: TEXT, blank: true }];
+}
