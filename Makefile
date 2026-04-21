@@ -1,7 +1,8 @@
 .PHONY: build schemagen test test-apply
 
 build:
-	@echo "TODO: go build -o srcgo/domains/compiler/bin/wc ./srcgo/domains/compiler/cmd/cli"
+	@mkdir -p srcgo/domains/compiler/bin
+	cd srcgo && go build -o domains/compiler/bin/wc ./domains/compiler/cmd/cli
 
 schemagen:
 	@mkdir -p srcgo/pb
@@ -16,7 +17,7 @@ schemagen:
 		proto/domains/compiler/types/plan.proto
 
 test:
-	@echo "TODO: go test ./..."
+	cd srcgo && go test ./...
 
 test-apply:
 	@echo "TODO: apply out/migrations/*.up.sql then *.down.sql against ephemeral postgres:16-alpine"

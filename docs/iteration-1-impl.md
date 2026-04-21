@@ -33,6 +33,11 @@ wandering-compiler/
 │
 ├── docs/                                # (already exists)
 │
+├── examples/                            # user-facing runnable examples (M7)
+│   └── iteration-1/
+│       └── happy.proto                  # copy of srcgo/domains/compiler/ir/testdata/happy.proto;
+│                                        # `out/` appears alongside when the CLI runs against it
+│
 ├── proto/
 │   ├── w17/                             # authoring vocabulary — published to users; consumed by loader
 │   │   ├── db.proto                     # (w17.db.table), (w17.db.column)
@@ -334,7 +339,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 complete; **M7 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 complete; **M8 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -481,8 +486,49 @@ in code, not in docs:
   parent chain, overwrite idempotency, traversal rejections, empty-body
   rejection, and AC #4 determinism across two writes.
 
-**Next:** M7 — CLI + Application. `application.go` minimal interface
-(output-dir getter), `application/` facade + `New()` + one
-`module_output.go`, `cmd/cli/main.go` kong root, `cmd_generate.go`
-wiring `loader → ir.Build → plan.Diff → emit → naming → writer` behind
-`wc generate --iteration-1 <proto>… [--out ./out]`. Binary `wc`.
+- **M7 (shipped, 2026-04-21) — CLI + Application.**
+  `srcgo/domains/compiler/application.go` declares the minimal
+  `compiler.Application` interface (`OutputModule` + `Config()`);
+  `config.go` adds `compiler.Config` with a single knob (`OutputDir`,
+  `env:"COMPILER_OUTPUT_DIR"` default `./out`) parsed via
+  `github.com/caarlos0/env/v11` per convention. `application/` ships
+  the facade (`application.go`), functional-options wiring
+  (`options.go`, `WithOutputModule` + `New` returning
+  `(Application, io.Closer, error)`), and `module_output.go` —
+  factory wrapper that lifts `cfg.OutputDir` into a resolved
+  `OutputModule` (no third-party SDK, no port receivers, < 25 lines,
+  per go.md §module_n.go). The binary is `wc`, built from
+  `srcgo/domains/compiler/cmd/cli/` with `main.go` (kong root +
+  `kongplete.Complete`) and `cmd_generate.go`. `GenerateCmd` wires
+  `loader → ir.Build → plan.Diff → emit.Emit(postgres.Emitter{}) →
+  naming.Name(time.Now().UTC()) → writer.Write` end-to-end; surface is
+  `wc generate --iteration-1 [-o DIR] [-I DIR]… <proto>`. `--iteration-1`
+  is kong-`required:""` so the output surface stays locked to the
+  iteration-1 shape; `--out` overrides `cfg.OutputDir`; `-I / --import`
+  is repeatable and is how users point at the `w17/*.proto` vocabulary
+  (the input proto's directory is always added automatically). One
+  polish touch on top of the spec: the CLI `os.Stat`s the proto path
+  upfront so a typo reports "stat: no such file" instead of
+  protocompile's misleading last-import-lookup cascade. `*diag.Error`
+  surfaces round-trip through kong's `FatalIfErrorf` so
+  `file:line:col` + `why:` + `fix:` lines land verbatim in the user's
+  terminal. `make build` now actually compiles the binary
+  (`cd srcgo && go build -o domains/compiler/bin/wc
+  ./domains/compiler/cmd/cli`); `make test` likewise runs
+  `cd srcgo && go test ./...`. Smoke-tested against
+  `ir/testdata/happy.proto` — generated SQL matches the postgres
+  emitter's own pipeline test (M4) byte-for-byte, filenames are
+  `YYYYMMDDTHHMMSSZ.{up,down}.sql` per D5 rev2. Pilot-facing copy
+  lives at `examples/iteration-1/happy.proto` (duplicated rather than
+  symlinked — `testdata/` is the test fixture, `examples/` is the
+  user's entry point; the two rot at different speeds). The
+  generator's `out/` directory lands next to whatever proto the user
+  runs from, covered by the repo-root `.gitignore out/` pattern which
+  matches at any depth.
+
+**Next:** M8 — golden-file test suite. Add
+`srcgo/domains/compiler/testdata/{product,no_indexes,multi_unique}/`,
+one test runner that loads each `input.proto` through the M7 pipeline
+in-memory and diffs against `expected.{up,down}.sql`, plus a
+`-update` flag that regenerates goldens for intentional changes.
+Serves AC #5.
