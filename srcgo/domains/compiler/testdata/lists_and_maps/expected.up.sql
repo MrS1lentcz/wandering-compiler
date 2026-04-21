@@ -5,13 +5,18 @@ CREATE TABLE containers (
     tags HSTORE NOT NULL,
     counters JSONB NOT NULL,
     labels HSTORE NOT NULL,
+    blobs JSONB NOT NULL,
     notes TEXT[] NOT NULL,
     homepages VARCHAR(2048)[] NOT NULL,
     short_tags VARCHAR(64)[] NOT NULL,
     ids BIGINT[] NOT NULL,
     related_ids INTEGER[] NOT NULL,
     events TIMESTAMPTZ[] NOT NULL,
-    flags BOOLEAN[] NOT NULL
+    flags BOOLEAN[] NOT NULL,
+    scores DOUBLE PRECISION[] NOT NULL,
+    prices NUMERIC(19, 4)[] NOT NULL,
+    signatures BYTEA[] NOT NULL,
+    timeouts INTERVAL[] NOT NULL
 );
 
 COMMIT;

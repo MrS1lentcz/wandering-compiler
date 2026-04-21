@@ -3,6 +3,7 @@ syntax = "proto3";
 package m10.lists_and_maps;
 
 import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
 import "w17/db.proto";
 import "w17/field.proto";
 
@@ -37,6 +38,10 @@ message Container {
   // documentation.
   map<string, string> labels = 4 [(w17.field) = { type: AUTO }];
 
+  // map<string, bytes> → JSONB (HSTORE is string-string only; non-string
+  // values route through JSONB).
+  map<string, bytes> blobs = 12;
+
   // --- Lists (AUTO + explicit element sem) ---
   // Bare repeated string → TEXT[] (element's default TEXT).
   repeated string notes = 5;
@@ -60,4 +65,17 @@ message Container {
 
   // Boolean array → BOOLEAN[].
   repeated bool flags = 11;
+
+  // Double array (zero-config) → DOUBLE PRECISION[].
+  repeated double scores = 13;
+
+  // Double array with preset element sem (MONEY) → NUMERIC(19, 4)[].
+  // Proves fixed-shape numeric presets carry into array-element storage.
+  repeated double prices = 14 [(w17.field) = { type: MONEY }];
+
+  // Bytes array → BYTEA[].
+  repeated bytes signatures = 15;
+
+  // Duration array → INTERVAL[].
+  repeated google.protobuf.Duration timeouts = 16;
 }
