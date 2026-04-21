@@ -91,10 +91,12 @@ wandering-compiler/
 │           │   └── sqlite/
 │           │       ├── emit.go          # stub, errors "not implemented in iteration-1" — AC #6
 │           │       └── emit_test.go     # compile-time DialectEmitter conformance + runtime error shape
-│           ├── naming/                  # domain-local — D5 <NNNN>_<slug>.sql
-│           │   └── name.go
+│           ├── naming/                  # domain-local — D5 rev2: YYYYMMDDTHHMMSSZ
+│           │   ├── name.go
+│           │   └── name_test.go
 │           ├── writer/                  # domain-local — write files into out/migrations/
-│           │   └── writer.go
+│           │   ├── writer.go
+│           │   └── writer_test.go
 │           ├── testdata/                # golden-file cases — AC #5
 │           │   ├── product/
 │           │   │   ├── input.proto
@@ -137,7 +139,7 @@ Notes:
 | `.../compiler/ir` | loader output | `*irpb.Schema` | Validates invariants (every field has `type`, `CHAR`/`SLUG` have `max_len`, FKs target exists, etc.). Invariant violations become `*diag.Error` aggregated via `errors.Join`. Helpers are free Go functions over generated `irpb` types. |
 | `.../compiler/plan` | two `*irpb.Schema` (prev, curr) | `*planpb.MigrationPlan` | Iteration-1: prev is always nil; output is one `AddTable` op per table. |
 | `.../compiler/emit` | `*planpb.MigrationPlan` + `DialectEmitter` | up SQL + down SQL strings | `DialectEmitter` is the Go interface; `postgres.Emitter` is the only real impl, `sqlite.Emitter` is the stub from AC #6. |
-| `.../compiler/naming` | `[]plan.Op` + sequence | migration basename like `0001_create_products` | Sequence source for iteration-1 is the count of existing files in `out/migrations/`; the platform (later) will own sequencing server-side. |
+| `.../compiler/naming` | `time.Time` | migration basename like `20260421T143015Z` | D5 rev2: compact UTC timestamp, no sequence state. CLI supplies `time.Now().UTC()`; tests inject a frozen clock. |
 | `.../compiler/writer` | basename + up/down SQL | two files in `out/migrations/` | Only responsibility: write bytes. |
 | `.../compiler/application` | Config + options | `compiler.Application` (facade) | Constructed at startup by `cmd/cli/main.go`. Iteration-1 has essentially one module (output writer factory); more modules appear when gRPC / platform integration lands. |
 | `.../compiler/cmd/cli` | CLI flags + input path | exit code | Wires loader → builder → diff → emit → name → writer via `Application`. No business logic. |
@@ -202,13 +204,20 @@ Each milestone is independently testable. Ship them in order; do not skip.
   catch it.
 - **Serves AC #6**.
 
-### M6 — naming + writer
+### M6 — naming + writer (timestamp-based per D5 rev2)
 
-- `naming.Name(ops, seq)` → `0001_create_products`.
-- `writer.Write(dir, basename, up, down)` → two files.
-- Before write: ensure `out/migrations/` exists; `.gitignore` at repo root
-  covers the whole `out/` tree.
-- **Serves AC #5 (deterministic file names), AC #4 (byte-identical).**
+- `naming.Name(at time.Time) string` → `"20060102T150405Z"` (compact UTC
+  ISO-8601). No op dispatch, no slug, no sequence state — see D5 rev2
+  for the revised rationale.
+- `writer.Write(dir, basename, up, down) (upPath, downPath string, err error)`
+  — `os.MkdirAll(dir, 0o755)`, write `<basename>.up.sql` + `.down.sql`,
+  return absolute paths. Guards: non-empty basename, no `/` or `..`
+  (path-traversal), both SQL bodies non-empty.
+- Before write the CLI (M7) composes `at := time.Now().UTC()` and passes
+  it in; tests inject a frozen time.
+- `.gitignore` at repo root covers the whole `out/` tree (per D6).
+- **Serves AC #5 (unique, sortable file names), AC #4 (byte-identical
+  SQL content — filename freshness on re-run is intentional per D5 rev2).**
 
 ### M7 — CLI + Application
 
@@ -454,9 +463,12 @@ in code, not in docs:
   and produces no partial SQL, and that `emit.Emit` wraps the stub error
   with the dialect name (no silent swallowing).
 
-**Next:** M6 — naming + writer. `naming.Name(ops, seq)` derives
-`<NNNN>_<slug>` from the `MigrationPlan.Ops` (single `AddTable{products}`
-→ `0001_create_products`, multi-op concatenates first two slugs per D5).
-`writer.Write(dir, basename, up, down)` creates `out/migrations/` if
-needed and writes the two `.sql` files. Serves AC #5 (deterministic
-file names) + AC #4 (byte-identical).
+**Next:** M6 — naming + writer (timestamp-based per D5 rev2).
+`naming.Name(at time.Time)` returns compact UTC ISO-8601
+(`20260421T143015Z`); no sequence, no slug, no op dispatch — D5 rev2
+drops all of that because D6 puts review in the UI and gitignored
+`out/` can't hold a cross-machine sequence counter.
+`writer.Write(dir, basename, up, down)` `os.MkdirAll`s the dir and
+writes the two `.sql` files, returning absolute paths for CLI
+diagnostics. Serves AC #5 (unique, sortable file names) + AC #4
+(byte-identical SQL content).

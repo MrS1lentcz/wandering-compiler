@@ -302,35 +302,43 @@ interface is real: a stub second emitter must compile against the same
 `DialectEmitter` contract as the Postgres one, catching PG-shaped leaks
 while iteration-1 is still small.
 
-### D5 — Migration naming: `<NNNN>_<slug>.sql` (resolves open question #1)
+### D5 — Migration naming: `YYYYMMDDTHHMMSSZ.sql` (resolves open question #1; revised 2026-04-21)
 
-**Decision.** Migration filenames are 4-digit zero-padded sequence + `_` +
-slug derived from the ops, e.g. `0001_create_products.up.sql` and
-`0001_create_products.down.sql`. No timestamp. Slug is generated from the
-`MigrationPlan.Ops`:
-
-- Single `AddTable{products}` → `create_products`.
-- Single `AddIndex{idx_products_slug}` → `add_index_products_slug`.
-- Multi-op migration → concatenate first two op slugs, truncated; operator
-  can override via a PR-level metadata hook (arrives with the platform in
-  `_parked/migration-delivery.md`).
+**Decision.** Migration filenames are a compact UTC ISO-8601 timestamp of
+the generation moment, e.g. `20260421T143015Z.up.sql` and
+`20260421T143015Z.down.sql`. No sequence number, no slug, no op-derived
+name. The CLI calls `time.Now().UTC()` at generate time and passes it to
+`naming.Name(at time.Time) string`; tests inject a frozen clock.
 
 **Rationale.**
 
-1. **Lex-sort = numeric sort.** Zero-padding keeps `ls`, glob `*.sql`,
-   `psql -f`, and UI listings ordered without a custom sorter.
-2. **No timestamp because generation is atomic.** Iteration-1 generates
-   migrations as a single-writer event per merge; with the platform
-   (component 2 in `_parked/migration-delivery.md`), generation is
-   centralized and collision-free. Timestamp carries no information that
-   git commit metadata or platform audit trail don't already have.
-3. **4 digits is enough.** 9999 migrations at 100/year is 100 years. Projects
-   that approach the limit squash old migrations into a consolidated snapshot
-   (same pattern Django / Rails / Alembic use); the ceiling is hit far after
-   other cleanup concerns bite.
-4. **Slug costs nothing, helps review.** Even when migrations don't live in
-   git, a human-readable filename makes platform UI listings, log lines, and
-   error messages legible at a glance.
+1. **D6 puts review in the UI, not the filename.** Migrations are
+   platform artifacts — every change is approved / audited / diffed in
+   the hosted migration platform (see `_parked/migration-delivery.md`)
+   with the full PR context attached. The filename never carries the
+   review-relevant signal; slug sympathy was Django baggage that this
+   project inherits no benefit from.
+2. **Sequence numbers need state the iter-1 CLI doesn't have.** D6
+   makes `out/migrations/` gitignored, so "next sequence = count
+   existing files" works on one machine and breaks between machines:
+   dev A generates `0001_…` and opens a PR; dev B pulls, regenerates,
+   and also writes `0001_…` with different content. The platform will
+   own sequencing server-side, but until then the CLI has no durable
+   counter to read. Timestamps sidestep the problem entirely — every
+   generate run produces a unique filename regardless of outside state.
+3. **Lex-sort = chrono-sort.** `YYYYMMDDTHHMMSSZ` (fixed-width UTC)
+   orders correctly under `ls`, `glob *.sql`, `psql -f *.up.sql`, and
+   platform UI listings with no custom sorter.
+4. **Collisions need sub-second generate-twice-in-a-row.** For CLI use
+   that's effectively impossible (one invocation = one timestamp).
+   When the platform centralises generation it picks its own sequencer
+   and can use higher precision or a monotonic counter if it ever
+   matters.
+5. **AC #4 stays about SQL content, not filenames.** Two re-runs with
+   the same input produce byte-identical `.up.sql` / `.down.sql` bodies
+   — that's what the acceptance criterion protects. Filename freshness
+   on re-run is a *feature* (each generate is a new unit of work the
+   platform can approve independently), not a determinism violation.
 
 ### D6 — Migrations are platform artifacts, not source-committed files
 
