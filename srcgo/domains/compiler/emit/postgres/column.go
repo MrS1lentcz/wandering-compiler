@@ -198,10 +198,13 @@ func autoExpr(col *irpb.Column, kind irpb.AutoKind) (string, error) {
 	case irpb.AutoKind_AUTO_UUID_V4:
 		return "gen_random_uuid()", nil
 	case irpb.AutoKind_AUTO_UUID_V7:
-		// PG has no built-in uuidv7(); user must load an extension. We emit
-		// the call — apply-time will surface the missing function if the
-		// extension isn't installed. Consistent with (w17.pg.field).custom_type
-		// escape hatch: the compiler doesn't gate on extension availability.
+		// PG 18+ has uuidv7() built in (RFC 9562). On PG 14–17 the target
+		// needs a compatible extension loaded (e.g. `pg_uuidv7`) or apply
+		// fails with `function uuidv7() does not exist`. The compiler
+		// never gates on extension availability — it emits the call and
+		// surfaces extension requirements in docs (iteration-1.md
+		// "Apply requirements") and via `(w17.pg.field).required_extensions`
+		// for the hosted platform to act on.
 		return "uuidv7()", nil
 	case irpb.AutoKind_AUTO_EMPTY_JSON_ARRAY:
 		return "'[]'", nil

@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 complete; **iteration-1 closed.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish complete; **iteration-1 closed.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -676,36 +676,73 @@ in code, not in docs:
     per-database line, scoped to test-apply only (production users
     activate extensions themselves or via the parked platform).
 
-  Gaps discovered and **deliberately parked** for iter-2 (fixture
-  authored around them rather than fixed in-batch):
-  - **DECIMAL + gt/gte/lt/lte.** iteration-1.md D2 permits range
-    CHECKs on DECIMAL ("bounds are carried via double and are
-    precision-limited"), but `ir.build.buildColumn`'s `numericOnly`
-    guard treats DECIMAL (CARRIER_STRING + SEM_DECIMAL) as non-numeric
-    and rejects. The `numeric_spectrum` fixture carries DECIMAL
-    without range, with a pinned comment. Fix would split `numericOnly`
-    into `numericCarrier` + special-case for DECIMAL.
-  - **Explicit author options (min_len, max_len, pattern, choices)
-    silently dropped when `(w17.pg.field)` overrides storage.**
-    attachChecks skips them (correct — they'd fail at apply on the
-    overridden column), but this loses author intent without a
-    diagnostic. Should error at `buildColumn` validation time: "X is
-    meaningless when pg.field overrides storage to non-string".
-  - **FK to a table with composite PK** via the iter-1 single-col
-    `fk: "table.col"` syntax: syntactically valid (FK into one of the
-    composite columns) but semantically awkward — can't uniquely
-    identify parent row. Not tested in this matrix; real need will
-    surface when the pilot platform lands.
-  - **Scientific notation in range SQL.** `strconv.FormatFloat('g')`
-    renders `1000000` as `1e+06`. PG accepts both; the emitter could
-    use `'f'` + 0 precision for integer-valued doubles to produce
-    prettier SQL. Cosmetic — deferred.
+  (Gaps initially parked here — DECIMAL + range, silent-drop of
+  explicit string options under pg.field override, FK to composite-PK
+  column, `1e+06` scientific notation — were **all closed** in the
+  same-day reliability polish batch below.)
 
   **Serves AC #7 (revised), closes iteration-1.**
 
-**Next:** iteration-2 planning. The parked-gap list above feeds the
-iter-2 backlog alongside the already-deferred items
-(alter-diff, DropTable, multi-file schemas, platform, deploy client,
-MySQL/SQLite-as-production emitters, `wc lint/diff/viz/changelog`).
-Iteration-1 has no further work — the close gate (AC #1–#7 green,
-grand-tour matrix green on both goldens and apply) is satisfied.
+- **Reliability polish (shipped, 2026-04-21) — close silent-failure
+  surfaces before opening iter-2.** Audit pass after M10 surfaced a
+  handful of scenarios where `wc generate` would produce SQL that
+  either (a) silently lost author intent, (b) PG would reject at
+  apply with a cryptic error, or (c) was legitimately a spec/code
+  mismatch. All six fixed in one batch; seven new error-class
+  fixtures guard the regressions:
+  - `(w17.pg.field)` storage override now rejects non-TEXT sem types
+    and explicit string-only CHECK options (`min_len` / `max_len` /
+    `pattern` / `choices` / `blank`). Forces authors to pair overrides
+    with `type: TEXT` so there is exactly one source of truth for the
+    SQL column shape.
+  - FK target column must have single-col uniqueness (PK or UNIQUE
+    index). Catches the composite-PK-member case at IR time instead
+    of at PG apply with `no unique constraint matching given keys`.
+  - Reserved Postgres keywords (category R, ~95 words) rejected as
+    table or column names — previously emitted unquoted, which fails
+    at apply with a syntax error that points at the SQL line instead
+    of the proto source.
+  - Identifiers > 63 bytes rejected (table names, column names,
+    derived index names, derived CHECK constraint names). Closes the
+    silent-truncation / pg_class-collision window.
+  - `DECIMAL + gt/gte/lt/lte` now accepted. `iteration-1.md` D2
+    always permitted it ("bounds carried via double, precision-limited
+    by double's range"), but `numericOnly` guard rejected via the
+    string carrier. Widened to `numericForRange` that accepts
+    (`CARRIER_STRING` + `SEM_DECIMAL`).
+  - Index name resolution moved from the emitter into `ir.Build` so
+    collision detection (explicit name vs. synth'd `<table>_<cols>_uidx`)
+    is possible at IR time. Emitter now just reads `idx.Name`.
+  - `emit.Emit` wraps up / down in `BEGIN; … COMMIT;` — all-or-nothing
+    migrations (PG transactional DDL). See `iteration-1.md`
+    "Apply requirements".
+  - Cosmetic: `fmtDouble` uses `'f'` + precision 0 for
+    integer-valued doubles (`1000000` instead of `1e+06`); applies to
+    both range CHECKs and literal double defaults.
+
+  Side-effects on existing fixtures: `ir/testdata/happy.proto`'s
+  `metadata` column dropped `blank: true, max_len: 4000` — those
+  explicit string-only options were silently dropped under the
+  `jsonb: true` override and now error. `numeric_spectrum`'s
+  `exact_amount` picked up `gte: 0, lte: 1000000000` as the positive
+  test for the widened range validation.
+
+  All ten grand-tour fixtures stay green on M8 goldens (regenerated
+  for the `BEGIN; / COMMIT;` wrap + `1e+06 → 1000000`) and M9
+  `make test-apply` against `postgres:18-alpine`. TestBuildErrors
+  grew by seven cases — the full expected `file:`, `why:`, `fix:`
+  substring set now runs on every new rejection path.
+
+  **Why do this now, rather than in iter-2.** The iter-2 backlog
+  dwarfs these fixes (alter-diff alone is many commits), and every
+  bug here is in the IR / emit layer that alter-diff will extend.
+  Leaving silent failures in the generator while stacking alter-diff
+  on top would confound any iter-2 bug hunt. Close the reliability
+  window first, then build forward.
+
+**Next:** iteration-2 planning. The backlog (alter-diff, multi-file
+schemas, platform, deploy client, MySQL / SQLite-as-production
+emitters, `wc lint` / `diff` / `viz` / `changelog`, projections,
+`immutable` runtime enforcement, CHECK-verbosity flag) sits cleanly
+on top of a reliability-sealed iter-1. No known silent-failure
+scenarios remain in the core pipeline.

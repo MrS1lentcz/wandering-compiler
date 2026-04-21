@@ -129,6 +129,54 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
    `_parked/migration-delivery.md` — iter-1 has no applied-state tracking
    anyway, which caps how rigorous a real pilot could be).
 
+## Apply requirements
+
+The generated `.up.sql` / `.down.sql` pair is a plain Postgres migration
+script. What the **target database** needs to accept it:
+
+- **Postgres 14+.** AC #2's floor. M9's apply-roundtrip harness runs on
+  `postgres:18-alpine`; the emitted DDL stays inside the 14/15/16/17/18
+  intersection (no syntax crossing a version gate). CI composition against
+  older majors is an iter-2 concern.
+
+- **`uuidv7()` is a built-in on Postgres 18 only.** `default_auto: UUID_V7`
+  emits a bare `uuidv7()` call — on PG 14–17 apply fails with
+  `function uuidv7() does not exist` unless the user has loaded a
+  compatible extension (for example `pg_uuidv7`). `UUID_V4` uses PG's
+  built-in `gen_random_uuid()` and works on every supported major. If
+  the target deployment is < PG 18, prefer `UUID_V4` or install the
+  extension before apply.
+
+- **Extensions are the target's responsibility.** `(w17.pg.field).required_extensions`
+  is authoring metadata only — the compiler does not emit `CREATE
+  EXTENSION` into migration bodies (parked decision per D6: the hosted
+  platform owns extension installation; iter-1 users do it manually
+  before `psql -f`-ing the migration). Curated flags that need
+  contribs: `hstore`. Everything else `(w17.pg.field)` currently
+  exposes (`jsonb`, `inet`, `tsvector`, MACADDR via `custom_type`) is
+  built into stock Postgres. M9's `make test-apply` runs
+  `CREATE EXTENSION IF NOT EXISTS hstore` per test DB to stay honest
+  about the dependency.
+
+- **Transactional apply — migrations are all-or-nothing.** Every
+  emitted `.up.sql` / `.down.sql` is wrapped in
+  `BEGIN; … COMMIT;`, so a syntax error, FK conflict, or failed CHECK
+  mid-migration rolls back every CREATE TABLE / CREATE INDEX already
+  issued in that script. The target DB ends at the pre-apply state
+  rather than a half-created mess. Safe for every op iter-1 emits;
+  non-transactional exceptions (`CREATE INDEX CONCURRENTLY`, etc.)
+  will land as explicit opt-outs when iter-2 needs them.
+
+- **`DROP TABLE` in rollback scripts assumes no external dependencies.**
+  Generated `.down.sql` emits `DROP TABLE IF EXISTS`, not
+  `DROP TABLE ... CASCADE`. If the user has created views, triggers,
+  functions, or FKs outside wc's knowledge that depend on these
+  tables, the rollback fails with `cannot drop ... because other
+  objects depend on it`. Iter-1 doesn't attempt to discover such
+  objects — the intended use is: either run the down immediately
+  after its up (before external code catches the tables), or detach
+  dependents manually before rolling back.
+
 ## Deliverable
 
 - Generator binary `wc` capable of the above.
