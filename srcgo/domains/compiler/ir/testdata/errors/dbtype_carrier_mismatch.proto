@@ -1,0 +1,13 @@
+syntax = "proto3";
+package irtest.dbtype_carrier_mismatch;
+import "w17/db.proto";
+import "w17/field.proto";
+
+message X {
+  option (w17.db.table) = { name: "xs" };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // db_type: BIGINT is valid only on int32 / int64 carriers; string
+  // carrier is incompatible — IR must reject.
+  string payload = 2 [(w17.db.column) = { db_type: BIGINT }];
+}

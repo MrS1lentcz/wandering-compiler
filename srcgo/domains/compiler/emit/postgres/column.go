@@ -71,13 +71,22 @@ func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.C
 }
 
 // columnType returns the PG column type string for a column.
-// (w17.pg.field).custom_type short-circuits the semantic dispatch;
-// everything else flows through the carrier × sem-type table.
+// Three override paths can short-circuit the carrier × sem-type table:
+//
+//  1. (w17.pg.field).custom_type — opaque PG-specific escape hatch.
+//  2. (w17.db.column).db_type    — enumerated cross-dialect override (D14).
+//  3. field.Type preset          — the default data-semantic dispatch.
+//
+// ir.Build rejects overrides (1) and (2) set simultaneously, so the
+// order below is safe: custom_type first, then db_type, then preset.
 func columnType(col *irpb.Column) (string, error) {
 	if pg := col.GetPg(); pg != nil {
 		if raw := pg.GetCustomType(); raw != "" {
 			return raw, nil
 		}
+	}
+	if col.GetDbType() != irpb.DbType_DB_TYPE_UNSPECIFIED {
+		return pgColumnFromDbType(col)
 	}
 
 	switch col.GetCarrier() {
@@ -225,6 +234,73 @@ func autoExpr(col *irpb.Column, kind irpb.AutoKind) (string, error) {
 		return "", fmt.Errorf("AUTO_IDENTITY is a column modifier, not a DEFAULT expression")
 	}
 	return "", fmt.Errorf("unknown AutoKind %s", kind)
+}
+
+// pgColumnFromDbType maps an explicit (w17.db.column).db_type to its PG
+// column type. VARCHAR reads max_len from the column; NUMERIC reads
+// precision + scale. BLOB folds into BYTEA (PG has no BLOB type). Every
+// other value is a direct-name mapping.
+func pgColumnFromDbType(col *irpb.Column) (string, error) {
+	switch col.GetDbType() {
+	case irpb.DbType_DBT_TEXT:
+		return "TEXT", nil
+	case irpb.DbType_DBT_VARCHAR:
+		if col.GetMaxLen() <= 0 {
+			return "", fmt.Errorf("db_type: VARCHAR requires max_len (ir invariant)")
+		}
+		return fmt.Sprintf("VARCHAR(%d)", col.GetMaxLen()), nil
+	case irpb.DbType_DBT_CITEXT:
+		return "CITEXT", nil
+	case irpb.DbType_DBT_JSON:
+		return "JSON", nil
+	case irpb.DbType_DBT_JSONB:
+		return "JSONB", nil
+	case irpb.DbType_DBT_HSTORE:
+		return "HSTORE", nil
+	case irpb.DbType_DBT_INET:
+		return "INET", nil
+	case irpb.DbType_DBT_CIDR:
+		return "CIDR", nil
+	case irpb.DbType_DBT_MACADDR:
+		return "MACADDR", nil
+	case irpb.DbType_DBT_TSVECTOR:
+		return "TSVECTOR", nil
+	case irpb.DbType_DBT_UUID:
+		return "UUID", nil
+	case irpb.DbType_DBT_SMALLINT:
+		return "SMALLINT", nil
+	case irpb.DbType_DBT_INTEGER:
+		return "INTEGER", nil
+	case irpb.DbType_DBT_BIGINT:
+		return "BIGINT", nil
+	case irpb.DbType_DBT_REAL:
+		return "REAL", nil
+	case irpb.DbType_DBT_DOUBLE_PRECISION:
+		return "DOUBLE PRECISION", nil
+	case irpb.DbType_DBT_NUMERIC:
+		if col.GetPrecision() <= 0 {
+			return "", fmt.Errorf("db_type: NUMERIC requires precision (ir invariant)")
+		}
+		if col.Scale != nil {
+			return fmt.Sprintf("NUMERIC(%d, %d)", col.GetPrecision(), *col.Scale), nil
+		}
+		return fmt.Sprintf("NUMERIC(%d)", col.GetPrecision()), nil
+	case irpb.DbType_DBT_DATE:
+		return "DATE", nil
+	case irpb.DbType_DBT_TIME:
+		return "TIME", nil
+	case irpb.DbType_DBT_TIMESTAMP:
+		return "TIMESTAMP", nil
+	case irpb.DbType_DBT_TIMESTAMPTZ:
+		return "TIMESTAMPTZ", nil
+	case irpb.DbType_DBT_INTERVAL:
+		return "INTERVAL", nil
+	case irpb.DbType_DBT_BYTEA, irpb.DbType_DBT_BLOB:
+		return "BYTEA", nil
+	case irpb.DbType_DBT_BOOLEAN:
+		return "BOOLEAN", nil
+	}
+	return "", fmt.Errorf("postgres: unknown db_type %s (ir invariant)", col.GetDbType())
 }
 
 func isIdentity(col *irpb.Column) bool {

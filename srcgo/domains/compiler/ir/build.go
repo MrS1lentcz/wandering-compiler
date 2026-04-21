@@ -321,20 +321,12 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		Carrier:   carrier,
 	}
 
-	// Pull data-level options from (w17.field), if present.
+	// Pull data-level options from (w17.field), if present. (w17.field) is
+	// optional on every carrier — D14 per-carrier defaults kick in when
+	// the type is unset (e.g. int32 → NUMBER, string → TEXT, Timestamp →
+	// DATETIME). Authors reach for (w17.field) only when the default
+	// doesn't fit.
 	fieldOpt := lf.Field
-	if fieldOpt == nil {
-		// bool and bytes carriers are allowed to lack (w17.field) — they have
-		// no SemType refinement (single-channel storage: BOOLEAN / BYTEA).
-		// Every other carrier requires at least a `type:`.
-		if carrier != irpb.Carrier_CARRIER_BOOL && carrier != irpb.Carrier_CARRIER_BYTES {
-			b.err(diag.Atf(desc, "field %q: missing (w17.field) option", protoName).
-				WithWhy("every non-bool / non-bytes column needs a semantic type so the emitter can pick a concrete SQL column type — carrier alone is ambiguous (e.g. int64 could be ID, NUMBER, or COUNTER)").
-				WithFix(fmt.Sprintf(`annotate the field, e.g. %s %s = %d [(w17.field) = { type: %s }];`,
-					describeKind(desc), protoName, desc.Number(), suggestedTypeFor(carrier))))
-			return nil
-		}
-	}
 
 	// Storage-level options from (w17.db.column).
 	if lf.Column != nil {
@@ -355,13 +347,13 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		return nil
 	}
 
-	// Carrier → SemType validation (D2 table).
+	// Carrier → SemType validation (D2 table + D14 per-carrier defaults).
 	semType := irpb.SemType_SEM_UNSPECIFIED
 	if fieldOpt != nil {
 		semType = protoTypeToSem(fieldOpt.GetType())
 	}
-	if carrier == irpb.Carrier_CARRIER_DURATION && semType == irpb.SemType_SEM_UNSPECIFIED {
-		semType = irpb.SemType_SEM_INTERVAL // D2: Duration defaults to INTERVAL when type unset.
+	if semType == irpb.SemType_SEM_UNSPECIFIED {
+		semType = defaultSemTypeFor(carrier)
 	}
 	if err := validateCarrierSemType(desc, carrier, semType); err != nil {
 		b.err(err)
@@ -523,6 +515,36 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		}
 	}
 
+	// (w17.db.column).db_type — storage override (D14). Orthogonal to
+	// field.Type: data semantic stays on field.Type, storage shape comes
+	// from db_type. Validated for carrier compatibility; conflicts with
+	// custom_type (pick one override path).
+	if lf.Column != nil {
+		col.DbType = dbTypeToIR(lf.Column.GetDbType())
+	}
+	if col.GetDbType() != irpb.DbType_DB_TYPE_UNSPECIFIED {
+		if col.GetPg() != nil && col.GetPg().GetCustomType() != "" {
+			b.err(diag.Atf(desc, "field %q: (w17.db.column).db_type conflicts with (w17.pg.field).custom_type", protoName).
+				WithWhy("db_type and custom_type are two different storage-override paths: db_type is the enumerated cross-dialect surface, custom_type is the opaque PG-specific escape hatch. Setting both is ambiguous — the emitter would have to pick one silently").
+				WithFix("pick one: db_type for known types (TEXT, JSONB, CITEXT, …), or custom_type for types the enum doesn't cover (pgvector, PostGIS, custom DOMAINs)"))
+		}
+		if !dbTypeCompatibleWithCarrier(col.GetDbType(), carrier) {
+			b.err(diag.Atf(desc, "field %q: db_type %s is not valid on a %s carrier", protoName, displayDbType(col.GetDbType()), displayCarrier(carrier)).
+				WithWhy("each DbType maps to a class of compatible carriers — text-shaped types require string, numeric types require int/double, BYTEA requires bytes, TIMESTAMP requires google.protobuf.Timestamp, etc. Mismatched pairs would produce SQL the proto wire can't populate").
+				WithFix(fmt.Sprintf("change the proto carrier to one that matches db_type: %s, or drop db_type and let field.Type preset pick storage", displayDbType(col.GetDbType()))))
+		}
+		if col.GetDbType() == irpb.DbType_DBT_VARCHAR && col.GetMaxLen() <= 0 {
+			b.err(diag.Atf(desc, "field %q: db_type: VARCHAR requires (w17.field).max_len", protoName).
+				WithWhy("VARCHAR(N) has no column-type-driven size without N; the emitter can't pick a default").
+				WithFix("add max_len to (w17.field), or pick db_type: TEXT for unbounded text"))
+		}
+		if col.GetDbType() == irpb.DbType_DBT_NUMERIC && col.GetPrecision() <= 0 {
+			b.err(diag.Atf(desc, "field %q: db_type: NUMERIC requires (w17.field).precision", protoName).
+				WithWhy("NUMERIC(p, s) has no defaults — precision is the total significant-digit count and has no safe fallback").
+				WithFix("add precision (and optionally scale) to (w17.field), or pick a fixed-shape type like MONEY"))
+		}
+	}
+
 	// (w17.pg.field).custom_type compatibility — enforce the "TEXT-only"
 	// contract so author intent never silently drops. custom_type is the
 	// remaining storage override after D13 lifted jsonb / inet / tsvector
@@ -571,15 +593,25 @@ func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.
 	// column types at apply time.
 	stringStorage := carrier == irpb.Carrier_CARRIER_STRING && columnStoresAsString(col, semType)
 
-	// LengthCheck — omitted for semtypes that render as VARCHAR(N) since
+	// LengthCheck — omitted when the final SQL storage is VARCHAR(N) since
 	// the column type already enforces the upper bound. MinLen always
-	// produces a CHECK when present (VARCHAR has no minimum). After D13
-	// the VARCHAR-backed set is CHAR / SLUG / EMAIL / URL.
+	// produces a CHECK when present (VARCHAR has no minimum).
+	//
+	// "Final storage" considers db_type override (D14): when db_type is
+	// set to VARCHAR, subsumed; when set to TEXT / CITEXT, NOT subsumed
+	// (so CHAR sem + db_type TEXT still emits the length CHECK). When
+	// db_type unset, fall back to sem-based subsumption (CHAR / SLUG /
+	// EMAIL / URL are VARCHAR-backed by D13).
 	if stringStorage {
-		maxSubsumedByType := semType == irpb.SemType_SEM_CHAR ||
-			semType == irpb.SemType_SEM_SLUG ||
-			semType == irpb.SemType_SEM_EMAIL ||
-			semType == irpb.SemType_SEM_URL
+		var maxSubsumedByType bool
+		if col.GetDbType() != irpb.DbType_DB_TYPE_UNSPECIFIED {
+			maxSubsumedByType = col.GetDbType() == irpb.DbType_DBT_VARCHAR
+		} else {
+			maxSubsumedByType = semType == irpb.SemType_SEM_CHAR ||
+				semType == irpb.SemType_SEM_SLUG ||
+				semType == irpb.SemType_SEM_EMAIL ||
+				semType == irpb.SemType_SEM_URL
+		}
 		hasMin := opt.MinLen != nil
 		hasMax := opt.GetMaxLen() > 0 && !maxSubsumedByType
 		if hasMin || hasMax {
@@ -908,6 +940,31 @@ func suggestedTypeFor(c irpb.Carrier) string {
 		return "INTERVAL"
 	}
 	return "CHAR"
+}
+
+// defaultSemTypeFor maps each carrier to its zero-config default SemType
+// (D14). Authors opt into a specific sub-type via (w17.field).type only
+// when the preset they want differs from the default.
+//
+//	string     → TEXT (unbounded text; CHAR/SLUG/etc. are opt-in)
+//	int32/64   → NUMBER (generic integer; ID / COUNTER are opt-in)
+//	double     → NUMBER (generic double; MONEY / PERCENTAGE / RATIO opt-in)
+//	Timestamp  → DATETIME (timezone-aware; DATE / TIME are opt-in)
+//	Duration   → INTERVAL (the only option)
+//	bool       → UNSPECIFIED (no SemType refinement exists)
+//	bytes      → UNSPECIFIED (JSON is the only opt-in)
+func defaultSemTypeFor(carrier irpb.Carrier) irpb.SemType {
+	switch carrier {
+	case irpb.Carrier_CARRIER_STRING:
+		return irpb.SemType_SEM_TEXT
+	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64, irpb.Carrier_CARRIER_DOUBLE:
+		return irpb.SemType_SEM_NUMBER
+	case irpb.Carrier_CARRIER_TIMESTAMP:
+		return irpb.SemType_SEM_DATETIME
+	case irpb.Carrier_CARRIER_DURATION:
+		return irpb.SemType_SEM_INTERVAL
+	}
+	return irpb.SemType_SEM_UNSPECIFIED
 }
 
 func protoTypeToSem(t w17pb.Type) irpb.SemType {
@@ -1250,24 +1307,139 @@ func semTypeStoresAsString(sem irpb.SemType) bool {
 	return true
 }
 
-// columnStoresAsString combines the sem-type axis with the PG-passthrough
-// axis. Returns false when `(w17.pg.field)` redirects storage to a
-// non-string SQL type (jsonb, inet, tsvector, hstore, or any custom_type
-// escape hatch) — string-only CHECK synths must skip in that case, since
-// operators like `<> ''`, `char_length(…)`, `~ 'pat'`, and `IN ('a','b')`
-// don't type-check against those columns.
+// columnStoresAsString combines three axes that can affect storage shape:
 //
-// `custom_type` is treated as opaque — we can't tell at IR time whether
-// the target type (e.g. CITEXT) is still string-shaped. Skipping all
-// string synths is the safe default; authors who need them on a
-// custom_type drop the pg.field override or emit the CHECK manually.
+//  1. Sem-type (UUID/DECIMAL/JSON/IP/TSEARCH → non-string SQL).
+//  2. PG passthrough `custom_type` (opaque — assume non-string).
+//  3. `(w17.db.column).db_type` override (enumerated — checked via
+//     dbTypeStoresAsString).
+//
+// When any of these redirect storage to a non-string SQL column,
+// string-only CHECK synths (blank, length, regex, choices) must skip —
+// operators like `<> ''`, `char_length(…)`, `~ 'pat'`, and
+// `IN ('a','b')` don't type-check against non-string columns.
+//
+// Precedence: db_type wins over sem-type (it's the explicit override).
+// custom_type wins over both (it's the opaque escape hatch, and IR
+// already rejects it co-existing with db_type).
 func columnStoresAsString(col *irpb.Column, sem irpb.SemType) bool {
 	if pg := col.GetPg(); pg != nil && pgOverridesStorage(pg) {
 		return false
+	}
+	if dbType := col.GetDbType(); dbType != irpb.DbType_DB_TYPE_UNSPECIFIED {
+		return dbTypeStoresAsString(dbType)
 	}
 	return semTypeStoresAsString(sem)
 }
 
 func pgOverridesStorage(pg *irpb.PgOptions) bool {
 	return pg.GetCustomType() != ""
+}
+
+// dbTypeStoresAsString returns true when the db_type maps to a string-
+// shaped SQL column (TEXT / VARCHAR / CITEXT). All other DbType values
+// map to non-string storage (JSONB, INET, UUID, NUMERIC, TIMESTAMP, …)
+// so string-only CHECK synths skip.
+func dbTypeStoresAsString(dbType irpb.DbType) bool {
+	switch dbType {
+	case irpb.DbType_DBT_TEXT, irpb.DbType_DBT_VARCHAR, irpb.DbType_DBT_CITEXT:
+		return true
+	}
+	return false
+}
+
+// dbTypeCompatibleWithCarrier enforces the (carrier, db_type) matrix —
+// each DbType maps to a class of compatible carriers.
+func dbTypeCompatibleWithCarrier(dbType irpb.DbType, carrier irpb.Carrier) bool {
+	switch dbType {
+	case irpb.DbType_DB_TYPE_UNSPECIFIED:
+		return true
+	case irpb.DbType_DBT_TEXT, irpb.DbType_DBT_VARCHAR, irpb.DbType_DBT_CITEXT,
+		irpb.DbType_DBT_INET, irpb.DbType_DBT_CIDR, irpb.DbType_DBT_MACADDR,
+		irpb.DbType_DBT_TSVECTOR, irpb.DbType_DBT_UUID:
+		return carrier == irpb.Carrier_CARRIER_STRING
+	case irpb.DbType_DBT_JSON, irpb.DbType_DBT_JSONB, irpb.DbType_DBT_HSTORE:
+		return carrier == irpb.Carrier_CARRIER_STRING || carrier == irpb.Carrier_CARRIER_BYTES
+	case irpb.DbType_DBT_SMALLINT, irpb.DbType_DBT_INTEGER, irpb.DbType_DBT_BIGINT:
+		return carrier == irpb.Carrier_CARRIER_INT32 || carrier == irpb.Carrier_CARRIER_INT64
+	case irpb.DbType_DBT_REAL, irpb.DbType_DBT_DOUBLE_PRECISION:
+		return carrier == irpb.Carrier_CARRIER_DOUBLE
+	case irpb.DbType_DBT_NUMERIC:
+		return carrier == irpb.Carrier_CARRIER_DOUBLE || carrier == irpb.Carrier_CARRIER_STRING
+	case irpb.DbType_DBT_DATE, irpb.DbType_DBT_TIME, irpb.DbType_DBT_TIMESTAMP, irpb.DbType_DBT_TIMESTAMPTZ:
+		return carrier == irpb.Carrier_CARRIER_TIMESTAMP
+	case irpb.DbType_DBT_INTERVAL:
+		return carrier == irpb.Carrier_CARRIER_DURATION
+	case irpb.DbType_DBT_BYTEA, irpb.DbType_DBT_BLOB:
+		return carrier == irpb.Carrier_CARRIER_BYTES
+	case irpb.DbType_DBT_BOOLEAN:
+		return carrier == irpb.Carrier_CARRIER_BOOL
+	}
+	return false
+}
+
+// dbTypeToIR maps the authoring-surface (w17.db.column).db_type enum to
+// the IR's DbType enum. Values are 1:1 aliases; the separate enums keep
+// the IR self-contained without importing the authoring vocabulary.
+func dbTypeToIR(t dbpb.DbType) irpb.DbType {
+	switch t {
+	case dbpb.DbType_TEXT:
+		return irpb.DbType_DBT_TEXT
+	case dbpb.DbType_VARCHAR:
+		return irpb.DbType_DBT_VARCHAR
+	case dbpb.DbType_CITEXT:
+		return irpb.DbType_DBT_CITEXT
+	case dbpb.DbType_JSON:
+		return irpb.DbType_DBT_JSON
+	case dbpb.DbType_JSONB:
+		return irpb.DbType_DBT_JSONB
+	case dbpb.DbType_HSTORE:
+		return irpb.DbType_DBT_HSTORE
+	case dbpb.DbType_INET:
+		return irpb.DbType_DBT_INET
+	case dbpb.DbType_CIDR:
+		return irpb.DbType_DBT_CIDR
+	case dbpb.DbType_MACADDR:
+		return irpb.DbType_DBT_MACADDR
+	case dbpb.DbType_TSVECTOR:
+		return irpb.DbType_DBT_TSVECTOR
+	case dbpb.DbType_UUID:
+		return irpb.DbType_DBT_UUID
+	case dbpb.DbType_SMALLINT:
+		return irpb.DbType_DBT_SMALLINT
+	case dbpb.DbType_INTEGER:
+		return irpb.DbType_DBT_INTEGER
+	case dbpb.DbType_BIGINT:
+		return irpb.DbType_DBT_BIGINT
+	case dbpb.DbType_REAL:
+		return irpb.DbType_DBT_REAL
+	case dbpb.DbType_DOUBLE_PRECISION:
+		return irpb.DbType_DBT_DOUBLE_PRECISION
+	case dbpb.DbType_NUMERIC:
+		return irpb.DbType_DBT_NUMERIC
+	case dbpb.DbType_DATE:
+		return irpb.DbType_DBT_DATE
+	case dbpb.DbType_TIME:
+		return irpb.DbType_DBT_TIME
+	case dbpb.DbType_TIMESTAMP:
+		return irpb.DbType_DBT_TIMESTAMP
+	case dbpb.DbType_TIMESTAMPTZ:
+		return irpb.DbType_DBT_TIMESTAMPTZ
+	case dbpb.DbType_INTERVAL:
+		return irpb.DbType_DBT_INTERVAL
+	case dbpb.DbType_BYTEA:
+		return irpb.DbType_DBT_BYTEA
+	case dbpb.DbType_BLOB:
+		return irpb.DbType_DBT_BLOB
+	case dbpb.DbType_BOOLEAN:
+		return irpb.DbType_DBT_BOOLEAN
+	}
+	return irpb.DbType_DB_TYPE_UNSPECIFIED
+}
+
+// displayDbType trims the DBT_ prefix so diagnostics read the way the
+// author writes the authoring-surface name (e.g. "JSONB" not
+// "DBT_JSONB").
+func displayDbType(t irpb.DbType) string {
+	return strings.TrimPrefix(t.String(), "DBT_")
 }

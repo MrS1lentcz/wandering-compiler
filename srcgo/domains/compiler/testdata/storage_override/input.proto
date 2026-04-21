@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package m10.storage_override;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture for D14 — field.Type (data semantic) and
+// (w17.db.column).db_type (storage) as orthogonal axes. Exercises:
+//
+//   - CHAR validation + TEXT storage: bio keeps char_length CHECK <= 6000
+//     (storage isn't VARCHAR-backed so the length CHECK is not subsumed)
+//     but renders as TEXT.
+//   - EMAIL validation + CITEXT storage: email keeps the format regex
+//     + blank CHECK, renders as CITEXT so UNIQUE INDEX is case-
+//     insensitive without extra WHERE clauses.
+//   - JSON vs JSONB explicit: text_config forces JSON (whitespace-
+//     preserving, not indexed) instead of the preset's JSONB default.
+//   - int64 NUMBER default + BIGINT storage override (explicit even
+//     though it matches the preset — regression guard that unchanged
+//     semantics still flow through the db_type path).
+//   - Zero-config columns exercise D14 per-carrier defaults: `notes`
+//     is bare `string` → TEXT, `visits` is bare `int32` → INTEGER,
+//     `archived` is bare `bool` → BOOLEAN.
+message Article {
+  option (w17.db.table) = { name: "articles" };
+
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Zero-config — no (w17.field), default TEXT / INTEGER / BOOLEAN.
+  string notes      = 2;
+  int32  visits     = 3;
+  bool   archived   = 4;
+
+  // Data semantic + storage override: CHAR(6000) char_length CHECK, TEXT storage.
+  string bio        = 5 [
+    (w17.field)     = { type: CHAR, max_len: 6000 },
+    (w17.db.column) = { db_type: TEXT }
+  ];
+
+  // EMAIL validation (regex + blank), CITEXT storage.
+  string email      = 6 [
+    (w17.field)     = { type: EMAIL, unique: true },
+    (w17.db.column) = { db_type: CITEXT }
+  ];
+
+  // JSON semantic, text-stored JSON (not JSONB).
+  string text_config = 7 [
+    (w17.field)     = { type: JSON, default_auto: EMPTY_JSON_OBJECT },
+    (w17.db.column) = { db_type: JSON }
+  ];
+
+  // Redundant-but-explicit: BIGINT via db_type even though default is BIGINT.
+  int64  counter    = 8 [
+    (w17.field)     = { type: COUNTER },
+    (w17.db.column) = { db_type: BIGINT }
+  ];
+}

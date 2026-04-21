@@ -133,6 +133,69 @@ message Column {
   //   null: false → CASCADE (child is deleted with parent)
   // Explicit value wins over inference. See D12.
   DeletionRule deletion_rule = 4;
+
+  // Storage type override — orthogonal to (w17.field).type. When unset
+  // the field.type preset picks storage per dialect (D13 defaults); when
+  // set, the enumerated DbType drives the SQL column type directly,
+  // while field.type keeps driving CHECKs / validation. Lets the author
+  // split data semantic from storage: e.g. `type: CHAR, max_len: 6000`
+  // + `db_type: TEXT` keeps the char_length <= 6000 CHECK but stores as
+  // TEXT instead of VARCHAR(6000). See D14.
+  DbType db_type = 5;
+}
+
+// DbType — enumerated SQL column types, covering the common cross-dialect
+// set + PG-native types. Emitters map each value to the dialect-native
+// storage. For types not enumerated here (pgvector, PostGIS geometry,
+// custom DOMAINs), use (w17.pg.field).custom_type — that remains the
+// opaque escape hatch.
+enum DbType {
+  DB_TYPE_UNSPECIFIED = 0;
+
+  // --- Text-shaped ---
+  TEXT     = 1;    // PG/MySQL/SQLite TEXT
+  VARCHAR  = 2;    // requires (w17.field).max_len; PG/MySQL VARCHAR(N); SQLite TEXT
+  CITEXT   = 3;    // PG CITEXT (requires citext extension); others → TEXT
+
+  // --- JSON family ---
+  JSON     = 10;   // PG JSON (text-stored); MySQL JSON; SQLite TEXT
+  JSONB    = 11;   // PG JSONB (binary, indexed); others → JSON / TEXT
+
+  // --- Key-value (PG-native) ---
+  HSTORE   = 20;   // PG HSTORE (requires hstore extension); others → JSON
+
+  // --- Network ---
+  INET     = 30;   // PG INET; others → VARCHAR(45)
+  CIDR     = 31;   // PG CIDR; others → VARCHAR(45)
+  MACADDR  = 32;   // PG MACADDR; others → VARCHAR(17)
+
+  // --- Text-search (PG-native) ---
+  TSVECTOR = 40;   // PG TSVECTOR; others deferred
+
+  // --- UUID ---
+  UUID     = 50;   // PG UUID; MySQL CHAR(36); SQLite TEXT
+
+  // --- Numeric ---
+  SMALLINT         = 60;
+  INTEGER          = 61;
+  BIGINT           = 62;
+  REAL             = 63;
+  DOUBLE_PRECISION = 64;
+  NUMERIC          = 65;   // requires (w17.field).precision + optional scale
+
+  // --- Temporal ---
+  DATE        = 70;
+  TIME        = 71;
+  TIMESTAMP   = 72;   // without tz
+  TIMESTAMPTZ = 73;   // with tz (default for the Timestamp carrier)
+  INTERVAL    = 74;
+
+  // --- Binary ---
+  BYTEA = 80;   // PG; others → BLOB
+  BLOB  = 81;   // MySQL / SQLite; PG emitter maps to BYTEA
+
+  // --- Boolean ---
+  BOOLEAN = 90;
 }
 
 // DeletionRule expresses the post-parent-deletion behaviour as a rule of

@@ -82,8 +82,12 @@ message Column {
 
   // Default value at INSERT. Unset = no default.
   Default default = 30;
-  // Postgres dialect passthrough (jsonb / inet / tsvector / hstore / escape).
+  // Postgres dialect passthrough (custom_type + required_extensions).
   PgOptions pg = 31;
+  // Storage type override from (w17.db.column).db_type. Unset =
+  // field.Type preset picks storage; set = enumerated storage wins
+  // over preset. See D14.
+  DbType db_type = 32;
 
   repeated Check checks = 40;
 }
@@ -259,4 +263,37 @@ enum RegexSource {
   REGEX_SOURCE_UNSPECIFIED = 0;
   REGEX_FROM_TYPE = 1;
   REGEX_FROM_PATTERN = 2;
+}
+
+// DbType mirrors (w17.db.column).db_type 1:1 — see proto/w17/db.proto for
+// the authoring-surface documentation per value. Kept as a separate IR
+// enum so the IR stays self-contained and doesn't import the authoring
+// vocabulary.
+enum DbType {
+  DB_TYPE_UNSPECIFIED = 0;
+  DBT_TEXT = 1;
+  DBT_VARCHAR = 2;
+  DBT_CITEXT = 3;
+  DBT_JSON = 10;
+  DBT_JSONB = 11;
+  DBT_HSTORE = 20;
+  DBT_INET = 30;
+  DBT_CIDR = 31;
+  DBT_MACADDR = 32;
+  DBT_TSVECTOR = 40;
+  DBT_UUID = 50;
+  DBT_SMALLINT = 60;
+  DBT_INTEGER = 61;
+  DBT_BIGINT = 62;
+  DBT_REAL = 63;
+  DBT_DOUBLE_PRECISION = 64;
+  DBT_NUMERIC = 65;
+  DBT_DATE = 70;
+  DBT_TIME = 71;
+  DBT_TIMESTAMP = 72;
+  DBT_TIMESTAMPTZ = 73;
+  DBT_INTERVAL = 74;
+  DBT_BYTEA = 80;
+  DBT_BLOB = 81;
+  DBT_BOOLEAN = 90;
 }

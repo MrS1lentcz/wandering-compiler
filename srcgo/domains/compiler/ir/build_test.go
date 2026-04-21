@@ -402,6 +402,42 @@ func TestBuildErrors(t *testing.T) {
 				`rename the raw index`,
 			},
 		},
+		{
+			name:    "db_type carrier mismatch",
+			fixture: "testdata/errors/dbtype_carrier_mismatch.proto",
+			wants: []string{
+				`dbtype_carrier_mismatch.proto:`,
+				`db_type BIGINT is not valid on a string carrier`,
+				`why:`,
+				`class of compatible carriers`,
+				`fix:`,
+				`matches db_type: BIGINT`,
+			},
+		},
+		{
+			name:    "db_type conflicts with custom_type",
+			fixture: "testdata/errors/dbtype_conflicts_with_custom_type.proto",
+			wants: []string{
+				`dbtype_conflicts_with_custom_type.proto:`,
+				`db_type conflicts with (w17.pg.field).custom_type`,
+				`why:`,
+				`two different storage-override paths`,
+				`fix:`,
+				`pick one`,
+			},
+		},
+		{
+			name:    "db_type: VARCHAR needs max_len",
+			fixture: "testdata/errors/dbtype_varchar_needs_max_len.proto",
+			wants: []string{
+				`dbtype_varchar_needs_max_len.proto:`,
+				`db_type: VARCHAR requires (w17.field).max_len`,
+				`why:`,
+				`column-type-driven size`,
+				`fix:`,
+				`db_type: TEXT`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

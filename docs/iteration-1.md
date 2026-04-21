@@ -806,6 +806,123 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D14 — Zero-config defaults + data/storage orthogonal axes (added 2026-04-21)
+
+**Decision.** Two coupled changes to the authoring surface:
+
+**1. Per-carrier zero-config defaults.** `(w17.field)` is now optional
+on every carrier. When `type:` is unset, the compiler picks the
+default `SemType` for the carrier:
+
+| Carrier | Default SemType | Default PG storage |
+|---|---|---|
+| `string` | `TEXT` | `TEXT` |
+| `int32` / `int64` | `NUMBER` | `INTEGER` / `BIGINT` |
+| `double` | `NUMBER` | `DOUBLE PRECISION` |
+| `Timestamp` | `DATETIME` | `TIMESTAMPTZ` |
+| `Duration` | `INTERVAL` | `INTERVAL` |
+| `bool` | — (no refinement) | `BOOLEAN` |
+| `bytes` | — (no refinement) | `BYTEA` |
+
+A bare `int32 visits = 1;` compiles: emitter produces
+`visits INTEGER NOT NULL`. Authors opt into sub-types (ID, COUNTER,
+CHAR, SLUG, EMAIL, MONEY, DATE, …) only when the default doesn't fit.
+
+Still explicit (no default inference):
+
+- `pk: true` — per-table decision, not per-field.
+- `type: ID` — most int columns aren't identifiers; defaulting to ID
+  would force every other field to opt out.
+- `max_len` for CHAR / SLUG — the compiler can't invent a size;
+  EMAIL / URL have preset defaults (320 / 2048) only because those
+  sem types carry conventional maxes.
+- `precision` for DECIMAL — no safe default.
+- MONEY / PERCENTAGE / RATIO — fixed-shape variants; default NUMBER
+  is safer for generic numerics.
+
+**2. `(w17.db.column).db_type` as a storage-override axis, orthogonal
+to field.Type.** `field.Type` drives data semantics (CHECKs,
+validation, preset storage default); `db_type` drives the final SQL
+column type. The author can combine them:
+
+```proto
+string bio = 1 [
+  (w17.field)     = { type: CHAR, max_len: 6000 },
+  (w17.db.column) = { db_type: TEXT }
+];
+// → column: TEXT NOT NULL
+// → CHECK: blank + char_length(bio) <= 6000 (length CHECK is
+//   NOT subsumed by the TEXT storage since it's not VARCHAR-backed)
+```
+
+```proto
+string email = 2 [
+  (w17.field)     = { type: EMAIL, unique: true },
+  (w17.db.column) = { db_type: CITEXT }
+];
+// → column: CITEXT NOT NULL
+// → CHECK: blank + email format regex still applies
+// → UNIQUE INDEX benefits from case-insensitive equality
+```
+
+`DbType` is enumerated (~30 values covering common cross-dialect +
+PG-native types). Validated at IR time: each value declares which
+carriers it's compatible with. Conflict with
+`(w17.pg.field).custom_type` is rejected — the two override paths
+are distinct:
+
+- `db_type` — enumerated, compiler knows the type, validates carrier
+  compatibility, emitter maps per dialect.
+- `custom_type` — opaque string, PG-specific, escape hatch for types
+  the enum doesn't cover (pgvector, PostGIS geometry, custom DOMAINs,
+  dialect-specific extensions).
+
+**Interaction with Length CHECK subsumption.** When `db_type` is set,
+the subsumption logic checks the final storage shape rather than
+sem-type:
+
+- `db_type: VARCHAR` → `char_length <= max_len` subsumed (column
+  type already enforces).
+- `db_type: TEXT` / `CITEXT` / other non-VARCHAR → length CHECK
+  still emitted.
+- `db_type` unset → preset sem-type dispatch (CHAR / SLUG / EMAIL /
+  URL subsumed, TEXT / UUID / JSON / IP / TSEARCH / DECIMAL not).
+
+**Interaction with `columnStoresAsString`.** String-only synths
+(blank, regex, choices) gate on the final storage, not the sem-type.
+`db_type: CITEXT` → string-shaped storage → synths emit.
+`db_type: JSONB` → non-string → synths skip.
+
+**Rationale.**
+
+1. **Zero-config for the 80% case.** Django, ent, Prisma all support
+   "declare the field, get a reasonable column" — iter-1 required
+   explicit `type:` on most carriers, which was friction for the
+   common case (generic int column, generic string column, generic
+   timestamp). The defaults table captures the conventional choice
+   per carrier; anything else is opt-in.
+
+2. **Data / storage orthogonality matches real authoring needs.**
+   Authors sometimes want the data-semantic benefits of a preset
+   (EMAIL's format CHECK, CHAR's max_len CHECK) with a different
+   storage shape (CITEXT for case-insensitive equality, TEXT for
+   legacy schemas). Pre-D14 the only path was `custom_type`, which
+   loses all preset semantics — CHECK synths, default_auto
+   compatibility, differ awareness. `db_type` is the typed middle
+   layer: enum-known storage + preset-preserved semantics.
+
+3. **Custom_type stays mandatory per CLAUDE.md non-negotiable #3.**
+   DbType can never cover every SQL type across every dialect
+   (pgvector, PostGIS, CUBE, custom DOMAINs). Opaque escape hatch
+   remains. The two paths are disjoint — conflict-at-same-column is
+   an IR-time error.
+
+4. **The Preset Bundles matrix gains a "default" row per carrier.**
+   Authors who want to know "what happens when I write
+   `int32 foo = 1;`" look up `int32` in the matrix and see NUMBER →
+   INTEGER. The matrix is the single source of truth — code and doc
+   derive from it.
+
 ### D13 — Dialect-specific storage lifted into field.Type (added 2026-04-21)
 
 **Decision.** Three PG-specific curated flags on `(w17.pg.field)` —
