@@ -806,6 +806,108 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D16 — Dialect-capability catalog + inspection interface (added 2026-04-21)
+
+**Decision.** Each dialect emitter ships a static catalog of every
+capability its generated SQL may reference, keyed by a stable cap ID
+string. Each capability declares its target-DB requirements:
+minimum dialect version (if any) and required extensions (if any).
+A small `DialectCapabilities` interface exposes the catalog to
+downstream tooling.
+
+```go
+// srcgo/domains/compiler/emit/capabilities.go
+
+type Requirement struct {
+    MinVersion string   // dialect version (dotted-decimal) or empty
+    Extensions []string // sorted extension names or empty
+}
+
+type DialectCapabilities interface {
+    Name() string
+    Requirement(cap string) (Requirement, bool)
+}
+```
+
+Cap IDs follow three shape conventions:
+
+  - `UPPER_CASE` — SQL type or feature (JSONB, UUID, ARRAY,
+    INCLUDE_INDEX, IDENTITY_COLUMN).
+  - `lower_case()` — dialect function (`gen_random_uuid()`,
+    `uuidv7()`, `jsonb_path_ops`, `gin_trgm_ops`).
+  - `snake_case` — dialect extension (`hstore`, `citext`, `pg_trgm`,
+    `pg_jsonschema`).
+
+All cap IDs are string constants in `emit/capabilities.go` so new
+features land without proto/enum churn. Catalog entries live per
+dialect in `emit/<dialect>/capabilities.go`.
+
+Iter-1 PG catalog covers ~35 entries: every type / feature / function
+/ extension the PG emitter currently references + the ones iter-2
+will reach for (pg_jsonschema, pg_uuidv7). Unit tests enforce:
+
+  - Every cap constant in `emit/capabilities.go` has an entry in the
+    PG catalog (or we'd reference an unknown cap).
+  - Every catalog entry is well-formed: MinVersion parseable as
+    dotted-decimal, extensions non-empty when declared.
+  - Unknown cap lookups return ok=false (contract for "compiler bug:
+    emitter references a cap the catalog doesn't know").
+
+**What's wired in iter-1.** Inspection only — the catalog answers
+"what does feature X require?" via `Requirement(cap)`. Consumers:
+docs, audit tooling, future platform. `Emit()` itself doesn't yet
+track which caps each migration actually uses, doesn't accept
+target-DB config, doesn't gate emission against that config.
+
+**What's deferred to iter-2** (iteration-2-backlog.md captures the
+full writeup):
+
+  - **Usage tracking.** Per-migration collection of "this SQL uses
+    JSONB in column X, gin_trgm_ops in index Y, …" as the emitter
+    runs. Feeds the manifest.
+  - **Requirements manifest.** Alongside `.up.sql` / `.down.sql`
+    the generator emits a structured manifest listing every cap
+    used + where. Deploy client verifies before apply.
+  - **Target-DB config.** `Emitter{TargetVersion, AvailableExtensions}`.
+    Emit-time validation: used caps must satisfy target's version +
+    available extensions; mismatches fail at `wc generate` with a
+    diagnostic naming the cap + remediation (upgrade, install
+    extension, or avoid the feature).
+  - **CLI flags.** `--target-pg-version=14 --extensions=hstore,citext`.
+
+**Rationale.**
+
+1. **"Ready when users land on older DBs" (the user's phrasing).**
+   Iter-1 implicitly targets PG 18 (hardcoded uuidv7 use, INCLUDE
+   on PG 11+, IDENTITY on PG 10+). Without a capability layer,
+   users on PG 14 get cryptic apply-time errors. The catalog is the
+   first brick in the wall that eventually surfaces "feature X
+   requires PG 18+ but you declared target PG 14" at design time.
+
+2. **Cap IDs as strings, not enums.** New features arrive through
+   adding a constant + catalog entry — no proto enum renumbering,
+   no backward-compat gymnastics. The test suite's
+   `expectedPgCaps` list is the single place where "what does the
+   PG emitter use?" is enumerated for audit.
+
+3. **Per-dialect catalog, shared constants.** Each dialect's catalog
+   is independent — PG doesn't know anything about MySQL's version
+   numbers, SQLite doesn't care about JSONB. But the cap IDs are
+   shared (a cap ID like `JSONB` means the same thing across
+   dialects — the feature JSON-binary storage). Downstream tooling
+   can ask "across dialects, which ones have JSONB?" uniformly.
+
+4. **Inspection before enforcement.** Iter-1 ships the read surface
+   without the write surface. This lets docs + audit tooling + the
+   platform start consuming the catalog now, and leaves enforcement
+   for iter-2 when target-version config exists.
+
+5. **Catalog-vs-code discipline.** Each feature in the emitter is
+   expected to reference its cap ID constant. A sweep that connects
+   every emitted SQL construct to a cap ID lands with usage tracking
+   (iter-2) — iter-1 pins the catalog shape so that sweep is
+   mechanical, not a redesign.
+
 ### D15 — Collection carriers (map, repeated) + AUTO dispatch + element typing (added 2026-04-21)
 
 **Decision.** Proto `map<K, V>` and `repeated X` fields become
