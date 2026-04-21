@@ -537,3 +537,60 @@ ones that know about dialect-specific shapes.
    entry in `required_extensions`, then get promoted to a curated
    `(w17.pg.vector)` / `(w17.pg.geometry)` extension of its own when a
    real pilot makes the case.
+
+### D10 — Proto field numbers are the differ's identity key (resolves iteration-2+ alter-diff strategy)
+
+**Decision.** The differ uses **proto field numbers** — not column
+names, not similarity heuristics — as the identity key for deciding
+whether two columns across (prev, curr) schemas are "the same column".
+A field whose number is present in both snapshots is the *same* column;
+any difference in name, type, nullability, defaults, or CHECK constraints
+becomes an `AlterColumn` op. A number present in only prev is
+`DropColumn`; a number present in only curr is `AddColumn`. Rename
+detection is free and unambiguous.
+
+For tables, the equivalent identity key is the proto message FQN
+(already carried on `ir.Table.message_fqn`). A message rename changes
+the FQN and is semantically `DropTable` + `AddTable` — consistent with
+proto's wire contract, where message renames are themselves breaking.
+
+**Rationale.**
+
+1. **Proto field numbers are an inviolable contract.** Users never
+   reuse a number, never swap two numbers, never renumber — the proto
+   ecosystem enforces it via wire-compat lint and by making violations
+   visibly break at runtime. This is a strong baseline we get for free;
+   we don't have to re-invent it with column comments, sequence counters,
+   or shadow metadata tables.
+2. **Ent / Atlas / Django migrate have to guess.** They see a column
+   `foo_id` disappear and `parent_id` appear and decide "rename? drop+add?"
+   via similarity heuristics that are right most of the time and wrong
+   when it matters. The whole class of problem — rename-detection, type-
+   change planning when a column is also renamed, backfill shape when
+   identity is ambiguous — collapses when identity is in the source (the
+   number), not in the ambiguous surface form (the name).
+3. **Simpler differ logic.** Alter-diff reduces to a bucketing pass:
+   group columns by number across (prev, curr). Both-present with equal
+   facts → no-op. Both-present with differing facts → `AlterColumn`.
+   Only-prev → `DropColumn`. Only-curr → `AddColumn`. No fuzzy matching,
+   no tie-breaking, no rename-threshold knob.
+4. **User-facing semantics match user intent.** When the generated
+   migration says `AlterColumn`, the author kept the field number and
+   changed something else — a deliberate act. When it says
+   `DropColumn + AddColumn`, the author removed a number and added a
+   new one — also deliberate, and the right framing for any non-trivial
+   data migration.
+
+**Relation to D3.** "No compiler-generated fields" (D3) makes this
+possible: every DB column is an explicit proto field with an explicit
+number. If we injected hidden `created_at` / `updated_at` columns, they'd
+lack a number and the differ would need a parallel identity mechanism for
+them. The two decisions reinforce each other — D3 keeps the IR honest,
+D10 turns that honesty into cheap alter-diff.
+
+**Parked implementation work (iter-2+).** `irpb.Column` needs a
+`int32 number` field, populated from `protoreflect.FieldDescriptor.Number()`
+in `ir.Build`. Iteration-1 does not consume it (differ only handles
+`prev == nil`), so the addition is deferred to whichever rev first
+tackles non-trivial alter-diff. The IR is proto, so adding the field
+later is wire-compat; there's no forcing function to do it upfront.
