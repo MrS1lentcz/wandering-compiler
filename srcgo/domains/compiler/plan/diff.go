@@ -5,10 +5,13 @@
 // docs/iteration-1.md D4 (rev 2026-04-21) and tech-spec strategic decision #8.
 //
 // Iteration-1 only handles the initial-migration case (prev == nil): the
-// differ walks curr.Tables in stable name order and emits one AddTable op
-// per table. DropTable / AddColumn / AlterColumn / RenameColumn / AddIndex
-// / DropIndex land iteration-by-iteration as pilot schemas surface real
-// alter-diff needs.
+// differ walks curr.Tables in FK-dependency order (topological; referenced
+// tables before referencers, self-refs permitted because PG / most
+// dialects accept inline self-FK in CREATE TABLE) and emits one AddTable
+// op per table. Ties between mutually-independent tables break by lexical
+// name for deterministic output (AC #4). DropTable / AddColumn /
+// AlterColumn / RenameColumn / AddIndex / DropIndex land
+// iteration-by-iteration as pilot schemas surface real alter-diff needs.
 package plan
 
 import (
@@ -29,10 +32,10 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 		return &planpb.MigrationPlan{}, nil
 	}
 
-	tables := append([]*irpb.Table(nil), curr.GetTables()...)
-	sort.Slice(tables, func(i, j int) bool {
-		return tables[i].GetName() < tables[j].GetName()
-	})
+	tables, err := topoSortByFK(curr.GetTables())
+	if err != nil {
+		return nil, err
+	}
 
 	ops := make([]*planpb.Op, 0, len(tables))
 	for _, t := range tables {
@@ -41,4 +44,78 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 		})
 	}
 	return &planpb.MigrationPlan{Ops: ops}, nil
+}
+
+// topoSortByFK returns tables in FK-dependency order (referenced tables
+// first). Ties — sets of tables none of which depends on another — are
+// broken lexically so output is deterministic (AC #4).
+//
+// Implementation: depth-first traversal with the outer loop iterating
+// table names in lexical order. For each table we recursively visit its
+// FK targets first (in lexical order among the deps), then emit the
+// table itself. Self-FKs are ignored — they don't create an ordering
+// constraint (PG accepts inline `REFERENCES <self>(col)` in CREATE
+// TABLE; the constraint is only checked at INSERT time). Missing
+// targets are impossible here — ir.resolveFKs already rejects them —
+// but we error loudly anyway to surface any future IR-layer slip.
+// Multi-table FK cycles are rejected: they're explicitly out of scope
+// per docs/iteration-1.md "Not in scope" (cross-table FK cycles → iter-2+).
+func topoSortByFK(input []*irpb.Table) ([]*irpb.Table, error) {
+	byName := make(map[string]*irpb.Table, len(input))
+	names := make([]string, 0, len(input))
+	for _, t := range input {
+		byName[t.GetName()] = t
+		names = append(names, t.GetName())
+	}
+	sort.Strings(names)
+
+	// 0=unvisited, 1=visiting (cycle detection), 2=done.
+	state := make(map[string]int, len(input))
+	out := make([]*irpb.Table, 0, len(input))
+
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case 2:
+			return nil
+		case 1:
+			return fmt.Errorf("plan: FK cycle involving table %q (multi-table FK cycles are out of scope in iteration-1; see iteration-1.md \"Not in scope\")", name)
+		}
+		state[name] = 1
+
+		t := byName[name]
+		// Collect distinct non-self FK targets, then visit in lexical order.
+		dedup := map[string]struct{}{}
+		for _, fk := range t.GetForeignKeys() {
+			tgt := fk.GetTargetTable()
+			if tgt == name {
+				continue // self-FK: no ordering constraint.
+			}
+			if _, ok := byName[tgt]; !ok {
+				return fmt.Errorf("plan: table %q references unknown table %q (ir.resolveFKs should have caught this)", name, tgt)
+			}
+			dedup[tgt] = struct{}{}
+		}
+		deps := make([]string, 0, len(dedup))
+		for d := range dedup {
+			deps = append(deps, d)
+		}
+		sort.Strings(deps)
+		for _, d := range deps {
+			if err := visit(d); err != nil {
+				return err
+			}
+		}
+
+		state[name] = 2
+		out = append(out, t)
+		return nil
+	}
+
+	for _, n := range names {
+		if err := visit(n); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

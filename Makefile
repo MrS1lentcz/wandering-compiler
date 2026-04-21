@@ -35,6 +35,7 @@ test-apply:
 		db=test_$$name; \
 		echo "--- $$name ---"; \
 		docker exec $$CID psql -U postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE $$db;" >/dev/null; \
+		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS hstore;" >/dev/null; \
 		for phase in up down up; do \
 			echo "  $$phase"; \
 			docker exec -i $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 < $${dir}expected.$${phase}.sql >/dev/null; \

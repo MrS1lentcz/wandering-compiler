@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package m10.numeric_spectrum;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: every numeric (carrier, type) cell of D2 plus
+// explicit range CHECKs and DECIMAL with precision/scale. DECIMAL +
+// gt/gte is spec-allowed but IR-rejected in iter-1 (build.go's
+// numericOnly guard doesn't treat DECIMAL as numeric) — parked for
+// iter-2 backlog; this fixture deliberately avoids that combo so it
+// stays green. See docs/iteration-1.md D2.
+message Measurement {
+  option (w17.db.table) = { name: "measurements" };
+
+  int64  id           = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int32  reading      = 2 [(w17.field) = { type: NUMBER, gt: -50, lt: 50 }];
+  int32  code         = 3 [(w17.field) = { type: ID }];
+  int64  hits         = 4 [(w17.field) = { type: COUNTER }];
+  double raw          = 5 [(w17.field) = { type: NUMBER, gte: 0, lte: 1000000 }];
+  double price        = 6 [(w17.field) = { type: MONEY }];
+  double conversion   = 7 [(w17.field) = { type: RATIO }];
+  string exact_amount = 8 [(w17.field) = { type: DECIMAL, precision: 18, scale: 6 }];
+}

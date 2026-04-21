@@ -344,12 +344,10 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		}
 	}
 
-	// Build Checks from the surviving facts.
-	if fieldOpt != nil {
-		b.attachChecks(col, fieldOpt, carrier, semType, desc)
-	}
-
-	// Postgres dialect passthrough.
+	// Postgres dialect passthrough — must be populated BEFORE attachChecks
+	// so the synth layer can see when PG storage is redirected (jsonb, inet,
+	// tsvector, hstore, custom_type) and skip string-only synths that would
+	// fail at apply on the overridden column type.
 	if lf.PgField != nil {
 		col.Pg = &irpb.PgOptions{
 			Jsonb:              lf.PgField.GetJsonb(),
@@ -361,13 +359,26 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		}
 	}
 
+	// Build Checks from the surviving facts.
+	if fieldOpt != nil {
+		b.attachChecks(col, fieldOpt, carrier, semType, desc)
+	}
+
 	return col
 }
 
 func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.Carrier, semType irpb.SemType, origin protoreflect.FieldDescriptor) {
+	// stringStorage covers both the sem-type axis (UUID / DECIMAL map to
+	// non-string SQL types) and the PG-passthrough axis (jsonb / inet /
+	// tsvector / hstore / custom_type redirect storage regardless of sem
+	// type). All string-only CHECK synths gate on it — blank, length,
+	// regex, choices — because PG rejects those operators on non-string
+	// column types at apply time.
+	stringStorage := carrier == irpb.Carrier_CARRIER_STRING && columnStoresAsString(col, semType)
+
 	// LengthCheck — omitted for CHAR/SLUG since VARCHAR(N) covers the upper
 	// bound. MinLen always produces a CHECK when present.
-	if carrier == irpb.Carrier_CARRIER_STRING {
+	if stringStorage {
 		hasMin := opt.MinLen != nil
 		hasMax := opt.GetMaxLen() > 0 && !(semType == irpb.SemType_SEM_CHAR || semType == irpb.SemType_SEM_SLUG)
 		if hasMin || hasMax {
@@ -383,35 +394,41 @@ func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.
 			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Length{Length: lc}})
 		}
 		// BlankCheck — added unless author opted into blank or column is nullable.
-		// Skipped for string-carrier sem types whose SQL storage isn't string-typed
-		// (UUID → UUID, DECIMAL → NUMERIC); `CHECK (col <> '')` on those would fail
-		// at apply time because PG can't cast '' to UUID / NUMERIC.
-		if !opt.GetBlank() && !col.GetNullable() && semTypeStoresAsString(semType) {
+		if !opt.GetBlank() && !col.GetNullable() {
 			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}})
 		}
 	}
 
-	// RangeCheck.
+	// RangeCheck — applies to numeric carriers; storage override via
+	// `(w17.pg.field).custom_type` is assumed to still be numeric-comparable
+	// (author's responsibility — nothing downstream re-checks). Not gated
+	// on stringStorage since ranges are numeric-only anyway.
 	if opt.Gt != nil || opt.Gte != nil || opt.Lt != nil || opt.Lte != nil {
 		rc := &irpb.RangeCheck{Gt: opt.Gt, Gte: opt.Gte, Lt: opt.Lt, Lte: opt.Lte}
 		col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Range{Range: rc}})
 	}
 
 	// RegexCheck — pattern override takes precedence over type-implied.
-	if opt.GetPattern() != "" {
-		col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{
-			Pattern: opt.GetPattern(),
-			Source:  irpb.RegexSource_REGEX_FROM_PATTERN,
-		}}})
-	} else if regex := defaultRegexFor(semType); regex != "" {
-		col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{
-			Pattern: regex,
-			Source:  irpb.RegexSource_REGEX_FROM_TYPE,
-		}}})
+	// Both gate on stringStorage: `col ~ 'pat'` against a JSONB / INET /
+	// UUID column fails to parse / type-check.
+	if stringStorage {
+		if opt.GetPattern() != "" {
+			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{
+				Pattern: opt.GetPattern(),
+				Source:  irpb.RegexSource_REGEX_FROM_PATTERN,
+			}}})
+		} else if regex := defaultRegexFor(semType); regex != "" {
+			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{
+				Pattern: regex,
+				Source:  irpb.RegexSource_REGEX_FROM_TYPE,
+			}}})
+		}
 	}
 
-	// ChoicesCheck — resolve the enum FQN to its value names.
-	if opt.GetChoices() != "" {
+	// ChoicesCheck — resolve the enum FQN to its value names. Gated on
+	// stringStorage (`col IN ('A','B')` requires string equality semantics
+	// on the SQL column).
+	if stringStorage && opt.GetChoices() != "" {
 		values, resolveErr := b.resolveEnumValues(origin, opt.GetChoices())
 		if resolveErr != nil {
 			b.err(resolveErr)
@@ -916,4 +933,26 @@ func semTypeStoresAsString(sem irpb.SemType) bool {
 		return false
 	}
 	return true
+}
+
+// columnStoresAsString combines the sem-type axis with the PG-passthrough
+// axis. Returns false when `(w17.pg.field)` redirects storage to a
+// non-string SQL type (jsonb, inet, tsvector, hstore, or any custom_type
+// escape hatch) — string-only CHECK synths must skip in that case, since
+// operators like `<> ''`, `char_length(…)`, `~ 'pat'`, and `IN ('a','b')`
+// don't type-check against those columns.
+//
+// `custom_type` is treated as opaque — we can't tell at IR time whether
+// the target type (e.g. CITEXT) is still string-shaped. Skipping all
+// string synths is the safe default; authors who need them on a
+// custom_type drop the pg.field override or emit the CHECK manually.
+func columnStoresAsString(col *irpb.Column, sem irpb.SemType) bool {
+	if pg := col.GetPg(); pg != nil && pgOverridesStorage(pg) {
+		return false
+	}
+	return semTypeStoresAsString(sem)
+}
+
+func pgOverridesStorage(pg *irpb.PgOptions) bool {
+	return pg.GetJsonb() || pg.GetInet() || pg.GetTsvector() || pg.GetHstore() || pg.GetCustomType() != ""
 }

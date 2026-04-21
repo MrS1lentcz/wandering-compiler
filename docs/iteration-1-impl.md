@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 complete; **M10 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 complete; **iteration-1 closed.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -624,12 +624,88 @@ in code, not in docs:
   transitively proves fresh generator output applies on PG. Serves
   AC #2 and AC #3.
 
-**Next:** M10 — grand-tour fixture matrix (AC #7 rev 2026-04-21).
-Replaces the original "pilot project adoption" framing — see the M10
-section above and `iteration-1.md` AC #7 rev writeup for the "why"
-discussion. Authoring 6–8 fixture dirs under
-`srcgo/domains/compiler/testdata/` that together cover every iter-1
-vocabulary primitive plus the interaction-risky pairings; each is
-picked up transparently by both M8 (golden) and M9
-(apply-roundtrip). Expected to surface some gaps — those become
-same-batch fixes or iter-2 backlog.
+- **M10 (shipped, 2026-04-21) — grand-tour fixture matrix closes iter-1.**
+  Seven new fixture dirs under `srcgo/domains/compiler/testdata/`,
+  auto-picked up by M8 (golden byte-match) and M9 (apply roundtrip)
+  without any new wiring:
+  - `uuid_pk` — UUID PK with UUID_V7, UUID_V4 on a second column, EMAIL
+    type-implied regex, CHAR with max_len, TEXT with explicit
+    min_len + max_len (both-bounds length CHECK).
+  - `numeric_spectrum` — every numeric (carrier, type) cell of D2
+    except COUNTER-int32 (spec-rejected), range CHECKs via gt/lt and
+    gte/lte (the symmetric pair collapses to BETWEEN in SQL), DECIMAL
+    with precision + scale.
+  - `temporal_full` — DATE+CURRENT_DATE, TIME+CURRENT_TIME,
+    DATETIME+NOW(), INTERVAL bare (no default_auto support).
+  - `flags_enums_json` — bool+TRUE, bool+FALSE, TEXT+EMPTY_JSON_ARRAY,
+    TEXT+EMPTY_JSON_OBJECT, Choices via proto enum FQN, pattern
+    override (proves author regex wins over any type-implied one).
+  - `pg_dialect` — all four curated flags (jsonb, inet, tsvector,
+    hstore) + custom_type escape hatch (MACADDR — built-in, no
+    extension required, validates the override path without pulling
+    pgvector into test-apply).
+  - `fks_parent_child` — FK with CASCADE-inferred (orphanable unset on
+    NOT NULL), FK with SET NULL (orphanable:true + null:true), self-ref
+    FK, INCLUDE covering index, storage-index synth co-existing with
+    FK.
+  - `m2m_join` — composite PK on a join table (two columns with
+    pk:true → table-level `PRIMARY KEY (…)`), two inline FKs,
+    exercises plan.Diff topological sort (lexical `product_tags` <
+    `products` contradicts FK order; topo must win).
+
+  Gaps discovered while building the matrix and fixed in this batch
+  (narrow, in-situ):
+  - `ir.build.attachChecks`: string-only synths (blank, length, regex,
+    choices) now gate on `columnStoresAsString`, which combines the
+    sem-type axis (UUID / DECIMAL → non-string storage) with the
+    PG-passthrough axis (jsonb / inet / tsvector / hstore / custom_type
+    redirect storage regardless of sem type). New helpers
+    `columnStoresAsString` + `pgOverridesStorage`; pg.field block in
+    `buildColumn` now runs BEFORE attachChecks so the synth layer can
+    see the override.
+  - `plan.Diff`: now topological by FK dependency, not lexical.
+    Referenced tables come before referencers; self-FKs don't create
+    ordering constraints (PG accepts inline self-REFERENCES); ties
+    break lexically for AC #4 determinism. Multi-table FK cycles are
+    rejected with a clear error (out of scope per iter-1.md "Not in
+    scope"). New helper `topoSortByFK` + three new regression tests in
+    `diff_test.go`.
+  - `Makefile test-apply` now `CREATE EXTENSION IF NOT EXISTS hstore`
+    in each per-fixture DB. hstore is a PG contrib module, built into
+    the `postgres:18-alpine` image but needs activation — one
+    per-database line, scoped to test-apply only (production users
+    activate extensions themselves or via the parked platform).
+
+  Gaps discovered and **deliberately parked** for iter-2 (fixture
+  authored around them rather than fixed in-batch):
+  - **DECIMAL + gt/gte/lt/lte.** iteration-1.md D2 permits range
+    CHECKs on DECIMAL ("bounds are carried via double and are
+    precision-limited"), but `ir.build.buildColumn`'s `numericOnly`
+    guard treats DECIMAL (CARRIER_STRING + SEM_DECIMAL) as non-numeric
+    and rejects. The `numeric_spectrum` fixture carries DECIMAL
+    without range, with a pinned comment. Fix would split `numericOnly`
+    into `numericCarrier` + special-case for DECIMAL.
+  - **Explicit author options (min_len, max_len, pattern, choices)
+    silently dropped when `(w17.pg.field)` overrides storage.**
+    attachChecks skips them (correct — they'd fail at apply on the
+    overridden column), but this loses author intent without a
+    diagnostic. Should error at `buildColumn` validation time: "X is
+    meaningless when pg.field overrides storage to non-string".
+  - **FK to a table with composite PK** via the iter-1 single-col
+    `fk: "table.col"` syntax: syntactically valid (FK into one of the
+    composite columns) but semantically awkward — can't uniquely
+    identify parent row. Not tested in this matrix; real need will
+    surface when the pilot platform lands.
+  - **Scientific notation in range SQL.** `strconv.FormatFloat('g')`
+    renders `1000000` as `1e+06`. PG accepts both; the emitter could
+    use `'f'` + 0 precision for integer-valued doubles to produce
+    prettier SQL. Cosmetic — deferred.
+
+  **Serves AC #7 (revised), closes iteration-1.**
+
+**Next:** iteration-2 planning. The parked-gap list above feeds the
+iter-2 backlog alongside the already-deferred items
+(alter-diff, DropTable, multi-file schemas, platform, deploy client,
+MySQL/SQLite-as-production emitters, `wc lint/diff/viz/changelog`).
+Iteration-1 has no further work — the close gate (AC #1–#7 green,
+grand-tour matrix green on both goldens and apply) is satisfied.

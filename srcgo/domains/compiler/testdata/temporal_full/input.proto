@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package m10.temporal_full;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/duration.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: every temporal (carrier, type) cell of D2 plus
+// all three shapes of default_auto: NOW (DATE → CURRENT_DATE, TIME →
+// CURRENT_TIME, DATETIME → NOW()). google.protobuf.Duration maps to
+// INTERVAL with no default_auto support in iter-1 — column stays bare.
+message Event {
+  option (w17.db.table) = { name: "events" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  google.protobuf.Timestamp starts_on      = 2 [(w17.field) = { type: DATE,     default_auto: NOW }];
+  google.protobuf.Timestamp starts_at_time = 3 [(w17.field) = { type: TIME,     default_auto: NOW }];
+  google.protobuf.Timestamp created_at     = 4 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
+
+  google.protobuf.Duration timeout = 5 [(w17.field) = { type: INTERVAL }];
+}

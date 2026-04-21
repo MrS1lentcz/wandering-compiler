@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package m10.fks_parent_child;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: FK shapes that DON'T need composite PK.
+//   - CASCADE-inferred via orphanable=unset on a NOT NULL column
+//     (Customer.orders' customer_id).
+//   - SET NULL via orphanable: true + null: true (Order.assigned_to).
+//   - Self-referencing FK (Category.parent_id → Category.id).
+//   - Covering INCLUDE index on (customer_id, status) INCLUDE (total),
+//     which exercises emit/postgres/index.go's INCLUDE branch.
+//   - Single-col storage index via (w17.db.column).index on
+//     Order.assigned_to, co-existing with the FK — proves the two
+//     synth paths compose.
+//
+// FK-dependency topo sort (plan.diff) is exercised here too: `orders`
+// depends on `customers`, so Diff must emit customers before orders
+// even though `orders` sorts lexically earlier via some alphabets
+// (here it doesn't, but the m2m_join fixture picks up that case).
+
+message Customer {
+  option (w17.db.table) = { name: "customers" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 120 }];
+}
+
+message Order {
+  option (w17.db.table) = {
+    name: "orders",
+    indexes: [
+      { fields: ["customer_id", "status"], include: ["total"] }
+    ]
+  };
+
+  int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  customer_id = 2 [(w17.field) = { type: ID, fk: "customers.id" }];
+  int64  assigned_to = 3 [
+    (w17.field)     = { type: ID, fk: "customers.id", null: true, orphanable: true },
+    (w17.db.column) = { index: true }
+  ];
+  string status      = 4 [(w17.field) = { type: CHAR, max_len: 16 }];
+  double total       = 5 [(w17.field) = { type: MONEY }];
+}
+
+message Category {
+  option (w17.db.table) = { name: "categories" };
+
+  int64  id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  parent_id = 2 [(w17.field) = { type: ID, fk: "categories.id", null: true, orphanable: true }];
+  string name      = 3 [(w17.field) = { type: CHAR, max_len: 80 }];
+}

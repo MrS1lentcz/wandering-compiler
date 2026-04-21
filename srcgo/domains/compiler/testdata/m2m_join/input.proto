@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package m10.m2m_join;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: m2m join table with composite PK made of two FKs.
+// The lexical order of names (`product_tags` < `products` because
+// '_' 0x5F < 's' 0x73) deliberately contradicts FK dependency order,
+// so this fixture doubles as the regression guard for plan.diff's
+// topological sort: the emitted CREATE TABLE order must be
+// products, tags, product_tags regardless of lexical sorting.
+//
+// Composite PK shape: both ProductTag.product_id and
+// ProductTag.tag_id carry `pk: true`, which in ir.Build produces a
+// multi-column tbl.PrimaryKey list; the PG emitter then renders it
+// as a table-level `PRIMARY KEY (…)` clause (not inline on a single
+// column).
+
+message Product {
+  option (w17.db.table) = { name: "products" };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string sku   = 2 [(w17.field) = { type: CHAR, max_len: 32, unique: true }];
+  string title = 3 [(w17.field) = { type: CHAR, max_len: 200 }];
+}
+
+message Tag {
+  option (w17.db.table) = { name: "tags" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: SLUG, max_len: 64, unique: true }];
+}
+
+message ProductTag {
+  option (w17.db.table) = { name: "product_tags" };
+
+  int64 product_id = 1 [(w17.field) = { type: ID, pk: true, fk: "products.id" }];
+  int64 tag_id     = 2 [(w17.field) = { type: ID, pk: true, fk: "tags.id" }];
+}

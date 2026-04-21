@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package m10.uuid_pk;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture: UUID PK + UUID_V7 auto; UUID_V4 auto on a second
+// column; CHAR with max_len (VARCHAR); EMAIL (type-implied regex);
+// TEXT with explicit min_len + max_len (length CHECK with both bounds).
+// Exercises the pre-M10 attachChecks fix: UUID columns must not receive
+// a `CHECK (col <> '')` synth (fails at apply on PG's UUID type) and
+// the redundant UUID regex is no longer emitted.
+message Session {
+  option (w17.db.table) = { name: "sessions" };
+
+  string id         = 1 [(w17.field) = { type: UUID, pk: true, default_auto: UUID_V7 }];
+  string client_key = 2 [(w17.field) = { type: UUID, default_auto: UUID_V4 }];
+  string token      = 3 [(w17.field) = { type: CHAR, max_len: 64 }];
+  string email      = 4 [(w17.field) = { type: EMAIL }];
+  string note       = 5 [(w17.field) = { type: TEXT, min_len: 8, max_len: 4000 }];
+}
