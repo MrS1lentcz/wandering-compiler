@@ -89,6 +89,18 @@ message Column {
   // over preset. See D14.
   DbType db_type = 32;
 
+  // --- Collection carriers (CARRIER_MAP / CARRIER_LIST) ---
+  // For Carrier=CARRIER_LIST: element's underlying Carrier (the scalar
+  // kind of a `repeated X` field). For Carrier=CARRIER_MAP: V's Carrier
+  // (K is always string in iter-1.6).
+  // CARRIER_UNSPECIFIED when the element / value is a proto Message
+  // (element_is_message=true) — forces JSON storage.
+  Carrier element_carrier = 33;
+  // True when the element / map-value is a proto Message type
+  // (repeated Foo, map<string, Foo>). Forces JSON storage regardless
+  // of dialect.
+  bool element_is_message = 34;
+
   repeated Check checks = 40;
 }
 
@@ -192,6 +204,16 @@ enum Carrier {
   // Raw binary blob. Proto `bytes` carrier → PG BYTEA / MySQL BLOB /
   // SQLite BLOB. Like bool, carries no semantic subtype.
   CARRIER_BYTES = 8;
+  // Proto map<K, V>. Dispatch: PG → HSTORE for map<string, string>,
+  // else JSONB; MySQL → JSON; SQLite → TEXT. V may be a scalar or a
+  // proto message. Iter-1.6 restricts K to string.
+  CARRIER_MAP = 9;
+  // Proto `repeated X`. Dispatch: PG → native array of element's PG
+  // type when the element is a scalar; JSONB when the element is a
+  // proto message. MySQL → JSON; SQLite → TEXT.
+  // For repeated scalars, (w17.field).type on the field refines the
+  // ELEMENT's sem type (e.g. `repeated string [type: URL]`).
+  CARRIER_LIST = 10;
 }
 
 // SemType is the semantic refinement of a Carrier.
@@ -229,6 +251,11 @@ enum SemType {
   SEM_TIME = 21;
   SEM_DATETIME = 22;
   SEM_INTERVAL = 30;
+
+  // Explicit "compiler picks storage per dialect" on map/repeated
+  // carriers. Same as leaving type unset on those carriers but
+  // written deliberately. Not valid on scalar carriers.
+  SEM_AUTO = 40;
 }
 
 // FKAction — resolved ON DELETE behaviour. Populated from

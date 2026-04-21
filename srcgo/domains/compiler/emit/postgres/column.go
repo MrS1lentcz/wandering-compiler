@@ -172,10 +172,71 @@ func columnType(col *irpb.Column) (string, error) {
 
 	case irpb.Carrier_CARRIER_DURATION:
 		return "INTERVAL", nil
+
+	case irpb.Carrier_CARRIER_MAP:
+		// map<K, V> dispatch:
+		//   value is string scalar   → HSTORE (iter-1.6 default, requires hstore extension)
+		//   everything else          → JSONB
+		if !col.GetElementIsMessage() && col.GetElementCarrier() == irpb.Carrier_CARRIER_STRING {
+			return "HSTORE", nil
+		}
+		return "JSONB", nil
+
+	case irpb.Carrier_CARRIER_LIST:
+		// repeated X dispatch:
+		//   message element          → JSONB
+		//   scalar element, AUTO     → <element_pg_type>[] (element default sem)
+		//   scalar element, sem set  → <element_pg_type>[] (element's refined sem)
+		if col.GetElementIsMessage() {
+			return "JSONB", nil
+		}
+		return pgArrayOf(col)
 	}
 
 	return "", fmt.Errorf("no PG type mapping for carrier=%s type=%s (ir invariant violated)",
 		displayCarrier(col.GetCarrier()), displaySemType(col.GetType()))
+}
+
+// pgArrayOf renders a native PG array of the column's element carrier.
+// The element's sem-type refinement lives on col.Type (list convention —
+// on list carrier col.Type is the element's sem). AUTO falls back to
+// the element carrier's default sem.
+func pgArrayOf(col *irpb.Column) (string, error) {
+	// Build a synthetic element Column to reuse columnType's carrier×sem
+	// dispatch without duplicating the table.
+	elementSem := col.GetType()
+	if elementSem == irpb.SemType_SEM_AUTO {
+		elementSem = elementDefaultSemFor(col.GetElementCarrier())
+	}
+	element := &irpb.Column{
+		Carrier:   col.GetElementCarrier(),
+		Type:      elementSem,
+		MaxLen:    col.GetMaxLen(),
+		Precision: col.GetPrecision(),
+		Scale:     col.Scale,
+	}
+	elemType, err := columnType(element)
+	if err != nil {
+		return "", fmt.Errorf("pgArrayOf: element: %w", err)
+	}
+	return elemType + "[]", nil
+}
+
+// elementDefaultSemFor mirrors ir.defaultSemTypeFor for element-level
+// dispatch on list carriers. Kept in the emitter to avoid reaching into
+// ir internals.
+func elementDefaultSemFor(carrier irpb.Carrier) irpb.SemType {
+	switch carrier {
+	case irpb.Carrier_CARRIER_STRING:
+		return irpb.SemType_SEM_TEXT
+	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64, irpb.Carrier_CARRIER_DOUBLE:
+		return irpb.SemType_SEM_NUMBER
+	case irpb.Carrier_CARRIER_TIMESTAMP:
+		return irpb.SemType_SEM_DATETIME
+	case irpb.Carrier_CARRIER_DURATION:
+		return irpb.SemType_SEM_INTERVAL
+	}
+	return irpb.SemType_SEM_UNSPECIFIED
 }
 
 // defaultExpr renders an ir.Default to a PG DEFAULT expression (without the

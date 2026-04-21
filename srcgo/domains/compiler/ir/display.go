@@ -26,6 +26,12 @@ func displayCarrier(c irpb.Carrier) string {
 		return "google.protobuf.Timestamp"
 	case irpb.Carrier_CARRIER_DURATION:
 		return "google.protobuf.Duration"
+	case irpb.Carrier_CARRIER_BYTES:
+		return "bytes"
+	case irpb.Carrier_CARRIER_MAP:
+		return "MAP"
+	case irpb.Carrier_CARRIER_LIST:
+		return "LIST"
 	}
 	return "<unspecified>"
 }

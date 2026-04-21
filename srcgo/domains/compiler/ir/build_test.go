@@ -438,6 +438,42 @@ func TestBuildErrors(t *testing.T) {
 				`db_type: TEXT`,
 			},
 		},
+		{
+			name:    "map key must be string",
+			fixture: "testdata/errors/map_key_must_be_string.proto",
+			wants: []string{
+				`map_key_must_be_string.proto:`,
+				`map key must be string`,
+				`why:`,
+				`HSTORE`,
+				`fix:`,
+				`map<string, V>`,
+			},
+		},
+		{
+			name:    "list element sem forbidden on message element",
+			fixture: "testdata/errors/list_type_on_message_element.proto",
+			wants: []string{
+				`list_type_on_message_element.proto:`,
+				`repeated Message field cannot carry an element sem type`,
+				`why:`,
+				`scalar elements`,
+				`fix:`,
+				`type: AUTO`,
+			},
+		},
+		{
+			name:    "string-only CHECK options rejected on collection carriers",
+			fixture: "testdata/errors/collection_string_synth_rejected.proto",
+			wants: []string{
+				`collection_string_synth_rejected.proto:`,
+				`min_len / blank / pattern / choices are not supported on LIST carrier`,
+				`why:`,
+				`forall element`,
+				`fix:`,
+				`raw_checks`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

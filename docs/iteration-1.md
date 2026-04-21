@@ -806,6 +806,113 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D15 — Collection carriers (map, repeated) + AUTO dispatch + element typing (added 2026-04-21)
+
+**Decision.** Proto `map<K, V>` and `repeated X` fields become
+first-class columns. Two new carriers + one new sem-type value + a
+deterministic per-dialect dispatch ladder.
+
+**Carriers:**
+
+- `CARRIER_MAP` — proto `map<K, V>`. Iter-1.6 requires K=string;
+  non-string keys are rejected (HSTORE is string-string only, and
+  cross-dialect JSONB shape conventions for non-string keys aren't
+  pinned).
+- `CARRIER_LIST` — proto `repeated X`. X can be any scalar carrier
+  (string / int32 / int64 / double / bool / bytes / Timestamp /
+  Duration) or a proto message.
+
+**SemType:** `SEM_AUTO` — the explicit "let the dialect pick storage
+based on carrier + element info" marker. Valid only on map / list
+carriers. Default on those carriers (leaving `type:` unset is
+equivalent to `type: AUTO`).
+
+**Dispatch ladder (Postgres iter-1.6):**
+
+| Field shape | PG storage |
+|---|---|
+| `map<string, string>` | `HSTORE` (requires hstore extension) |
+| `map<string, V>` where V is non-string scalar | `JSONB` |
+| `map<string, V>` where V is Message | `JSONB` |
+| `repeated <scalar>` | `<scalar PG type>[]` (native array) |
+| `repeated Timestamp` / `repeated Duration` | `TIMESTAMPTZ[]` / `INTERVAL[]` (native) |
+| `repeated Message` | `JSONB` |
+
+For later dialects: native array / map types fall back to JSON where
+absent, then TEXT where even JSON isn't available. Same deterministic
+ladder.
+
+**Element typing on repeated.** `(w17.field).type` on a repeated
+field refines the element's sem-type. `repeated string [type: URL]`
+= array of URLs → `VARCHAR(2048)[]` (URL's preset default max_len).
+The column-level convention is: on a list carrier, Column.Type IS
+the element's sem-type. This matches the author's mental model
+(choosing a sub-type picks that type for each element) without
+introducing a separate per-element options message.
+
+`max_len` on a repeated field applies to the element's `VARCHAR(N)`
+sizing. CHAR / SLUG / EMAIL / URL presets carry over identically.
+
+Element sem refinement is **not** supported on maps — iter-1.6
+dispatches maps strictly on key / value carrier types. Element-
+typed map values land iter-2+.
+
+**What's rejected at IR time:**
+
+- `pk: true` on collection carriers (array PKs have degenerate
+  semantics).
+- `unique: true` on collection carriers (UNIQUE on whole-array
+  equality is almost never the intent; use `raw_indexes` for the
+  specific index shape).
+- `min_len` / `blank` / `pattern` / `choices` on collections — these
+  would need per-element CHECKs, and PG CHECK constraints can't
+  express "forall element" without subqueries. Authors who need them
+  reach for `(w17.db.table).raw_checks` with dialect-specific SQL.
+- `type:` other than AUTO on maps.
+- Element sem type set on `repeated Message` (message elements store
+  as JSONB; per-element sem is meaningless there).
+- Non-string map keys.
+
+CHECK synthesis skips entirely on collection carriers — no implicit
+range (PERCENTAGE / RATIO), no implicit blank, no implicit regex.
+Column-level CHECKs on arrays / maps arrive via `raw_checks`.
+
+**Rationale.**
+
+1. **Django / ORM parity.** `ArrayField`, `JSONField`, `HStoreField`
+   are day-one features in Django. Without collection carriers,
+   iter-1 rejected `repeated`/`map` outright and forced authors to
+   hand-roll a JSONB+app-serialised shape — worse storage density,
+   no native operators, no native indexes. Post-D15 the common case
+   is declarative and native.
+
+2. **AUTO + element typing is more composable than a big enum.**
+   An alternative was `DbType: ARRAY_OF_TEXT`, `DbType: ARRAY_OF_INT`,
+   etc. — O(N*M) combinatorial enum. AUTO + element-carrier +
+   element-sem composes from building blocks already in the IR; the
+   dispatch ladder is ~15 lines of emitter code, not a 100-entry
+   enum.
+
+3. **Element-level CHECKs parked, not faked.** PG CHECK constraints
+   provably can't iterate (no subquery support). Offering author-
+   level `min_len` / `pattern` / etc. on list carriers would require
+   silently dropping them, which violates the "no silent drops"
+   discipline that D13 / D14 established. Rejecting up front + raw
+   escape hatch preserves discipline while leaving power-user room.
+
+4. **Composable with D14 `db_type`.** Authors can override AUTO
+   dispatch via `db_type: JSONB` on a map to force JSON over HSTORE,
+   or via `db_type: JSON` on a list to force JSON over native arrays.
+   No new escape hatch needed; the orthogonal storage axis already
+   covers this.
+
+5. **Timestamp / Duration as scalar-ish elements.** Proto-level
+   they're messages; semantically they're single-valued scalars. PG
+   has `TIMESTAMPTZ[]` and `INTERVAL[]` as first-class types. Treating
+   them as scalars in the LIST dispatch preserves native storage for
+   the common case without complicating the general Message →
+   JSONB fallback.
+
 ### D14 — Zero-config defaults + data/storage orthogonal axes (added 2026-04-21)
 
 **Decision.** Two coupled changes to the authoring surface:

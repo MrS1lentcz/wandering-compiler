@@ -347,6 +347,15 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		return nil
 	}
 
+	// Populate element info for collection carriers (map / list) BEFORE
+	// sem-type resolution — LIST sem validation needs the element carrier.
+	if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
+		if err := b.populateElement(col, desc, carrier); err != nil {
+			b.err(err)
+			return nil
+		}
+	}
+
 	// Carrier → SemType validation (D2 table + D14 per-carrier defaults).
 	semType := irpb.SemType_SEM_UNSPECIFIED
 	if fieldOpt != nil {
@@ -358,6 +367,22 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	if err := validateCarrierSemType(desc, carrier, semType); err != nil {
 		b.err(err)
 		return nil
+	}
+	// For LIST carrier: the sem type must be valid on the element's
+	// scalar carrier (repeated string + type: URL → element carrier
+	// STRING must accept SEM_URL). SEM_AUTO is always valid. Message
+	// elements ignore element sem — storage is always JSONB.
+	if carrier == irpb.Carrier_CARRIER_LIST && semType != irpb.SemType_SEM_AUTO {
+		if col.GetElementIsMessage() {
+			b.err(diag.Atf(desc, "field %q: repeated Message field cannot carry an element sem type (got %s) — storage is always JSON for message elements", protoName, displaySemType(semType)).
+				WithWhy("per-element sem types (URL, EMAIL, …) only apply to scalar elements where the DB can store an element-typed array; proto messages serialise as JSON blobs").
+				WithFix("drop type: from (w17.field), or type: AUTO to mark intent explicitly"))
+			return nil
+		}
+		if err := validateCarrierSemType(desc, col.GetElementCarrier(), semType); err != nil {
+			b.err(err.WithWhy("list carrier validates type against the element carrier (e.g. repeated string + type: URL checks URL on string carrier)"))
+			return nil
+		}
 	}
 	col.Type = semType
 
@@ -385,38 +410,47 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	if fieldOpt != nil {
 		col.MaxLen = fieldOpt.GetMaxLen()
 	}
-	if carrier == irpb.Carrier_CARRIER_STRING {
-		switch semType {
+	// max_len applies to string carriers at the column level, AND to
+	// list carriers at the ELEMENT level (repeated string + type: URL +
+	// max_len: 500 sizes VARCHAR(500)[]).
+	maxLenCarrier := carrier
+	maxLenSem := semType
+	if carrier == irpb.Carrier_CARRIER_LIST {
+		maxLenCarrier = col.GetElementCarrier()
+		// For AUTO elements, no per-element sem — skip max_len sizing.
+		if semType == irpb.SemType_SEM_AUTO {
+			maxLenCarrier = irpb.Carrier_CARRIER_UNSPECIFIED
+		}
+	}
+	if maxLenCarrier == irpb.Carrier_CARRIER_STRING {
+		switch maxLenSem {
 		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
 			if col.MaxLen <= 0 {
-				b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(semType)).
+				b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(maxLenSem)).
 					WithWhy("CHAR / SLUG render as VARCHAR(N) — without N the column type has no fixed size").
 					WithFix("add max_len to (w17.field), e.g. max_len: 80 for short names, 255 for titles"))
 			}
 		case irpb.SemType_SEM_EMAIL:
-			// Default 320 (RFC 5321 max local-part + @ + domain).
 			if col.MaxLen <= 0 {
 				col.MaxLen = 320
 			}
 		case irpb.SemType_SEM_URL:
-			// Default 2048 (practical modern-browser max URL length).
 			if col.MaxLen <= 0 {
 				col.MaxLen = 2048
 			}
 		case irpb.SemType_SEM_TEXT:
-			// Optional upper bound — TEXT with max_len emits a Length CHECK.
+			// optional upper bound.
 		default:
-			// UUID, JSON, IP, TSEARCH, DECIMAL — none of these are VARCHAR-shaped.
 			if col.MaxLen != 0 {
-				b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(semType)).
+				b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(maxLenSem)).
 					WithWhy("max_len drives VARCHAR(N) sizing + char_length CHECKs; UUID / JSON / IP / TSEARCH / DECIMAL map to non-VARCHAR SQL types where max_len has no meaning").
 					WithFix("drop max_len, or change type: to CHAR / SLUG / TEXT / EMAIL / URL (all VARCHAR-shaped)"))
 			}
 		}
 	} else if col.MaxLen != 0 {
 		b.err(diag.Atf(desc, "field %q: max_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-			WithWhy("max_len controls char_length on string columns; numeric / temporal / bool / bytes columns have no length dimension").
-			WithFix("drop max_len from (w17.field), or change the proto field to a string carrier"))
+			WithWhy("max_len controls char_length on string columns; numeric / temporal / bool / bytes / map columns have no length dimension").
+			WithFix("drop max_len from (w17.field), or change the proto field to a string carrier (or repeated string)"))
 	}
 
 	// DECIMAL precision/scale.
@@ -460,9 +494,41 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		col.Default = def
 	}
 
+	// Pk / unique don't compose cleanly with collection carriers — PG
+	// allows array PKs / UNIQUE INDEX on arrays technically, but the
+	// resulting semantics (equality on whole arrays, index bloat) are
+	// rarely what the author wants. Reject up front; iter-2 can revisit
+	// if a pilot surfaces a real need.
+	if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
+		if fieldOpt != nil {
+			if fieldOpt.GetPk() {
+				b.err(diag.Atf(desc, "field %q: pk not supported on %s carrier", protoName, displayCarrier(carrier)).
+					WithWhy("primary keys on map / array columns have degenerate semantics (whole-collection equality, index bloat)").
+					WithFix("use a scalar PK (int64 ID with default_auto: IDENTITY is the canonical shape)"))
+			}
+			if fieldOpt.GetUnique() {
+				b.err(diag.Atf(desc, "field %q: unique not supported on %s carrier", protoName, displayCarrier(carrier)).
+					WithWhy("UNIQUE INDEX on a collection column checks whole-collection equality, which is almost never the author's intent").
+					WithFix("drop unique, or use (w17.db.table).raw_indexes to spell the exact index shape you need (e.g. GIN on the element)"))
+			}
+		}
+	}
+
 	// String-only / numeric-only option validation.
 	if fieldOpt != nil {
-		if carrier != irpb.Carrier_CARRIER_STRING {
+		// Element-level CHECK synths (blank, length-via-min, regex, choices)
+		// can't be expressed as PG CHECK on array / map columns (CHECK
+		// constraints don't allow subqueries or forall-element operators).
+		// Reject the explicit-author variants here so intent never silently
+		// drops; max_len stays allowed because it drives VARCHAR(N)[]
+		// storage, not a CHECK.
+		if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
+			if fieldOpt.MinLen != nil || fieldOpt.GetBlank() || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" {
+				b.err(diag.Atf(desc, "field %q: min_len / blank / pattern / choices are not supported on %s carrier", protoName, displayCarrier(carrier)).
+					WithWhy("PG CHECK constraints can't iterate over array / map elements — there's no `forall element` operator without a subquery. Per-element validation needs triggers or application-level checks; raw_checks can spell a whole-column CHECK if that suffices").
+					WithFix("drop the string-only option, or move the check to (w17.db.table).raw_checks with a PG-specific body (e.g. cardinality() <= N)"))
+			}
+		} else if carrier != irpb.Carrier_CARRIER_STRING {
 			if fieldOpt.MinLen != nil {
 				b.err(diag.Atf(desc, "field %q: min_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
 					WithWhy("min_len controls char_length on strings; other carriers have no length").
@@ -577,7 +643,13 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	// (derivedCheckName fits into NAMEDATALEN) happens in buildTable once
 	// the table name is available — per-column we can't spell the full
 	// constraint name yet.
-	if fieldOpt != nil {
+	//
+	// Collection carriers (MAP / LIST) skip CHECK synthesis entirely —
+	// PG CHECK constraints can't express per-element predicates without
+	// subqueries, and whole-column predicates on collections are almost
+	// always the wrong tool. Authors who need them reach for
+	// (w17.db.table).raw_checks with dialect-specific SQL.
+	if fieldOpt != nil && carrier != irpb.Carrier_CARRIER_MAP && carrier != irpb.Carrier_CARRIER_LIST {
 		b.attachChecks(col, fieldOpt, carrier, semType, desc)
 	}
 
@@ -796,6 +868,72 @@ func (b *builder) resolveFKs(schema *irpb.Schema) {
 	}
 }
 
+// populateElement fills col.ElementCarrier / col.ElementIsMessage for
+// collection carriers (CARRIER_MAP, CARRIER_LIST). For maps: inspects
+// fd.MapKey / fd.MapValue and enforces the iter-1.6 "key must be
+// string" invariant. For lists: treats fd as its own element kind.
+//
+// Message elements carry CARRIER_UNSPECIFIED + ElementIsMessage=true —
+// emitters see this and dispatch to JSONB regardless of dialect.
+// Scalar elements carry their resolved Carrier; `repeated Timestamp`
+// for example populates ElementCarrier=CARRIER_TIMESTAMP so the PG
+// emitter can render TIMESTAMPTZ[].
+func (b *builder) populateElement(col *irpb.Column, desc protoreflect.FieldDescriptor, carrier irpb.Carrier) *diag.Error {
+	switch carrier {
+	case irpb.Carrier_CARRIER_MAP:
+		key := desc.MapKey()
+		val := desc.MapValue()
+		// iter-1.6: key must be string (covers 99% of real-world maps;
+		// arbitrary-key dispatch across dialects is a future iteration).
+		keyCarrier, keyOk := protoKindToScalarCarrier(key)
+		if !keyOk || keyCarrier != irpb.Carrier_CARRIER_STRING {
+			return diag.Atf(desc, "field %q: map key must be string (got %s)", desc.Name(), key.Kind()).
+				WithWhy("iter-1.6 dispatches maps based on value type (HSTORE for string values, JSONB otherwise) — non-string keys aren't expressible in HSTORE and would need extra JSONB shape conventions").
+				WithFix("change the map to `map<string, V>`; non-string keys land in a later iteration")
+		}
+		if val.Kind() == protoreflect.MessageKind {
+			// map<string, SomeMsg> — value is a proto message.
+			name := val.Message().FullName()
+			if name != "google.protobuf.Timestamp" && name != "google.protobuf.Duration" {
+				col.ElementCarrier = irpb.Carrier_CARRIER_UNSPECIFIED
+				col.ElementIsMessage = true
+				return nil
+			}
+			// Timestamp / Duration values are treated as scalars (they map
+			// to well-defined PG types).
+		}
+		valCarrier, valOk := protoKindToScalarCarrier(val)
+		if !valOk {
+			return diag.Atf(desc, "field %q: unsupported map value kind %s", desc.Name(), val.Kind()).
+				WithWhy("value types outside the iter-1 carrier set (scalar primitives + Timestamp + Duration + Message) aren't dispatchable").
+				WithFix("change the value type to string / int32 / int64 / double / bool / bytes / Timestamp / Duration / a Message (will render as JSONB)")
+		}
+		col.ElementCarrier = valCarrier
+		col.ElementIsMessage = false
+		return nil
+
+	case irpb.Carrier_CARRIER_LIST:
+		if desc.Kind() == protoreflect.MessageKind {
+			name := desc.Message().FullName()
+			if name != "google.protobuf.Timestamp" && name != "google.protobuf.Duration" {
+				col.ElementCarrier = irpb.Carrier_CARRIER_UNSPECIFIED
+				col.ElementIsMessage = true
+				return nil
+			}
+		}
+		elemCarrier, ok := protoKindToScalarCarrier(desc)
+		if !ok {
+			return diag.Atf(desc, "field %q: unsupported repeated element kind %s", desc.Name(), desc.Kind()).
+				WithWhy("element types outside the iter-1 carrier set aren't dispatchable").
+				WithFix("change the element type to string / int32 / int64 / double / bool / bytes / Timestamp / Duration / a Message (will render as JSONB)")
+		}
+		col.ElementCarrier = elemCarrier
+		col.ElementIsMessage = false
+		return nil
+	}
+	return nil
+}
+
 // resolveFKAction turns a (w17.db.column).deletion_rule + (w17.field).null
 // combination into the concrete irpb.FKAction emitted into the plan. The
 // rule wins when set; otherwise infer from null (null:true → ORPHAN,
@@ -886,9 +1024,24 @@ func sourceLocation(d protoreflect.Descriptor) *irpb.SourceLocation {
 }
 
 func protoKindToCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bool) {
-	if fd.IsList() || fd.IsMap() || fd.ContainingOneof() != nil {
+	if fd.ContainingOneof() != nil {
 		return irpb.Carrier_CARRIER_UNSPECIFIED, false
 	}
+	// Maps must be checked BEFORE IsList because proto maps are also
+	// reported as repeated (synthetic entry messages).
+	if fd.IsMap() {
+		return irpb.Carrier_CARRIER_MAP, true
+	}
+	if fd.IsList() {
+		return irpb.Carrier_CARRIER_LIST, true
+	}
+	return protoKindToScalarCarrier(fd)
+}
+
+// protoKindToScalarCarrier maps a single proto Kind to its scalar
+// Carrier. Shared between column-level dispatch (scalar fields) and
+// element-level dispatch (list elements, map values).
+func protoKindToScalarCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bool) {
 	switch fd.Kind() {
 	case protoreflect.BoolKind:
 		return irpb.Carrier_CARRIER_BOOL, true
@@ -953,6 +1106,7 @@ func suggestedTypeFor(c irpb.Carrier) string {
 //	Duration   → INTERVAL (the only option)
 //	bool       → UNSPECIFIED (no SemType refinement exists)
 //	bytes      → UNSPECIFIED (JSON is the only opt-in)
+//	map / list → AUTO (dialect picks storage based on element info)
 func defaultSemTypeFor(carrier irpb.Carrier) irpb.SemType {
 	switch carrier {
 	case irpb.Carrier_CARRIER_STRING:
@@ -963,6 +1117,8 @@ func defaultSemTypeFor(carrier irpb.Carrier) irpb.SemType {
 		return irpb.SemType_SEM_DATETIME
 	case irpb.Carrier_CARRIER_DURATION:
 		return irpb.SemType_SEM_INTERVAL
+	case irpb.Carrier_CARRIER_MAP, irpb.Carrier_CARRIER_LIST:
+		return irpb.SemType_SEM_AUTO
 	}
 	return irpb.SemType_SEM_UNSPECIFIED
 }
@@ -1115,6 +1271,17 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 				WithWhy("google.protobuf.Duration maps 1:1 to the SQL INTERVAL type — no other refinement is defined in iter-1").
 				WithFix("set type: INTERVAL or drop the type: key so it's inferred")
 		}
+	case irpb.Carrier_CARRIER_MAP:
+		if sem != irpb.SemType_SEM_AUTO {
+			return diag.Atf(desc, "field %q: map carrier must be AUTO (got %s)", name, displaySemType(sem)).
+				WithWhy("map<K,V> dispatches to HSTORE / JSONB / JSON per dialect + value type; iter-1.6 doesn't support per-value sem-type refinement on maps").
+				WithFix("drop type: from (w17.field) (AUTO is inferred on map carriers), or type: AUTO to mark the intent explicitly; refine storage via (w17.db.column).db_type if needed")
+		}
+	case irpb.Carrier_CARRIER_LIST:
+		// repeated X: element-level refinement. AUTO (or unset → AUTO) is
+		// the default; anything else must be valid on the element carrier.
+		// Checked in a dedicated pass that sees element_carrier — the
+		// generic carrier×sem matrix below can't reach into elements.
 	}
 	return nil
 }

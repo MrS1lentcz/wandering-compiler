@@ -1,0 +1,21 @@
+syntax = "proto3";
+package irtest.list_type_on_message_element;
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Proxy for any proto message the compiler doesn't treat as a
+// scalar-ish carrier (Timestamp / Duration are scalar-ish; arbitrary
+// user messages aren't).
+message Child {
+  int64 id = 1;
+}
+
+message X {
+  option (w17.db.table) = { name: "xs" };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // repeated Child — message element forces JSONB storage; per-element
+  // sem types (like URL) are meaningless and must be rejected.
+  repeated Child children = 2 [(w17.field) = { type: URL }];
+}

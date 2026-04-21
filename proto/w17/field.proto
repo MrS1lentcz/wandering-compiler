@@ -140,6 +140,13 @@ enum Type {
 
   // Duration (carrier: google.protobuf.Duration)
   INTERVAL = 30;
+
+  // Collection carriers (map, repeated). Explicit "compiler picks storage
+  // per dialect + element type" — same effect as leaving type unset on
+  // a map/repeated field, but written on purpose. For repeated with a
+  // scalar element the author can refine to the element's sem type
+  // directly (e.g. `repeated string [type: URL]` = array of URLs).
+  AUTO = 40;
 }
 
 // AutoDefault — dynamically resolved default value. Emitters render each

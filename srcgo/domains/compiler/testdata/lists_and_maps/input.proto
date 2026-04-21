@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package m10.lists_and_maps;
+
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture for iter-1.6: CARRIER_MAP + CARRIER_LIST + AUTO +
+// element typing on repeated.
+//
+// AUTO dispatch (PG):
+//   map<string, string>       → HSTORE (requires hstore extension)
+//   map<string, other>        → JSONB
+//   map<string, Message>      → JSONB
+//   repeated <scalar>         → <scalar PG type>[]
+//   repeated <Message>        → JSONB (PG row[] is too fiddly cross-dialect)
+//   repeated <Timestamp/Duration> → native array (TIMESTAMPTZ[] / INTERVAL[])
+//
+// Element typing on repeated: (w17.field).type refines the element's
+// sem-type (e.g. `repeated string + type: URL` = array of URLs →
+// VARCHAR(2048)[]). max_len from field.Type preset carries into the
+// element's VARCHAR(N) sizing.
+message Container {
+  option (w17.db.table) = { name: "containers" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // --- Maps (AUTO dispatch) ---
+  // map<string, string> → HSTORE on PG.
+  map<string, string> tags = 2;
+
+  // map<string, int64> → JSONB on PG (HSTORE is string-string only).
+  map<string, int64> counters = 3;
+
+  // Explicit AUTO is equivalent to leaving type unset — written here as
+  // documentation.
+  map<string, string> labels = 4 [(w17.field) = { type: AUTO }];
+
+  // --- Lists (AUTO + explicit element sem) ---
+  // Bare repeated string → TEXT[] (element's default TEXT).
+  repeated string notes = 5;
+
+  // Element-typed: URL preset on the element → VARCHAR(2048)[].
+  repeated string homepages = 6 [(w17.field) = { type: URL }];
+
+  // Element-typed with author-supplied max_len: CHAR + max_len on
+  // element → VARCHAR(64)[].
+  repeated string short_tags = 7 [(w17.field) = { type: CHAR, max_len: 64 }];
+
+  // Integer array → BIGINT[] (element NUMBER default on int64).
+  repeated int64 ids = 8;
+
+  // Int32 array with explicit ID element type — still INTEGER[] because
+  // ID maps to INTEGER on int32 (same as NUMBER).
+  repeated int32 related_ids = 9 [(w17.field) = { type: ID }];
+
+  // Timestamp array → TIMESTAMPTZ[] (element DATETIME default).
+  repeated google.protobuf.Timestamp events = 10;
+
+  // Boolean array → BOOLEAN[].
+  repeated bool flags = 11;
+}
