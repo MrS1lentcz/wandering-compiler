@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package irtest.reserved_table_name;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+message X {
+  // "user" is a Postgres reserved keyword — CREATE TABLE user fails at
+  // apply with `syntax error at or near "user"`. IR must reject up front.
+  option (w17.db.table) = { name: "user" };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

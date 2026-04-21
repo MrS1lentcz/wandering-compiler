@@ -11,15 +11,15 @@ import (
 // returning (stmts, names, err). names is the ordered list for DROP INDEX
 // generation in the down block (caller reverses it).
 //
-// Index name derivation (when Index.Name is empty):
-//
-//	<table>_<cols>_uidx      // unique
-//	<table>_<cols>_idx       // non-unique
-//
-// Where <cols> is the SQL column names joined by "_". Matches the reference
-// in iteration-1-models.md.
+// Index names are resolved in ir.Build (see ir/names.go.derivedIndexName
+// and the finalisation pass in ir/build.go.buildTable) — every Index
+// arrives here with Name already set. Name collisions and identifier-
+// length violations are rejected at IR time.
 func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []string, names []string, err error) {
 	for i, idx := range t.GetIndexes() {
+		if idx.GetName() == "" {
+			return nil, nil, fmt.Errorf("postgres: table %s: indexes[%d] has empty name (ir.Build was supposed to resolve it)", t.GetName(), i)
+		}
 		sqlCols := make([]string, 0, len(idx.GetFields()))
 		for _, f := range idx.GetFields() {
 			c, ok := colByProto[f]
@@ -37,33 +37,20 @@ func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []s
 			sqlInclude = append(sqlInclude, c.GetName())
 		}
 
-		name := idx.GetName()
-		if name == "" {
-			name = derivedIndexName(t.GetName(), sqlCols, idx.GetUnique())
-		}
-
 		var b strings.Builder
 		if idx.GetUnique() {
 			b.WriteString("CREATE UNIQUE INDEX ")
 		} else {
 			b.WriteString("CREATE INDEX ")
 		}
-		fmt.Fprintf(&b, "%s ON %s (%s)", name, t.GetName(), strings.Join(sqlCols, ", "))
+		fmt.Fprintf(&b, "%s ON %s (%s)", idx.GetName(), t.GetName(), strings.Join(sqlCols, ", "))
 		if len(sqlInclude) > 0 {
 			fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(sqlInclude, ", "))
 		}
 		b.WriteString(";")
 
 		stmts = append(stmts, b.String())
-		names = append(names, name)
+		names = append(names, idx.GetName())
 	}
 	return stmts, names, nil
-}
-
-func derivedIndexName(table string, sqlCols []string, unique bool) string {
-	suffix := "idx"
-	if unique {
-		suffix = "uidx"
-	}
-	return fmt.Sprintf("%s_%s_%s", table, strings.Join(sqlCols, "_"), suffix)
 }

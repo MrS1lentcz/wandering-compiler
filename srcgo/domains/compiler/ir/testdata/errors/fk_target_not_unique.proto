@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package irtest.fk_target_not_unique;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// product_tags has composite PK (product_id, tag_id). Audit.target_product
+// FKs at product_tags.product_id — a composite-PK member with no
+// individual UNIQUE. PG rejects this FK at apply; ir.resolveFKs must
+// reject it at IR time instead.
+message ProductTag {
+  option (w17.db.table) = { name: "product_tags" };
+  int64 product_id = 1 [(w17.field) = { type: ID, pk: true }];
+  int64 tag_id     = 2 [(w17.field) = { type: ID, pk: true }];
+}
+
+message Audit {
+  option (w17.db.table) = { name: "audits" };
+  int64 id             = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 target_product = 2 [(w17.field) = { type: ID, fk: "product_tags.product_id" }];
+}

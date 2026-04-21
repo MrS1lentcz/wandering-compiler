@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+package irtest.identifier_too_long;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+message X {
+  // Table name is 76 bytes — overflows Postgres NAMEDATALEN (63).
+  option (w17.db.table) = { name: "a_really_long_snake_case_table_name_that_is_definitely_over_sixty_three_byte" };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

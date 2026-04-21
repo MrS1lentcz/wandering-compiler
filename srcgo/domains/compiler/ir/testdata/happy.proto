@@ -42,7 +42,7 @@ message Order {
   string notes       = 5 [(w17.field) = { type: TEXT, blank: true, max_len: 4000 }];
   google.protobuf.Timestamp created_at = 6 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
   string metadata    = 7 [
-    (w17.field)    = { type: TEXT, blank: true },
+    (w17.field)    = { type: TEXT, null: true },
     (w17.pg.field) = { jsonb: true }
   ];
 }

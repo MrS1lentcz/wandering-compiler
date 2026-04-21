@@ -1,0 +1,122 @@
+package ir
+
+import (
+	"fmt"
+	"strings"
+
+	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
+)
+
+// validateIdentifier checks a single SQL identifier — table name, column
+// name, index name, or CHECK constraint name — against two failure modes
+// both Postgres inflicts silently:
+//
+//  1. Length > 63 bytes. Postgres's NAMEDATALEN is 64 (63 bytes + NUL);
+//     longer names are truncated without warning, which lets two distinct
+//     source identifiers collide in pg_class / pg_constraint and break
+//     subsequent DDL in unpredictable ways. We reject at IR time with a
+//     clear diag instead.
+//  2. Clashes with a Postgres reserved keyword. Unquoted reserved words
+//     produce `syntax error at or near "…"` at apply time, which points
+//     at the SQL line and leaves users hunting for the cause. Emitting
+//     always-quoted identifiers is the proper long-term fix; until then
+//     (parked for iter-2), reject reserved names up front so authors
+//     rename before apply.
+//
+// Returns nil on valid identifier; otherwise returns a brief phrase
+// describing the problem for inclusion in a diag.Error. The caller
+// attaches file:line:col + fix: via diag.Atf.
+func validateIdentifier(name string) string {
+	if name == "" {
+		return "identifier is empty"
+	}
+	if len(name) > 63 {
+		return fmt.Sprintf("identifier %q is %d bytes long — Postgres NAMEDATALEN caps identifiers at 63 bytes (silent truncation risks collision)", name, len(name))
+	}
+	if _, reserved := pgReservedKeywords[strings.ToLower(name)]; reserved {
+		return fmt.Sprintf("identifier %q is a Postgres reserved keyword (category R) — unquoted use fails at apply with a syntax error", name)
+	}
+	return ""
+}
+
+// derivedIndexName mirrors the algorithm emit/postgres/index.go used to
+// apply before names moved to IR. Exposed here so ir.Build can resolve
+// every index's name up front (required for collision detection and for
+// identifier-length validation).
+func derivedIndexName(table string, sqlCols []string, unique bool) string {
+	suffix := "idx"
+	if unique {
+		suffix = "uidx"
+	}
+	return fmt.Sprintf("%s_%s_%s", table, strings.Join(sqlCols, "_"), suffix)
+}
+
+// derivedCheckName mirrors emit/postgres/check.go's naming scheme. The
+// variant suffix ("blank" / "len" / "range" / "format" / "choices") is
+// fixed per CheckVariant so two CHECKs of the same variant on the same
+// column never collide (ir.attachChecks only synthesises one per
+// variant per column). Exposed here for length-validation only — the
+// emitter still builds the final string; this helper's output must
+// match exactly.
+func derivedCheckName(table, sqlCol string, ck *irpb.Check) string {
+	return fmt.Sprintf("%s_%s_%s", table, sqlCol, checkSuffix(ck))
+}
+
+func checkSuffix(ck *irpb.Check) string {
+	switch ck.GetVariant().(type) {
+	case *irpb.Check_Length:
+		return "len"
+	case *irpb.Check_Blank:
+		return "blank"
+	case *irpb.Check_Range:
+		return "range"
+	case *irpb.Check_Regex:
+		return "format"
+	case *irpb.Check_Choices:
+		return "choices"
+	}
+	return "check"
+}
+
+// pgReservedKeywords is the Postgres "category R" reserved-word list —
+// words that produce a syntax error when used unquoted as a column or
+// table name. Sourced from PostgreSQL's SQL Key Words appendix (column
+// "PostgreSQL" = R). Non-reserved categories (U / T / C) are omitted
+// because they're safe unquoted in identifier position.
+//
+// The list is intentionally frozen to PG 14+'s reserved set; newer
+// reserved words arrive rarely and the test-apply harness would catch
+// them as apply-time regressions.
+var pgReservedKeywords = map[string]struct{}{
+	"all": {}, "analyse": {}, "analyze": {}, "and": {}, "any": {}, "array": {},
+	"as": {}, "asc": {}, "asymmetric": {}, "authorization": {},
+	"binary": {}, "both": {},
+	"case": {}, "cast": {}, "check": {}, "collate": {}, "collation": {},
+	"column": {}, "concurrently": {}, "constraint": {}, "create": {},
+	"cross": {}, "current_catalog": {}, "current_date": {},
+	"current_role": {}, "current_schema": {}, "current_time": {},
+	"current_timestamp": {}, "current_user": {},
+	"default": {}, "deferrable": {}, "desc": {}, "distinct": {}, "do": {},
+	"else": {}, "end": {}, "except": {},
+	"false": {}, "fetch": {}, "for": {}, "foreign": {}, "freeze": {},
+	"from": {}, "full": {},
+	"grant": {}, "group": {},
+	"having": {},
+	"ilike": {}, "in": {}, "initially": {}, "inner": {}, "intersect": {},
+	"into": {}, "is": {}, "isnull": {},
+	"join": {},
+	"lateral": {}, "leading": {}, "left": {}, "like": {}, "limit": {},
+	"localtime": {}, "localtimestamp": {},
+	"natural": {}, "not": {}, "notnull": {}, "null": {},
+	"offset": {}, "on": {}, "only": {}, "or": {}, "order": {}, "outer": {},
+	"overlaps": {},
+	"placing": {}, "primary": {},
+	"references": {}, "returning": {}, "right": {},
+	"select": {}, "session_user": {}, "similar": {}, "some": {},
+	"symmetric": {}, "system_user": {},
+	"table": {}, "tablesample": {}, "then": {}, "to": {}, "trailing": {},
+	"true": {},
+	"union": {}, "unique": {}, "user": {}, "using": {},
+	"variadic": {}, "verbose": {},
+	"when": {}, "where": {}, "window": {}, "with": {},
+}

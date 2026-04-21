@@ -33,8 +33,16 @@ type DialectEmitter interface {
 
 // Emit orchestrates a whole plan: forward-order up SQL, reverse-order down
 // SQL (so rollback applies in the inverse direction of migration). Op blocks
-// are separated by one blank line. The final output carries a trailing
-// newline so file-diff tools behave.
+// are separated by one blank line and wrapped in `BEGIN; … COMMIT;` so the
+// whole migration is all-or-nothing at apply time — a syntax error or FK
+// conflict mid-migration rolls back every CREATE TABLE / CREATE INDEX
+// already issued in that script, leaving the target DB in its pre-apply
+// state rather than a half-created mess. Postgres's transactional DDL
+// makes this safe for every op iter-1 emits (AddTable today, AlterTable
+// variants later — non-transactional exceptions like CREATE INDEX
+// CONCURRENTLY arrive as opt-outs when iter-2 surfaces them).
+//
+// The final output carries a trailing newline so file-diff tools behave.
 func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string, err error) {
 	ops := plan.GetOps()
 	ups := make([]string, 0, len(ops))
@@ -58,14 +66,15 @@ func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string,
 		downs[i], downs[j] = downs[j], downs[i]
 	}
 
-	return joinBlocks(ups), joinBlocks(downs), nil
+	return wrapTransaction(ups), wrapTransaction(downs), nil
 }
 
-// joinBlocks separates non-empty SQL blocks with one blank line and tacks
-// on a trailing newline. Empty input returns "".
-func joinBlocks(blocks []string) string {
+// wrapTransaction joins non-empty SQL blocks with one blank line between
+// them and wraps the whole script in `BEGIN; … COMMIT;`. Empty input
+// returns "" (no wrapping — nothing to commit).
+func wrapTransaction(blocks []string) string {
 	if len(blocks) == 0 {
 		return ""
 	}
-	return strings.Join(blocks, "\n\n") + "\n"
+	return "BEGIN;\n\n" + strings.Join(blocks, "\n\n") + "\n\nCOMMIT;\n"
 }

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -86,9 +87,13 @@ func renderChoices(sqlCol string, cc *irpb.ChoicesCheck) string {
 	return fmt.Sprintf("%s IN (%s)", sqlCol, strings.Join(quoted, ", "))
 }
 
-// fmtDouble renders a float64 the way PG accepts it. strconv.FormatFloat
-// with 'g'+-1 produces the shortest round-trippable form — avoids "0e+00"-
-// style scientific notation for simple values.
+// fmtDouble renders a float64 the way PG accepts it. Integer-valued
+// doubles use 'f' with zero precision (avoids "1e+06" for values like
+// 1_000_000 in range CHECKs); fractional values keep 'g' with -1
+// precision for the shortest round-trippable form.
 func fmtDouble(v float64) string {
+	if !math.IsNaN(v) && !math.IsInf(v, 0) && math.Trunc(v) == v && math.Abs(v) < 1e18 {
+		return strconv.FormatFloat(v, 'f', 0, 64)
+	}
 	return strconv.FormatFloat(v, 'g', -1, 64)
 }

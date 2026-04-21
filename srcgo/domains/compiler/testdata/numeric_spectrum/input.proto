@@ -7,10 +7,9 @@ import "w17/field.proto";
 
 // Grand-tour fixture: every numeric (carrier, type) cell of D2 plus
 // explicit range CHECKs and DECIMAL with precision/scale. DECIMAL +
-// gt/gte is spec-allowed but IR-rejected in iter-1 (build.go's
-// numericOnly guard doesn't treat DECIMAL as numeric) — parked for
-// iter-2 backlog; this fixture deliberately avoids that combo so it
-// stays green. See docs/iteration-1.md D2.
+// range bounds (gte/lte) is exercised on `exact_amount` — the IR
+// builder's `numericForRange` check accepts CARRIER_STRING +
+// SEM_DECIMAL per iteration-1.md D2.
 message Measurement {
   option (w17.db.table) = { name: "measurements" };
 
@@ -21,5 +20,8 @@ message Measurement {
   double raw          = 5 [(w17.field) = { type: NUMBER, gte: 0, lte: 1000000 }];
   double price        = 6 [(w17.field) = { type: MONEY }];
   double conversion   = 7 [(w17.field) = { type: RATIO }];
-  string exact_amount = 8 [(w17.field) = { type: DECIMAL, precision: 18, scale: 6 }];
+  string exact_amount = 8 [(w17.field) = {
+    type: DECIMAL, precision: 18, scale: 6,
+    gte: 0, lte: 1000000000
+  }];
 }

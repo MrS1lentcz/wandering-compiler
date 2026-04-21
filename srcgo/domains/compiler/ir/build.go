@@ -70,6 +70,12 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			WithFix(`add option (w17.db.table) = { name: "snake_case_plural" };`))
 		return nil
 	}
+	if why := validateIdentifier(msg.Table.GetName()); why != "" {
+		b.err(diag.Atf(msg.Desc, "message %q: %s", msg.Desc.Name(), why).
+			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
+			WithFix("rename the table via (w17.db.table).name to a shorter / non-reserved identifier (snake_case, plural)"))
+		return nil
+	}
 	tbl := &irpb.Table{
 		Name:       msg.Table.GetName(),
 		MessageFqn: string(msg.Desc.FullName()),
@@ -180,6 +186,55 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		})
 	}
 
+	// Finalise index names up front: derivation lives in IR (not in the
+	// emitter) so collision detection and identifier-length validation
+	// are possible at IR time. For explicit indexes the author name wins;
+	// for synths the <table>_<cols>_<{u,}idx> shape is computed here.
+	// Validate every name (length + reserved) and reject duplicates.
+	colSQLNameByProto := map[string]string{}
+	for _, c := range tbl.Columns {
+		colSQLNameByProto[c.GetProtoName()] = c.GetName()
+	}
+	idxNameSeen := map[string]int{}
+	for i, idx := range tbl.Indexes {
+		if idx.Name == "" {
+			sqlCols := make([]string, 0, len(idx.GetFields()))
+			for _, f := range idx.GetFields() {
+				sqlCols = append(sqlCols, colSQLNameByProto[f])
+			}
+			idx.Name = derivedIndexName(tbl.GetName(), sqlCols, idx.GetUnique())
+		}
+		if why := validateIdentifier(idx.Name); why != "" {
+			b.err(diag.Atf(msg.Desc, "message %q: index[%d] name %s", msg.Desc.Name(), i, why).
+				WithWhy("index names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords; derived names inherit the table/column lengths, so a long table × multi-col index is a common offender").
+				WithFix(`shorten the table / column names, or pass an explicit shorter name via (w17.db.table).indexes[].name`))
+			continue
+		}
+		if prev, dup := idxNameSeen[idx.Name]; dup {
+			b.err(diag.Atf(msg.Desc, "message %q: index[%d] name %q collides with index[%d]", msg.Desc.Name(), i, idx.Name, prev).
+				WithWhy("two CREATE INDEX statements with the same name fail at apply — Postgres has per-schema unique index names. Explicit `(w17.db.table).indexes[].name` can collide with a synth'd UNIQUE from `(w17.field).unique` or storage-index from `(w17.db.column).index` if both resolve to the same identifier").
+				WithFix("either rename the explicit index to something unique, or drop the redundant synth (remove `unique: true` / `(w17.db.column).index` on the field the explicit index already covers)"))
+			continue
+		}
+		idxNameSeen[idx.Name] = i
+	}
+
+	// Validate CHECK constraint names (derived `<table>_<col>_<variant>`)
+	// fit NAMEDATALEN. Variant suffixes are fixed and non-reserved; we
+	// only length-check. Cross-column / cross-variant collisions are
+	// impossible — attachChecks emits at most one of each variant per
+	// column — so no dedup pass is needed.
+	for _, c := range tbl.Columns {
+		for j, ck := range c.GetChecks() {
+			name := derivedCheckName(tbl.GetName(), c.GetName(), ck)
+			if why := validateIdentifier(name); why != "" {
+				b.err(diag.Atf(msg.Desc, "message %q: column %q check[%d] name %s", msg.Desc.Name(), c.GetProtoName(), j, why).
+					WithWhy("constraint names are <table>_<column>_<variant> — long table/column names overflow Postgres NAMEDATALEN (63 bytes) and silently truncate, risking collisions in pg_constraint").
+					WithFix("shorten the table / column name to make room for the variant suffix (blank/len/range/format/choices)"))
+			}
+		}
+	}
+
 	return tbl
 }
 
@@ -222,6 +277,17 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			col.Name = override
 		}
 		col.StorageIndex = lf.Column.GetIndex()
+	}
+
+	// The resolved SQL column name (proto name by default, overridden via
+	// (w17.db.column).name) must survive Postgres's NAMEDATALEN cap and
+	// avoid reserved keywords. Checked here rather than after the column
+	// is appended so the diag anchors on the owning proto field.
+	if why := validateIdentifier(col.Name); why != "" {
+		b.err(diag.Atf(desc, "field %q: %s", protoName, why).
+			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
+			WithFix(`rename the column — either use a shorter proto field name, or override via (w17.db.column) = { name: "alt_name" }`))
+		return nil
 	}
 
 	// Carrier → SemType validation (D2 table).
@@ -334,12 +400,20 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 					WithFix("drop choices, or change the proto field to a string carrier"))
 			}
 		}
-		numericOnly := carrier == irpb.Carrier_CARRIER_INT32 || carrier == irpb.Carrier_CARRIER_INT64 || carrier == irpb.Carrier_CARRIER_DOUBLE
-		if !numericOnly {
+		// Numeric for range purposes = INT32 / INT64 / DOUBLE or the DECIMAL
+		// sub-case (string carrier + SEM_DECIMAL, which emits NUMERIC(p,s)).
+		// iteration-1.md D2 permits range bounds on DECIMAL ("bounds are
+		// carried via double and are precision-limited") — the earlier
+		// carrier-only guard rejected that legitimate combination.
+		numericForRange := carrier == irpb.Carrier_CARRIER_INT32 ||
+			carrier == irpb.Carrier_CARRIER_INT64 ||
+			carrier == irpb.Carrier_CARRIER_DOUBLE ||
+			(carrier == irpb.Carrier_CARRIER_STRING && semType == irpb.SemType_SEM_DECIMAL)
+		if !numericForRange {
 			if fieldOpt.Gt != nil || fieldOpt.Gte != nil || fieldOpt.Lt != nil || fieldOpt.Lte != nil {
-				b.err(diag.Atf(desc, "field %q: gt/gte/lt/lte are only valid on numeric carriers (got %s)", protoName, displayCarrier(carrier)).
+				b.err(diag.Atf(desc, "field %q: gt/gte/lt/lte require a numeric carrier or type: DECIMAL (got carrier=%s, type=%s)", protoName, displayCarrier(carrier), displaySemType(semType)).
 					WithWhy("the range CHECK emits a numeric comparison; it's undefined for non-numeric types").
-					WithFix("drop the bound, or change the proto field to int32/int64/double"))
+					WithFix("drop the bound, or change the proto field to int32/int64/double or string+type: DECIMAL"))
 			}
 		}
 	}
@@ -359,7 +433,41 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		}
 	}
 
-	// Build Checks from the surviving facts.
+	// pg.field storage override compatibility — enforce the "TEXT-only"
+	// contract so author intent never silently drops. The override
+	// replaces the SQL column type wholesale (→ JSONB / INET / TSVECTOR /
+	// HSTORE / custom_type); sem types other than TEXT carry their own
+	// storage semantics (CHAR / SLUG force VARCHAR(N); UUID forces UUID;
+	// DECIMAL forces NUMERIC; EMAIL / URL force string + type-implied
+	// regex; MONEY / PERCENTAGE / RATIO force fixed-scale numerics) that
+	// are incompatible with the override. Explicit string-only CHECK
+	// options (min_len, max_len, pattern, choices, explicit blank) emit
+	// synths attachChecks must skip on a non-string SQL column —
+	// reporting the conflict here keeps the author from losing intent
+	// silently.
+	if col.GetPg() != nil && pgOverridesStorage(col.GetPg()) {
+		switch {
+		case carrier != irpb.Carrier_CARRIER_STRING:
+			b.err(diag.Atf(desc, "field %q: (w17.pg.field) storage override is only allowed on string-carrier columns in iter-1 (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("numeric / bool / temporal carriers have a deterministic (carrier, type) → SQL mapping in D2 — they don't need an escape hatch; allowing an override here would let two contradictory storage choices silently race").
+				WithFix("drop (w17.pg.field), or change the proto field to a string carrier + type: TEXT"))
+		case semType != irpb.SemType_SEM_TEXT:
+			b.err(diag.Atf(desc, "field %q: (w17.pg.field) storage override requires type: TEXT (got %s)", protoName, displaySemType(semType)).
+				WithWhy("sem types other than TEXT carry their own storage (CHAR/SLUG → VARCHAR(N); UUID → UUID; EMAIL/URL → VARCHAR+regex; DECIMAL → NUMERIC). Combining them with pg.field silently drops the sem-driven storage and CHECKs").
+				WithFix("change type to TEXT for the pg.field override path, or drop (w17.pg.field)"))
+		default:
+			if fieldOpt != nil && (fieldOpt.MinLen != nil || fieldOpt.GetMaxLen() > 0 || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" || fieldOpt.GetBlank()) {
+				b.err(diag.Atf(desc, "field %q: min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field) storage override", protoName).
+					WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column (JSONB / INET / TSVECTOR / HSTORE / custom_type)").
+					WithFix("drop the string-only options, or drop the pg.field override — pick one path"))
+			}
+		}
+	}
+
+	// Build Checks from the surviving facts. CHECK-name length validation
+	// (derivedCheckName fits into NAMEDATALEN) happens in buildTable once
+	// the table name is available — per-column we can't spell the full
+	// constraint name yet.
 	if fieldOpt != nil {
 		b.attachChecks(col, fieldOpt, carrier, semType, desc)
 	}
@@ -552,9 +660,37 @@ func (b *builder) resolveFKs(schema *irpb.Schema) {
 				b.err(diag.Atf(desc, "field %q: fk target column %q not found on table %q", fk.GetColumn(), fk.GetTargetColumn(), fk.GetTargetTable()).
 					WithWhy("the fk references a column that doesn't exist on the target table — a broken FK would fail at apply time").
 					WithFix(fmt.Sprintf("verify the column name (case-sensitive, proto-field name) on message for table %q, or correct the fk reference", fk.GetTargetTable())))
+				continue
+			}
+			if !fkTargetColumnIsUnique(target, fk.GetTargetColumn()) {
+				b.err(diag.Atf(desc, "field %q: fk target %q.%q has no uniqueness constraint — Postgres rejects FKs at apply unless the target column is single-col PK or carries a single-col UNIQUE index", fk.GetColumn(), fk.GetTargetTable(), fk.GetTargetColumn()).
+					WithWhy("on a composite PK each individual column is part of the compound key but not uniquely indexed on its own; FKs pointing at one of those columns fail at apply with `no unique constraint matching given keys for referenced table`").
+					WithFix(fmt.Sprintf("either add `unique: true` to the target field %q.%q so the IR synthesises a single-col UNIQUE index, or reference a column that already has one (composite-key FKs are not supported in iteration-1)", fk.GetTargetTable(), fk.GetTargetColumn())))
 			}
 		}
 	}
+}
+
+// fkTargetColumnIsUnique returns true when the target column is addressable
+// as a PG FK target: single-col PK, OR covered by a single-col UNIQUE index
+// (table-level or synth'd from `(w17.field).unique`). Composite-PK member
+// columns return false — PG rejects FKs pointing at them at apply time.
+func fkTargetColumnIsUnique(target *irpb.Table, colProtoName string) bool {
+	// Single-col PK is the common fast path.
+	if len(target.GetPrimaryKey()) == 1 && target.GetPrimaryKey()[0] == colProtoName {
+		return true
+	}
+	// Table-level or synthesised single-col UNIQUE index.
+	for _, idx := range target.GetIndexes() {
+		if !idx.GetUnique() {
+			continue
+		}
+		fields := idx.GetFields()
+		if len(fields) == 1 && fields[0] == colProtoName {
+			return true
+		}
+	}
+	return false
 }
 
 // --- small helpers ---

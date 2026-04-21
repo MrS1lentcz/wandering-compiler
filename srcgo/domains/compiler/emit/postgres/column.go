@@ -173,7 +173,7 @@ func defaultExpr(col *irpb.Column, def *irpb.Default) (string, error) {
 	case *irpb.Default_LiteralInt:
 		return strconv.FormatInt(v.LiteralInt, 10), nil
 	case *irpb.Default_LiteralDouble:
-		return strconv.FormatFloat(v.LiteralDouble, 'g', -1, 64), nil
+		return fmtDouble(v.LiteralDouble), nil
 	case *irpb.Default_Auto:
 		return autoExpr(col, v.Auto)
 	default:

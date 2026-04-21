@@ -250,6 +250,90 @@ func TestBuildErrors(t *testing.T) {
 				`default_auto: TRUE`,
 			},
 		},
+		{
+			name:    "pg.field override rejected on non-string carrier",
+			fixture: "testdata/errors/pg_override_non_string_carrier.proto",
+			wants: []string{
+				`pg_override_non_string_carrier.proto:`,
+				`(w17.pg.field) storage override is only allowed on string-carrier columns`,
+				`why:`,
+				`numeric / bool / temporal carriers`,
+				`fix:`,
+				`TEXT`,
+			},
+		},
+		{
+			name:    "pg.field override requires type: TEXT",
+			fixture: "testdata/errors/pg_override_requires_text.proto",
+			wants: []string{
+				`pg_override_requires_text.proto:`,
+				`(w17.pg.field) storage override requires type: TEXT`,
+				`why:`,
+				`CHAR/SLUG`,
+				`fix:`,
+				`change type to TEXT`,
+			},
+		},
+		{
+			name:    "pg.field override incompatible with string-only CHECK options",
+			fixture: "testdata/errors/pg_override_with_string_check.proto",
+			wants: []string{
+				`pg_override_with_string_check.proto:`,
+				`min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field) storage override`,
+				`why:`,
+				`char_length`,
+				`fix:`,
+				`pick one path`,
+			},
+		},
+		{
+			name:    "FK target must be single-col unique",
+			fixture: "testdata/errors/fk_target_not_unique.proto",
+			wants: []string{
+				`fk_target_not_unique.proto:`,
+				`has no uniqueness constraint`,
+				`why:`,
+				`composite PK`,
+				`fix:`,
+				`unique: true`,
+			},
+		},
+		{
+			name:    "reserved keyword rejected as table name",
+			fixture: "testdata/errors/reserved_table_name.proto",
+			wants: []string{
+				`reserved_table_name.proto:`,
+				`"user"`,
+				`Postgres reserved keyword`,
+				`why:`,
+				`63 bytes or collide with reserved keywords`,
+				`fix:`,
+				`rename the table`,
+			},
+		},
+		{
+			name:    "identifier > 63 bytes rejected",
+			fixture: "testdata/errors/identifier_too_long.proto",
+			wants: []string{
+				`identifier_too_long.proto:`,
+				`NAMEDATALEN`,
+				`why:`,
+				`63 bytes`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "index name collision rejected",
+			fixture: "testdata/errors/index_name_collision.proto",
+			wants: []string{
+				`index_name_collision.proto:`,
+				`collides with`,
+				`why:`,
+				`per-schema unique index names`,
+				`fix:`,
+				`rename the explicit index`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

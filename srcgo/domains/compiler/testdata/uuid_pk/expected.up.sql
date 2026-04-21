@@ -1,3 +1,5 @@
+BEGIN;
+
 CREATE TABLE sessions (
     id UUID NOT NULL DEFAULT uuidv7() PRIMARY KEY,
     client_key UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -10,3 +12,5 @@ CREATE TABLE sessions (
     CONSTRAINT sessions_note_len CHECK (char_length(note) >= 8 AND char_length(note) <= 4000),
     CONSTRAINT sessions_note_blank CHECK (note <> '')
 );
+
+COMMIT;
