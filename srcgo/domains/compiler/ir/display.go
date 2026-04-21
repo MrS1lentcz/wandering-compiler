@@ -3,7 +3,7 @@ package ir
 import (
 	"strings"
 
-	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types"
+	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 )
 
 // displayCarrier renders a Carrier as the proto author wrote it in the

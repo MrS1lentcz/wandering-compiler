@@ -12,7 +12,8 @@ schemagen:
 		proto/w17/db.proto \
 		proto/w17/field.proto \
 		proto/w17/pg/field.proto \
-		proto/domains/compiler/types/ir.proto
+		proto/domains/compiler/types/ir.proto \
+		proto/domains/compiler/types/plan.proto
 
 test:
 	@echo "TODO: go test ./..."

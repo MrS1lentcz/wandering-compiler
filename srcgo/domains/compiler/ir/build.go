@@ -25,7 +25,7 @@ import (
 
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/diag"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
-	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types"
+	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	w17pb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17"
 )
 

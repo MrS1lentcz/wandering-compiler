@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package w17.compiler.plan;
+
+import "domains/compiler/types/ir.proto";
+
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan;planpb";
+
+// MigrationPlan is the ordered sequence of Ops produced by the differ from
+// two IR schemas (prev, curr). It is the input to per-dialect SQL emitters
+// and to sibling consumers — back-compat lint, changelog, visual editor,
+// platform UI — each of which reads Ops wire-compat without speaking Go.
+// Private / compiler-internal shape (not part of the user-facing w17
+// vocabulary); lives under proto/domains/compiler/types/ per tech-spec
+// strategic decision #8 and iteration-1.md D4 (rev 2026-04-21).
+//
+// Iteration-1 only handles prev=nil (initial migration) and emits one
+// AddTable op per table. DropTable / AddColumn / AlterColumn / RenameColumn /
+// AddIndex / DropIndex are added op-by-op as pilot schemas surface real
+// alter-diff needs.
+message MigrationPlan {
+  repeated Op ops = 1;
+}
+
+// Op is the tagged union over every migration operation. Each variant carries
+// enough IR to render SQL without consulting the full Schema — emitters stay
+// Op-local.
+message Op {
+  oneof variant {
+    AddTable add_table = 1;
+  }
+}
+
+// AddTable creates a new table. Carries the full ir.Table so the emitter
+// reaches columns, indexes, FKs, and PK list from one place.
+message AddTable {
+  w17.compiler.ir.Table table = 1;
+}

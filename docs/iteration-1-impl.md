@@ -55,7 +55,9 @@ wandering-compiler/
 │   │   ├── w17/                         # compiled w17 options
 │   │   └── domains/
 │   │       └── compiler/
-│   │           └── types/               # irpb (ir.pb.go), planpb (plan.pb.go) — M2 rev2+
+│   │           └── types/
+│   │               ├── ir/              # package irpb (ir.pb.go) — M2 rev2
+│   │               └── plan/            # package planpb (plan.pb.go) — M3
 │   └── domains/
 │       └── compiler/
 │           ├── application.go           # package compiler — Application interface + module interfaces
@@ -76,7 +78,8 @@ wandering-compiler/
 │           │   ├── build.go             # loader.LoadedFile → *irpb.Schema; all D2/D7/D8 invariants enforced here
 │           │   └── display.go           # carrier/sem/auto name helpers — strip proto enum prefixes for diagnostics
 │           ├── plan/                    # domain-local — differ (D4)
-│           │   └── diff.go              # Diff(prev, curr *irpb.Schema) *planpb.MigrationPlan
+│           │   ├── diff.go              # Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error)
+│           │   └── diff_test.go         # happy path + determinism + non-nil prev rejected
 │           ├── emit/                    # domain-local — per-dialect SQL emitters (D4)
 │           │   ├── dialect.go           # DialectEmitter interface
 │           │   ├── postgres/
@@ -317,7 +320,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 complete; **M3 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 complete; **M4 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -382,5 +385,29 @@ in code, not in docs:
   `Default` oneof wrappers (`ck.GetChoices()`, `def.GetAuto()`, …) — all
   eight error-class fixtures + happy path still green.
 
-**Next:** M3 — plan (trivial differ: `nil → Schema` yields `AddTable`
-ops, also proto at `proto/domains/compiler/types/plan.proto`).
+- **M3 (shipped, 2026-04-21) — trivial differ.** `proto/domains/compiler/types/plan.proto`
+  introduces `MigrationPlan` / `Op` oneof / `AddTable{ ir.Table table }` —
+  iter-1 ships only `AddTable`; `DropTable` / `AddColumn` / `AlterColumn` /
+  `RenameColumn` / `AddIndex` / `DropIndex` land as pilot schemas surface
+  real alter-diff needs. Differ at `srcgo/domains/compiler/plan/diff.go`:
+  `Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error)` — rejects
+  non-nil `prev` with a "not supported in iteration-1" error (alter-diff
+  arrives iteration-by-iteration); for `prev == nil` walks `curr.Tables`
+  in lexical name order and emits one `AddTable` per table. Tests
+  (`diff_test.go`) cover happy path (reverse-sorted input → sorted ops),
+  empty inputs, non-nil-prev rejection, oneof-variant regression guard,
+  and AC #4 determinism (two runs → byte-identical deterministic
+  `proto.Marshal`).
+- **M3 layout fork resolved.** Two proto files in one Go package directory
+  is illegal, so `ir.proto` and `plan.proto` now live in sibling subdirs
+  under `srcgo/pb/domains/compiler/types/`: `.../types/ir` →
+  package `irpb`, `.../types/plan` → package `planpb`. `ir.proto`
+  go_package bumped to `…/types/ir;irpb`; `plan.proto` authored with
+  `…/types/plan;planpb`. The three `irpb` imports in
+  `srcgo/domains/compiler/ir/` updated; existing tests green. Proto
+  import path stays `domains/compiler/types/ir.proto` — only the Go
+  output moved.
+
+**Next:** M4 — postgres emitter (render each `Op` to up + down SQL; Check
+variants dispatched to dialect-appropriate expressions; deterministic
+column / constraint / index ordering).

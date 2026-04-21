@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package w17.compiler.ir;
 
-option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types;irpb";
+option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir;irpb";
 
 // Compiler-internal IR. Produced by srcgo/domains/compiler/ir.Build, consumed
 // by the differ (plan), SQL emitters, and later sibling tools (back-compat
