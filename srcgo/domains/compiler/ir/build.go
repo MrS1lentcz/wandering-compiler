@@ -383,7 +383,10 @@ func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.
 			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Length{Length: lc}})
 		}
 		// BlankCheck — added unless author opted into blank or column is nullable.
-		if !opt.GetBlank() && !col.GetNullable() {
+		// Skipped for string-carrier sem types whose SQL storage isn't string-typed
+		// (UUID → UUID, DECIMAL → NUMERIC); `CHECK (col <> '')` on those would fail
+		// at apply time because PG can't cast '' to UUID / NUMERIC.
+		if !opt.GetBlank() && !col.GetNullable() && semTypeStoresAsString(semType) {
 			col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}})
 		}
 	}
@@ -884,10 +887,14 @@ func findEnumInContainer(c enumContainer, fqn protoreflect.FullName) protoreflec
 
 // defaultRegexFor returns the type-implied regex pattern for string semantic
 // types that carry one, or "" for types without a default pattern.
+//
+// UUID is intentionally absent: PG's native UUID column rejects non-UUID
+// strings by construction, so a regex CHECK would be pure redundancy. If a
+// future dialect lacks a native UUID type and stores it as CHAR(36), the
+// emitter for that dialect re-introduces the pattern locally — IR stays
+// dialect-neutral.
 func defaultRegexFor(sem irpb.SemType) string {
 	switch sem {
-	case irpb.SemType_SEM_UUID:
-		return `^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`
 	case irpb.SemType_SEM_SLUG:
 		return `^[a-z0-9]+(?:-[a-z0-9]+)*$`
 	case irpb.SemType_SEM_EMAIL:
@@ -897,4 +904,16 @@ func defaultRegexFor(sem irpb.SemType) string {
 		return `^https?://.+$`
 	}
 	return ""
+}
+
+// semTypeStoresAsString returns true when the sem type maps to a string-shaped
+// SQL column (VARCHAR / TEXT) across all iter-1 dialects. Returns false for
+// UUID (→ UUID) and DECIMAL (→ NUMERIC) where string-only CHECKs such as the
+// blank-check synth would fail at apply time.
+func semTypeStoresAsString(sem irpb.SemType) bool {
+	switch sem {
+	case irpb.SemType_SEM_UUID, irpb.SemType_SEM_DECIMAL:
+		return false
+	}
+	return true
 }

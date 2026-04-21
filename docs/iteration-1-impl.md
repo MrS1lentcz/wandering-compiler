@@ -555,19 +555,14 @@ in code, not in docs:
   / --- want ---` diff; (c) `-update` restores the run cleanly.
   Serves AC #5.
 
-  Known gap surfaced while building the `product` fixture (not M8's
-  job to fix — parked for the next emitter revision): the blank-check
-  synth at `ir.build.attachChecks` fires on any `CARRIER_STRING`
-  column, but the Postgres emitter maps some string-carried sem
-  types to non-string SQL types (UUID → `UUID`, DECIMAL → `NUMERIC`).
-  A `CHECK (col <> '')` on a UUID or NUMERIC column fails at apply
-  time because PG refuses to cast `''` to those types. The `product`
-  fixture was rewritten to use an `IDENTITY` int64 pk instead of
-  UUID and to skip DECIMAL entirely so the golden captures apply-
-  able SQL. Fix belongs in `ir.build.attachChecks`: skip the blank
-  synth when `SemType ∈ {UUID, DECIMAL}` (and re-check the same gap
-  for regex synths — UUID regex on a `UUID` column is similarly
-  redundant, though not a wrong-type error).
+  (A known gap surfaced while building `product` and documented here
+  in the first M8 writeup — blank-check / UUID-regex synth on
+  non-string SQL storage — was fixed as the first commit of the
+  M10 prep batch. `attachChecks` now guards the blank synth on
+  `semTypeStoresAsString`, and `defaultRegexFor` no longer emits the
+  redundant UUID pattern. M10 grand-tour fixtures can freely combine
+  UUID PKs, DECIMAL columns, and non-nullable strings without
+  tripping the synth paths.)
 
 - **M9 (shipped, 2026-04-21) — apply round-trip against real Postgres.**
   `make test-apply` boots one ephemeral `postgres:18-alpine` via
