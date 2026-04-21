@@ -89,7 +89,8 @@ wandering-compiler/
 │           │   │   ├── index.go         # CREATE [UNIQUE] INDEX + INCLUDE + derived names
 │           │   │   └── emit_test.go
 │           │   └── sqlite/
-│           │       └── emit.go          # stub, errors "not implemented in iteration-1" — AC #6 (M5)
+│           │       ├── emit.go          # stub, errors "not implemented in iteration-1" — AC #6
+│           │       └── emit_test.go     # compile-time DialectEmitter conformance + runtime error shape
 │           ├── naming/                  # domain-local — D5 <NNNN>_<slug>.sql
 │           │   └── name.go
 │           ├── writer/                  # domain-local — write files into out/migrations/
@@ -324,7 +325,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 complete; **M5 next.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 complete; **M6 next.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -441,7 +442,21 @@ in code, not in docs:
   pg_indexes and noisy in the migration. Matches the reference SQL in
   `iteration-1-models.md`.
 
-**Next:** M5 — sqlite stub emitter (implements `DialectEmitter`; every
-`EmitOp` returns `errors.New("sqlite emitter: not implemented in
-iteration-1")`). Exists to catch PG-shaped leaks in the interface while
-the interface is still small — AC #6.
+- **M5 (shipped, 2026-04-21) — sqlite stub emitter.**
+  `srcgo/domains/compiler/emit/sqlite/emit.go` implements
+  `emit.DialectEmitter`: `Name() == "sqlite"`, `EmitOp` returns
+  `errors.New("sqlite emitter: not implemented in iteration-1")` for
+  every op variant. The value proposition is compile-time: a second
+  implementation forces the interface to stay dialect-agnostic (AC #6).
+  Test carries a `var _ emit.DialectEmitter = sqlite.Emitter{}` ensuring
+  the interface check survives refactors, plus runtime assertions that
+  the stub returns an error marked with "not implemented in iteration-1"
+  and produces no partial SQL, and that `emit.Emit` wraps the stub error
+  with the dialect name (no silent swallowing).
+
+**Next:** M6 — naming + writer. `naming.Name(ops, seq)` derives
+`<NNNN>_<slug>` from the `MigrationPlan.Ops` (single `AddTable{products}`
+→ `0001_create_products`, multi-op concatenates first two slugs per D5).
+`writer.Write(dir, basename, up, down)` creates `out/migrations/` if
+needed and writes the two `.sql` files. Serves AC #5 (deterministic
+file names) + AC #4 (byte-identical).
