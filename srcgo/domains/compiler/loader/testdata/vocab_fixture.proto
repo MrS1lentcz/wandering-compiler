@@ -44,12 +44,11 @@ message Product {
   bool   is_active      = 10 [(w17.field) = { default_auto: TRUE }];
   google.protobuf.Timestamp created_at = 11 [(w17.field) = { type: DATETIME, default_auto: NOW, immutable: true }];
 
-  // PG-specific: JSONB plus an escape-hatch vector column.
-  string metadata       = 12 [
-    (w17.field)    = { type: TEXT, blank: true },
-    (w17.pg.field) = { jsonb: true }
-  ];
+  // Core type: JSON (post-D13; was (w17.pg.field).jsonb).
+  string metadata       = 12 [(w17.field) = { type: JSON }];
+  // Escape hatch for dialect-specific types the curated Types don't cover.
   string embedding      = 13 [
+    (w17.field)    = { type: TEXT },
     (w17.pg.field) = {
       custom_type: "vector(1536)",
       required_extensions: ["vector"]

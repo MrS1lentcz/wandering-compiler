@@ -5,10 +5,11 @@ package m10.flags_enums_json;
 import "w17/db.proto";
 import "w17/field.proto";
 
-// Grand-tour fixture: bool + TRUE/FALSE autos, TEXT + EMPTY_JSON_ARRAY
-// and EMPTY_JSON_OBJECT autos, Choices CHECK via proto enum FQN, and
-// an explicit `pattern` override on a CHAR column (proves the override
-// wins over any type-implied regex).
+// Grand-tour fixture: bool + TRUE/FALSE autos, JSON + EMPTY_JSON_ARRAY
+// and EMPTY_JSON_OBJECT autos (post-D13 these default_autos live
+// naturally on type: JSON, mapping to JSONB on PG), Choices CHECK via
+// proto enum FQN, and an explicit `pattern` override on a CHAR column
+// (proves the override wins over any type-implied regex).
 enum Visibility {
   VISIBILITY_UNSPECIFIED = 0;
   DRAFT                  = 1;
@@ -24,8 +25,8 @@ message Flag {
   bool   active       = 2 [(w17.field) = { default_auto: TRUE }];
   bool   archived     = 3 [(w17.field) = { default_auto: FALSE }];
 
-  string tags_json    = 4 [(w17.field) = { type: TEXT, default_auto: EMPTY_JSON_ARRAY }];
-  string config_json  = 5 [(w17.field) = { type: TEXT, default_auto: EMPTY_JSON_OBJECT }];
+  string tags_json    = 4 [(w17.field) = { type: JSON, default_auto: EMPTY_JSON_ARRAY }];
+  string config_json  = 5 [(w17.field) = { type: JSON, default_auto: EMPTY_JSON_OBJECT }];
 
   string visibility   = 6 [(w17.field) = {
     type: CHAR, max_len: 16,

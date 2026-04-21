@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier complete; **iteration-1 closed.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) complete; **iteration-1 closed** (iter-1.6 for AUTO + map/repeated carriers still on the roadmap).
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape

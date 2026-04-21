@@ -4,7 +4,6 @@ package m10.shared_pk_one_to_one;
 
 import "w17/db.proto";
 import "w17/field.proto";
-import "w17/pg/field.proto";
 
 // Grand-tour fixture: shared-PK one-to-one pattern — the only Django
 // multi-table-inheritance shape that survives the "no schema inheritance"
@@ -34,5 +33,5 @@ message AdminExtra {
     (w17.field)     = { type: ID, pk: true },
     (w17.db.column) = { fk: "user_profiles.id" }
   ];
-  string permissions = 2 [(w17.field) = { type: TEXT }, (w17.pg.field) = { jsonb: true }];
+  string permissions = 2 [(w17.field) = { type: JSON }];
 }

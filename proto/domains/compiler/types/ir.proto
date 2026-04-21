@@ -88,12 +88,15 @@ message Column {
   repeated Check checks = 40;
 }
 
-// PgOptions mirrors (w17.pg.field). Interpretation is the PG emitter's job.
+// PgOptions mirrors (w17.pg.field). Curated jsonb / inet / tsvector / hstore
+// flags that used to live here were lifted to core Types in D13 (or to the
+// map-carrier AUTO dispatch for hstore). custom_type + required_extensions
+// remain as the escape hatch + extension manifest. Field numbers reserved
+// for historical continuity.
 message PgOptions {
-  bool jsonb = 1;
-  bool inet = 2;
-  bool tsvector = 3;
-  bool hstore = 4;
+  reserved 1, 2, 3, 4;
+  reserved "jsonb", "inet", "tsvector", "hstore";
+
   string custom_type = 10;
   repeated string required_extensions = 11;
 }
@@ -198,6 +201,13 @@ enum SemType {
   SEM_EMAIL = 4;
   SEM_URL = 5;
   SEM_SLUG = 6;
+  // String or bytes carrier (proto both encode JSON as opaque payload).
+  // Storage: PG JSONB, MySQL JSON, SQLite TEXT.
+  SEM_JSON = 7;
+  // String carrier. Storage: PG INET, MySQL VARCHAR(45), SQLite TEXT.
+  SEM_IP = 8;
+  // String carrier. Storage: PG TSVECTOR, others deferred (iter-2+).
+  SEM_TSEARCH = 9;
 
   // Numeric carriers.
   SEM_NUMBER = 10;

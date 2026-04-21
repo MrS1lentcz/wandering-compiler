@@ -386,19 +386,44 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			WithFix(`either add fk: "<table>.<column>" on (w17.db.column), or remove deletion_rule`))
 	}
 
-	// max_len: required for CHAR/SLUG; string-only for all other types.
+	// max_len: required for CHAR / SLUG, has a preset default for
+	// EMAIL / URL, and is forbidden on string sem types whose storage
+	// isn't VARCHAR (UUID, JSON, IP, TSEARCH, DECIMAL) or on non-string
+	// carriers (numeric / temporal / bool / bytes).
 	if fieldOpt != nil {
 		col.MaxLen = fieldOpt.GetMaxLen()
 	}
 	if carrier == irpb.Carrier_CARRIER_STRING {
-		if (semType == irpb.SemType_SEM_CHAR || semType == irpb.SemType_SEM_SLUG) && col.MaxLen <= 0 {
-			b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(semType)).
-				WithWhy("CHAR/SLUG render as VARCHAR(N) — without N the column type has no fixed size").
-				WithFix("add max_len to (w17.field), e.g. max_len: 80 for short names, 255 for titles"))
+		switch semType {
+		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
+			if col.MaxLen <= 0 {
+				b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(semType)).
+					WithWhy("CHAR / SLUG render as VARCHAR(N) — without N the column type has no fixed size").
+					WithFix("add max_len to (w17.field), e.g. max_len: 80 for short names, 255 for titles"))
+			}
+		case irpb.SemType_SEM_EMAIL:
+			// Default 320 (RFC 5321 max local-part + @ + domain).
+			if col.MaxLen <= 0 {
+				col.MaxLen = 320
+			}
+		case irpb.SemType_SEM_URL:
+			// Default 2048 (practical modern-browser max URL length).
+			if col.MaxLen <= 0 {
+				col.MaxLen = 2048
+			}
+		case irpb.SemType_SEM_TEXT:
+			// Optional upper bound — TEXT with max_len emits a Length CHECK.
+		default:
+			// UUID, JSON, IP, TSEARCH, DECIMAL — none of these are VARCHAR-shaped.
+			if col.MaxLen != 0 {
+				b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(semType)).
+					WithWhy("max_len drives VARCHAR(N) sizing + char_length CHECKs; UUID / JSON / IP / TSEARCH / DECIMAL map to non-VARCHAR SQL types where max_len has no meaning").
+					WithFix("drop max_len, or change type: to CHAR / SLUG / TEXT / EMAIL / URL (all VARCHAR-shaped)"))
+			}
 		}
 	} else if col.MaxLen != 0 {
 		b.err(diag.Atf(desc, "field %q: max_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-			WithWhy("max_len controls char_length on string columns; numeric/temporal/bool columns have no length dimension").
+			WithWhy("max_len controls char_length on string columns; numeric / temporal / bool / bytes columns have no length dimension").
 			WithFix("drop max_len from (w17.field), or change the proto field to a string carrier"))
 	}
 
@@ -486,47 +511,42 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	}
 
 	// Postgres dialect passthrough — must be populated BEFORE attachChecks
-	// so the synth layer can see when PG storage is redirected (jsonb, inet,
-	// tsvector, hstore, custom_type) and skip string-only synths that would
-	// fail at apply on the overridden column type.
+	// so the synth layer can see when PG storage is redirected via
+	// `custom_type` and skip string-only synths that would fail at apply on
+	// the overridden column type. Post-D13: curated flags (jsonb / inet /
+	// tsvector / hstore) live as core Types or map-carrier AUTO dispatch;
+	// this passthrough is narrow.
 	if lf.PgField != nil {
 		col.Pg = &irpb.PgOptions{
-			Jsonb:              lf.PgField.GetJsonb(),
-			Inet:               lf.PgField.GetInet(),
-			Tsvector:           lf.PgField.GetTsvector(),
-			Hstore:             lf.PgField.GetHstore(),
 			CustomType:         lf.PgField.GetCustomType(),
 			RequiredExtensions: append([]string(nil), lf.PgField.GetRequiredExtensions()...),
 		}
 	}
 
-	// pg.field storage override compatibility — enforce the "TEXT-only"
-	// contract so author intent never silently drops. The override
-	// replaces the SQL column type wholesale (→ JSONB / INET / TSVECTOR /
-	// HSTORE / custom_type); sem types other than TEXT carry their own
-	// storage semantics (CHAR / SLUG force VARCHAR(N); UUID forces UUID;
-	// DECIMAL forces NUMERIC; EMAIL / URL force string + type-implied
-	// regex; MONEY / PERCENTAGE / RATIO force fixed-scale numerics) that
-	// are incompatible with the override. Explicit string-only CHECK
-	// options (min_len, max_len, pattern, choices, explicit blank) emit
-	// synths attachChecks must skip on a non-string SQL column —
+	// (w17.pg.field).custom_type compatibility — enforce the "TEXT-only"
+	// contract so author intent never silently drops. custom_type is the
+	// remaining storage override after D13 lifted jsonb / inet / tsvector
+	// to core Types; sem types other than TEXT carry their own storage
+	// semantics that would contradict the override. Explicit string-only
+	// CHECK options (min_len, max_len, pattern, choices, explicit blank)
+	// emit synths attachChecks must skip on a non-string SQL column —
 	// reporting the conflict here keeps the author from losing intent
 	// silently.
 	if col.GetPg() != nil && pgOverridesStorage(col.GetPg()) {
 		switch {
 		case carrier != irpb.Carrier_CARRIER_STRING:
-			b.err(diag.Atf(desc, "field %q: (w17.pg.field) storage override is only allowed on string-carrier columns in iter-1 (got %s)", protoName, displayCarrier(carrier)).
-				WithWhy("numeric / bool / temporal carriers have a deterministic (carrier, type) → SQL mapping in D2 — they don't need an escape hatch; allowing an override here would let two contradictory storage choices silently race").
-				WithFix("drop (w17.pg.field), or change the proto field to a string carrier + type: TEXT"))
+			b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type is only allowed on string-carrier columns in iter-1 (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("numeric / bool / temporal / bytes carriers have a deterministic (carrier, type) → SQL mapping — they don't need an escape hatch; allowing an override here would let two contradictory storage choices silently race").
+				WithFix("drop (w17.pg.field).custom_type, or change the proto field to a string carrier + type: TEXT"))
 		case semType != irpb.SemType_SEM_TEXT:
-			b.err(diag.Atf(desc, "field %q: (w17.pg.field) storage override requires type: TEXT (got %s)", protoName, displaySemType(semType)).
-				WithWhy("sem types other than TEXT carry their own storage (CHAR/SLUG → VARCHAR(N); UUID → UUID; EMAIL/URL → VARCHAR+regex; DECIMAL → NUMERIC). Combining them with pg.field silently drops the sem-driven storage and CHECKs").
-				WithFix("change type to TEXT for the pg.field override path, or drop (w17.pg.field)"))
+			b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type requires type: TEXT (got %s)", protoName, displaySemType(semType)).
+				WithWhy("sem types other than TEXT carry their own storage — CHAR/SLUG → VARCHAR(N); UUID → UUID; EMAIL/URL → VARCHAR(default); DECIMAL → NUMERIC; JSON → JSONB; IP → INET; TSEARCH → TSVECTOR. Combining them with custom_type silently drops the sem-driven storage and CHECKs").
+				WithFix("change type to TEXT for the custom_type escape hatch path, or drop custom_type and let the curated Type pick storage"))
 		default:
 			if fieldOpt != nil && (fieldOpt.MinLen != nil || fieldOpt.GetMaxLen() > 0 || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" || fieldOpt.GetBlank()) {
-				b.err(diag.Atf(desc, "field %q: min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field) storage override", protoName).
-					WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column (JSONB / INET / TSVECTOR / HSTORE / custom_type)").
-					WithFix("drop the string-only options, or drop the pg.field override — pick one path"))
+				b.err(diag.Atf(desc, "field %q: min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field).custom_type", protoName).
+					WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column").
+					WithFix("drop the string-only options, or drop the custom_type override — pick one path"))
 			}
 		}
 	}
@@ -551,11 +571,17 @@ func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.
 	// column types at apply time.
 	stringStorage := carrier == irpb.Carrier_CARRIER_STRING && columnStoresAsString(col, semType)
 
-	// LengthCheck — omitted for CHAR/SLUG since VARCHAR(N) covers the upper
-	// bound. MinLen always produces a CHECK when present.
+	// LengthCheck — omitted for semtypes that render as VARCHAR(N) since
+	// the column type already enforces the upper bound. MinLen always
+	// produces a CHECK when present (VARCHAR has no minimum). After D13
+	// the VARCHAR-backed set is CHAR / SLUG / EMAIL / URL.
 	if stringStorage {
+		maxSubsumedByType := semType == irpb.SemType_SEM_CHAR ||
+			semType == irpb.SemType_SEM_SLUG ||
+			semType == irpb.SemType_SEM_EMAIL ||
+			semType == irpb.SemType_SEM_URL
 		hasMin := opt.MinLen != nil
-		hasMax := opt.GetMaxLen() > 0 && !(semType == irpb.SemType_SEM_CHAR || semType == irpb.SemType_SEM_SLUG)
+		hasMax := opt.GetMaxLen() > 0 && !maxSubsumedByType
 		if hasMin || hasMax {
 			lc := &irpb.LengthCheck{}
 			if hasMin {
@@ -898,6 +924,12 @@ func protoTypeToSem(t w17pb.Type) irpb.SemType {
 		return irpb.SemType_SEM_URL
 	case w17pb.Type_SLUG:
 		return irpb.SemType_SEM_SLUG
+	case w17pb.Type_JSON:
+		return irpb.SemType_SEM_JSON
+	case w17pb.Type_IP:
+		return irpb.SemType_SEM_IP
+	case w17pb.Type_TSEARCH:
+		return irpb.SemType_SEM_TSEARCH
 	case w17pb.Type_NUMBER:
 		return irpb.SemType_SEM_NUMBER
 	case w17pb.Type_ID:
@@ -957,22 +989,28 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 				WithFix("drop type: from (w17.field); for a default value use default_auto: TRUE or FALSE")
 		}
 	case irpb.Carrier_CARRIER_BYTES:
-		if sem != irpb.SemType_SEM_UNSPECIFIED {
-			return diag.Atf(desc, "field %q: bytes carrier must not set a semantic type (got %s)", name, displaySemType(sem)).
-				WithWhy("bytes has exactly one column shape (BYTEA on PG, BLOB on MySQL/SQLite) — no semantic refinement applies").
-				WithFix("drop type: from (w17.field); bytes stores raw binary blobs")
+		switch sem {
+		case irpb.SemType_SEM_UNSPECIFIED:
+			// Raw binary blob — BYTEA / BLOB — no refinement.
+		case irpb.SemType_SEM_JSON:
+			// bytes-carrying-JSON: caller holds a []byte, storage is still JSONB.
+		default:
+			return diag.Atf(desc, "field %q: bytes carrier accepts only type: JSON or no type at all (got %s)", name, displaySemType(sem)).
+				WithWhy("bytes maps to BYTEA by default; type: JSON redirects storage to JSONB while keeping the bytes wire type. No other semantic refinement applies").
+				WithFix("drop type: from (w17.field), or set type: JSON")
 		}
 	case irpb.Carrier_CARRIER_STRING:
 		switch sem {
-		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_TEXT, irpb.SemType_SEM_UUID, irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL, irpb.SemType_SEM_SLUG, irpb.SemType_SEM_DECIMAL:
+		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_TEXT, irpb.SemType_SEM_UUID, irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL, irpb.SemType_SEM_SLUG, irpb.SemType_SEM_DECIMAL,
+			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
 			return diag.Atf(desc, "field %q: string carrier requires a semantic type", name).
-				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID) with different constraints; the compiler won't guess").
-				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL")
+				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID, JSONB, INET, TSVECTOR) with different constraints; the compiler won't guess").
+				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH")
 		default:
 			return diag.Atf(desc, "field %q: type %s is not valid on a string carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL").
+				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH").
 				WithFix("pick one of the string-valid types, or change the carrier")
 		}
 	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64:
@@ -1040,10 +1078,16 @@ func validateAutoDefault(desc protoreflect.FieldDescriptor, kind irpb.AutoKind, 
 				WithFix("set the field to `string foo = N [(w17.field) = { type: UUID, default_auto: UUID_V4 }];`")
 		}
 	case irpb.AutoKind_AUTO_EMPTY_JSON_ARRAY, irpb.AutoKind_AUTO_EMPTY_JSON_OBJECT:
-		if carrier != irpb.Carrier_CARRIER_STRING || (sem != irpb.SemType_SEM_TEXT && sem != irpb.SemType_SEM_CHAR) {
-			return diag.Atf(desc, "field %q: default_auto: %s requires string carrier with type TEXT or CHAR (got carrier=%s, type=%s)", desc.Name(), displayAutoKind(kind), displayCarrier(carrier), displaySemType(sem)).
-				WithWhy("empty-JSON defaults emit the literal '[]' or '{}' — stored today on a string column, reserved for JSONB when it lands").
-				WithFix("use type: TEXT (or CHAR with max_len >= 2), or drop this default")
+		// Post-D13: empty-JSON literals make sense only on type: JSON
+		// (either on string or bytes carrier — both store as JSONB).
+		// Previously allowed on TEXT / CHAR as a workaround; those paths
+		// would emit '[]' / '{}' into a plain text column, which is
+		// semantically wrong — the column can't validate JSON shape.
+		isStringOrBytes := carrier == irpb.Carrier_CARRIER_STRING || carrier == irpb.Carrier_CARRIER_BYTES
+		if !isStringOrBytes || sem != irpb.SemType_SEM_JSON {
+			return diag.Atf(desc, "field %q: default_auto: %s requires type: JSON (got carrier=%s, type=%s)", desc.Name(), displayAutoKind(kind), displayCarrier(carrier), displaySemType(sem)).
+				WithWhy("empty-JSON defaults emit '[]' / '{}' — semantically JSON literals, meaningful only on JSON-shaped columns (JSONB on PG, JSON on MySQL, TEXT on SQLite)").
+				WithFix("set the field to `[(w17.field) = { type: JSON, default_auto: EMPTY_JSON_ARRAY }];` on a string or bytes carrier")
 		}
 	case irpb.AutoKind_AUTO_TRUE, irpb.AutoKind_AUTO_FALSE:
 		if carrier != irpb.Carrier_CARRIER_BOOL {
@@ -1184,11 +1228,23 @@ func defaultRegexFor(sem irpb.SemType) string {
 
 // semTypeStoresAsString returns true when the sem type maps to a string-shaped
 // SQL column (VARCHAR / TEXT) across all iter-1 dialects. Returns false for
-// UUID (→ UUID) and DECIMAL (→ NUMERIC) where string-only CHECKs such as the
-// blank-check synth would fail at apply time.
+// sem types that redirect storage to a non-string SQL type:
+//   - UUID    → UUID
+//   - DECIMAL → NUMERIC
+//   - JSON    → JSONB (PG) / JSON (MySQL)
+//   - IP      → INET (PG) / VARCHAR(45) (MySQL) — text-shaped but semantically not
+//   - TSEARCH → TSVECTOR (PG)
+//
+// String-only CHECK synths (blank, length, regex, choices) skip on
+// non-string storage because the operators don't type-check against these
+// columns at apply time.
 func semTypeStoresAsString(sem irpb.SemType) bool {
 	switch sem {
-	case irpb.SemType_SEM_UUID, irpb.SemType_SEM_DECIMAL:
+	case irpb.SemType_SEM_UUID,
+		irpb.SemType_SEM_DECIMAL,
+		irpb.SemType_SEM_JSON,
+		irpb.SemType_SEM_IP,
+		irpb.SemType_SEM_TSEARCH:
 		return false
 	}
 	return true
@@ -1213,5 +1269,5 @@ func columnStoresAsString(col *irpb.Column, sem irpb.SemType) bool {
 }
 
 func pgOverridesStorage(pg *irpb.PgOptions) bool {
-	return pg.GetJsonb() || pg.GetInet() || pg.GetTsvector() || pg.GetHstore() || pg.GetCustomType() != ""
+	return pg.GetCustomType() != ""
 }

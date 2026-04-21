@@ -295,6 +295,59 @@ source-vocabulary concern). Everything is now on `(w17.field)`; the
 storage-only flags (`index`, `name` override) live on the new
 `(w17.db.column)`.
 
+### Preset Bundles — reference matrix (added 2026-04-21)
+
+Every `(carrier, type)` combination is a **preset bundle** — the author
+picks one label and the compiler applies: SQL column type (per dialect),
+required / default side-data, auto-synth CHECKs, compatible defaults,
+compatible overrides. The table below is the authoritative breakdown.
+
+Iteration-1 ships only the Postgres column; later-iteration dialects
+fill the MySQL / SQLite columns.
+
+| Carrier | Type | PG column | MySQL column (iter-2+) | SQLite column (iter-2+) | Auto-CHECKs (when stringStorage) | Required side-data | Default side-data | `default_*` compatible | `default_auto` compatible | `(w17.pg.field).custom_type` compatible |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `string` | `CHAR` | `VARCHAR(max_len)` | `VARCHAR(max_len)` | `TEXT` | Blank, Length(min_len) | `max_len` | — | `default_string` | — | — |
+| `string` | `TEXT` | `TEXT` | `TEXT` | `TEXT` | Blank, Length(min_len, max_len if set) | — | — | `default_string` | — | ✓ |
+| `string` | `UUID` | `UUID` | `CHAR(36)` | `TEXT` | — (no blank synth, no regex synth) | — | — | `default_string` | `UUID_V4`, `UUID_V7` | — |
+| `string` | `EMAIL` | `VARCHAR(max_len)` | `VARCHAR(max_len)` | `TEXT` | Blank, Regex (email) | — | `max_len: 320` if unset | `default_string` | — | — |
+| `string` | `URL` | `VARCHAR(max_len)` | `VARCHAR(max_len)` | `TEXT` | Blank, Regex (http/s) | — | `max_len: 2048` if unset | `default_string` | — | — |
+| `string` | `SLUG` | `VARCHAR(max_len)` | `VARCHAR(max_len)` | `TEXT` | Blank, Regex (slug) | `max_len` | — | `default_string` | — | — |
+| `string` | `JSON` | `JSONB` | `JSON` | `TEXT` | — (non-string storage) | — | — | `default_string` (JSON literal) | `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | — |
+| `string` | `IP` | `INET` | `VARCHAR(45)` | `TEXT` | — (non-string storage) | — | — | `default_string` | — | — |
+| `string` | `TSEARCH` | `TSVECTOR` | `TEXT`+FULLTEXT (iter-2) | `TEXT`+FTS5 (iter-2) | — (non-string storage) | — | — | — | — | — |
+| `string` | `DECIMAL` | `NUMERIC(precision, scale)` | `DECIMAL(precision, scale)` | `NUMERIC` | — (non-string storage) | `precision` | `scale: 0` | — | — | — |
+| `int32`/`int64` | `NUMBER` | `INTEGER` / `BIGINT` | `INT` / `BIGINT` | `INTEGER` | Range (gt/gte/lt/lte if set) | — | — | `default_int` | — | — |
+| `int32`/`int64` | `ID` | `INTEGER` / `BIGINT` | `INT` / `BIGINT` | `INTEGER` | — | — | — | `default_int` | `IDENTITY` (pk:true only) | — |
+| `int64` | `COUNTER` | `BIGINT` | `BIGINT` | `INTEGER` | Range (if set) | — | — | `default_int` | — | — |
+| `double` | `NUMBER` | `DOUBLE PRECISION` | `DOUBLE` | `REAL` | Range (if set) | — | — | `default_double` | — | — |
+| `double` | `MONEY` | `NUMERIC(19, 4)` | `DECIMAL(19, 4)` | `NUMERIC` | Range (if set) | — | — | `default_double` | — | — |
+| `double` | `PERCENTAGE` | `NUMERIC(5, 2)` | `DECIMAL(5, 2)` | `NUMERIC` | Range(0, 100) implicit + explicit | — | — | `default_double` | — | — |
+| `double` | `RATIO` | `NUMERIC(5, 4)` | `DECIMAL(5, 4)` | `NUMERIC` | Range(0, 1) implicit + explicit | — | — | `default_double` | — | — |
+| `Timestamp` | `DATE` | `DATE` | `DATE` | `TEXT` | — | — | — | — | `NOW` → `CURRENT_DATE` | — |
+| `Timestamp` | `TIME` | `TIME` | `TIME` | `TEXT` | — | — | — | — | `NOW` → `CURRENT_TIME` | — |
+| `Timestamp` | `DATETIME` | `TIMESTAMPTZ` | `DATETIME` | `TEXT` | — | — | — | — | `NOW` → `NOW()` | — |
+| `Duration` | `INTERVAL` | `INTERVAL` | — (iter-2) | — (iter-2) | — | — | — | — | — | — |
+| `bool` | — | `BOOLEAN` | `TINYINT(1)` | `INTEGER` | — | — | — | — | `TRUE`, `FALSE` | — |
+| `bytes` | — | `BYTEA` | `BLOB` | `BLOB` | — | — | — | — | — | — |
+| `bytes` | `JSON` | `JSONB` | `JSON` | `TEXT` | — | — | — | — | `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | — |
+
+**Cross-axis rules** not in the table:
+
+- `(w17.pg.field).custom_type` requires `carrier: string` + `type: TEXT`.
+  Any other combination is rejected — custom_type is the escape hatch for
+  TEXT-shaped columns whose storage the author wants to override
+  verbatim (`CITEXT`, `vector(1536)`, PostGIS geometry, custom DOMAINs).
+- `(w17.db.column).fk` requires the target column to be addressable as a
+  PG FK target: single-col PK or single-col UNIQUE index. Composite-PK
+  member columns are rejected. See D12.
+- `(w17.db.column).deletion_rule: ORPHAN` requires `(w17.field).null: true`.
+  `RESET` requires any `default_*` variant set. `CASCADE` and `BLOCK`
+  have no additional requirements. See D12.
+- `(w17.db.table).raw_indexes` and `raw_checks` bodies are opaque SQL —
+  compiler validates names (NAMEDATALEN, reserved keywords, collisions)
+  but doesn't type-check bodies. See D11.
+
 ### D3 — No compiler-generated fields (supersedes `timestamps` / `soft_delete` table options)
 
 **Decision.** `(w17.db.table)` no longer carries `timestamps` or
@@ -752,6 +805,71 @@ indexes have no equivalent surface yet. Iter-1 users annotate one
 of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
+
+### D13 — Dialect-specific storage lifted into field.Type (added 2026-04-21)
+
+**Decision.** Three PG-specific curated flags on `(w17.pg.field)` —
+`jsonb`, `inet`, `tsvector` — graduated into core `(w17.field).type`
+values: `JSON`, `IP`, `TSEARCH`. `hstore` stays for now (iter-1.6 lifts
+it via a map-carrier AUTO dispatch), alongside `custom_type` +
+`required_extensions` which remain as genuine PG-only escape hatches.
+
+`field.Type` is now the **preset layer** — each value encodes:
+
+1. Storage shape per dialect (JSON → JSONB on PG, JSON on MySQL,
+   TEXT on SQLite).
+2. Required side-data (CHAR / SLUG still require `max_len`; DECIMAL
+   still requires `precision`).
+3. Preset defaults (EMAIL → VARCHAR(320); URL → VARCHAR(2048)); author
+   override via `max_len` works uniformly across VARCHAR-backed types.
+4. Auto-synth CHECK set (blank / length / regex / range / choices), gated
+   on storage shape (non-string SQL types skip string-only synths).
+5. Compatible `default_*` variants (e.g. `default_auto: EMPTY_JSON_*`
+   now requires `type: JSON`).
+6. Compatibility with `(w17.pg.field).custom_type` override (only on
+   string carrier + `type: TEXT`).
+
+**Rationale.**
+
+1. **Cross-dialect semantics.** JSON / IP / TSEARCH have coherent
+   semantics across dialects — "this column holds structured JSON
+   data", "this column holds an IP address". The author shouldn't
+   have to know that PG uses JSONB while MySQL uses JSON while SQLite
+   uses TEXT — the preset chooses. Dialect-specific flags
+   (`(w17.pg.field).jsonb`) forced the author to hardcode a
+   dialect into the authoring surface, which is the opposite of the
+   preset discipline D2 established.
+
+2. **`hstore` stays PG-only because it doesn't have cross-dialect
+   equivalent.** HSTORE is a proprietary PG key-value type; no other
+   common dialect has a direct analog. The cross-dialect question for
+   key-value collections is answered by the iter-1.6 map-carrier AUTO
+   dispatch (`map<string,string>` → HSTORE on PG, JSON elsewhere), at
+   which point the `hstore` flag can retire.
+
+3. **`custom_type` + `required_extensions` still mandatory
+   (per CLAUDE.md non-negotiable #3).** Every generator needs an
+   escape hatch for types the curated vocabulary doesn't cover —
+   pgvector, PostGIS geometry, MACADDR, custom DOMAINs. D13 shrinks
+   the escape-hatch surface but doesn't remove it.
+
+4. **EMAIL / URL grow `max_len` override.** Previously EMAIL was
+   hardcoded VARCHAR(320) and URL was TEXT; authors couldn't narrow
+   either. Post-D13 both accept `max_len` the same way CHAR/SLUG do,
+   with preset defaults (320 / 2048) when unset. Consistent behaviour
+   across all VARCHAR-backed types; max_len always means "VARCHAR(N)".
+
+5. **`default_auto: EMPTY_JSON_*` tightened to `type: JSON`.**
+   Previously allowed on TEXT/CHAR as a stopgap; those paths emitted
+   `'[]'` / `'{}'` into plain text columns where the DB couldn't
+   validate JSON shape. Now EMPTY_JSON_* is compatible only with
+   `type: JSON` (string or bytes carrier), which ensures JSONB
+   storage on PG and JSON on MySQL.
+
+**Scope carved for iter-1.6.** The `AUTO` type value + CARRIER_MAP +
+CARRIER_LIST + element-typing for `repeated <scalar>` are a separate
+batch — bigger scope (new carriers, new dispatch rules), coherent as
+its own mini-iteration.
 
 ### D12 — FK relocation + deletion_rule enum (added 2026-04-21, supersedes D8's `orphanable` half)
 

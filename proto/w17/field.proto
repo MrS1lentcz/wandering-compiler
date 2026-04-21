@@ -99,18 +99,25 @@ message Field {
 }
 
 // Type — semantic subtype refining the proto carrier into a SQL column type
-// and a default constraint set. Authoritative carrier × SemType table is in
-// docs/iteration-1.md D2 (see update in this revision).
+// and a default constraint set. Authoritative carrier × Type table is in
+// docs/iteration-1.md D2 + the "Preset Bundles" reference. Each Type is a
+// preset that carries a cross-dialect storage choice, auto-synthesised
+// CHECKs, required/default side-data, and compatibility rules with
+// (w17.field).default_* variants.
 enum Type {
   TYPE_UNSPECIFIED = 0;
 
-  // String carriers (carrier: string)
+  // String-carrier presets (carrier: string)
   CHAR  = 1;
   TEXT  = 2;
   UUID  = 3;
-  EMAIL = 4;
-  URL   = 5;
+  EMAIL = 4;   // default max_len 320 (RFC 5321); override via max_len
+  URL   = 5;   // default max_len 2048 (modern web practical max); override via max_len
   SLUG  = 6;
+  JSON  = 7;   // structured JSON; PG → JSONB, MySQL → JSON, SQLite → TEXT.
+               // Also valid on bytes carrier for when the caller holds a []byte.
+  IP    = 8;   // IP address (v4/v6); PG → INET, MySQL → VARCHAR(45), SQLite → TEXT
+  TSEARCH = 9; // full-text search document; PG → TSVECTOR, MySQL → TEXT + FULLTEXT index (iter-2), SQLite → TEXT + FTS5 (iter-2)
 
   // Numeric carriers (carrier: int32 / int64 / double — see D2 table)
   NUMBER     = 10;

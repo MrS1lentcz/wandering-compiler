@@ -70,23 +70,13 @@ func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.C
 	return "    " + strings.Join(parts, " "), nil
 }
 
-// columnType returns the PG column type string for a column. PG passthrough
-// (custom_type, jsonb/inet/tsvector/hstore) short-circuits the semantic
-// dispatch.
+// columnType returns the PG column type string for a column.
+// (w17.pg.field).custom_type short-circuits the semantic dispatch;
+// everything else flows through the carrier × sem-type table.
 func columnType(col *irpb.Column) (string, error) {
 	if pg := col.GetPg(); pg != nil {
 		if raw := pg.GetCustomType(); raw != "" {
 			return raw, nil
-		}
-		switch {
-		case pg.GetJsonb():
-			return "JSONB", nil
-		case pg.GetInet():
-			return "INET", nil
-		case pg.GetTsvector():
-			return "TSVECTOR", nil
-		case pg.GetHstore():
-			return "HSTORE", nil
 		}
 	}
 
@@ -95,21 +85,33 @@ func columnType(col *irpb.Column) (string, error) {
 		return "BOOLEAN", nil
 
 	case irpb.Carrier_CARRIER_BYTES:
+		// bytes-carrying-JSON stays bytes on the wire but stored as JSONB.
+		if col.GetType() == irpb.SemType_SEM_JSON {
+			return "JSONB", nil
+		}
 		return "BYTEA", nil
 
 	case irpb.Carrier_CARRIER_STRING:
 		switch col.GetType() {
-		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
+		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG,
+			irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL:
+			// All four render as VARCHAR(N). CHAR / SLUG require max_len
+			// from the author; EMAIL / URL have preset defaults applied
+			// at ir.Build.
 			if col.GetMaxLen() <= 0 {
 				return "", fmt.Errorf("%s requires max_len (ir invariant)", displaySemType(col.GetType()))
 			}
 			return fmt.Sprintf("VARCHAR(%d)", col.GetMaxLen()), nil
-		case irpb.SemType_SEM_TEXT, irpb.SemType_SEM_URL:
+		case irpb.SemType_SEM_TEXT:
 			return "TEXT", nil
 		case irpb.SemType_SEM_UUID:
 			return "UUID", nil
-		case irpb.SemType_SEM_EMAIL:
-			return "VARCHAR(320)", nil
+		case irpb.SemType_SEM_JSON:
+			return "JSONB", nil
+		case irpb.SemType_SEM_IP:
+			return "INET", nil
+		case irpb.SemType_SEM_TSEARCH:
+			return "TSVECTOR", nil
 		case irpb.SemType_SEM_DECIMAL:
 			if col.GetPrecision() <= 0 {
 				return "", fmt.Errorf("DECIMAL requires precision (ir invariant)")

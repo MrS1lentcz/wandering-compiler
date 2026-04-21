@@ -134,15 +134,18 @@ func TestBuildHappyPath(t *testing.T) {
 		t.Error("orders: synthesised storage index on customer_id missing")
 	}
 
-	// metadata: PgOptions.Jsonb
+	// metadata: type: JSON core Type (post-D13; previously (w17.pg.field).jsonb).
 	var metadata *irpb.Column
 	for _, c := range orders.GetColumns() {
 		if c.GetProtoName() == "metadata" {
 			metadata = c
 		}
 	}
-	if metadata == nil || metadata.GetPg() == nil || !metadata.GetPg().GetJsonb() {
-		t.Errorf("orders.metadata.Pg.Jsonb missing: %+v", metadata)
+	if metadata == nil {
+		t.Fatal("orders.metadata column missing")
+	}
+	if got, want := metadata.GetType(), irpb.SemType_SEM_JSON; got != want {
+		t.Errorf("orders.metadata.Type = %s, want %s", got, want)
 	}
 }
 
@@ -264,23 +267,23 @@ func TestBuildErrors(t *testing.T) {
 			},
 		},
 		{
-			name:    "pg.field override rejected on non-string carrier",
+			name:    "pg.field.custom_type rejected on non-string carrier",
 			fixture: "testdata/errors/pg_override_non_string_carrier.proto",
 			wants: []string{
 				`pg_override_non_string_carrier.proto:`,
-				`(w17.pg.field) storage override is only allowed on string-carrier columns`,
+				`(w17.pg.field).custom_type is only allowed on string-carrier columns`,
 				`why:`,
-				`numeric / bool / temporal carriers`,
+				`numeric / bool / temporal / bytes carriers`,
 				`fix:`,
 				`TEXT`,
 			},
 		},
 		{
-			name:    "pg.field override requires type: TEXT",
+			name:    "pg.field.custom_type requires type: TEXT",
 			fixture: "testdata/errors/pg_override_requires_text.proto",
 			wants: []string{
 				`pg_override_requires_text.proto:`,
-				`(w17.pg.field) storage override requires type: TEXT`,
+				`(w17.pg.field).custom_type requires type: TEXT`,
 				`why:`,
 				`CHAR/SLUG`,
 				`fix:`,
@@ -288,11 +291,11 @@ func TestBuildErrors(t *testing.T) {
 			},
 		},
 		{
-			name:    "pg.field override incompatible with string-only CHECK options",
+			name:    "pg.field.custom_type incompatible with string-only CHECK options",
 			fixture: "testdata/errors/pg_override_with_string_check.proto",
 			wants: []string{
 				`pg_override_with_string_check.proto:`,
-				`min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field) storage override`,
+				`min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field).custom_type`,
 				`why:`,
 				`char_length`,
 				`fix:`,

@@ -12,12 +12,14 @@ option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/pg;pg
 // error if non-empty flags are set — per-emitter call). See
 // docs/iteration-1.md D9 for the dialect-extension pattern.
 //
-// Usage:
-//   string payload = 5 [
-//     (w17.field)    = { type: TEXT },
-//     (w17.pg.field) = { jsonb: true }
-//   ];
+// As of D13 (2026-04-21) the curated jsonb / inet / tsvector flags were
+// lifted to core Type values (`type: JSON`, `type: IP`, `type: TSEARCH`)
+// because each one has a coherent cross-dialect semantic. hstore stays
+// here (PG-only; mapped to HSTORE via AUTO on map<string,string> in
+// iter-1.6) alongside the custom_type escape hatch and the extension
+// prerequisites list.
 //
+// Usage:
 //   // Escape hatch — pgvector column:
 //   string embedding = 6 [
 //     (w17.pg.field) = {
@@ -30,21 +32,12 @@ extend google.protobuf.FieldOptions {
 }
 
 message PgField {
-  // --- Postgres-native semi-structured / text-search types ---
-  // Each flag replaces the SQL column type the core (w17.field).type would
-  // otherwise pick. Carrier of the proto field is typically `string`; the
-  // compiler does not re-encode the value.
-  bool jsonb    = 1;
-  bool inet     = 2;
-  bool tsvector = 3;
-  bool hstore   = 4;
-
   // --- Escape hatch: raw SQL column type ---
   // When non-empty, this string is used verbatim as the SQL column type and
   // the emitter SKIPS the (w17.field).type dispatch for this column. Use for
   // dialect extensions the vocabulary doesn't cover yet (pgvector, PostGIS
-  // geometry, custom DOMAINs). All other (w17.field) semantics — `null`,
-  // `unique`, bounds, CHECK constraints, defaults — still apply.
+  // geometry, custom DOMAINs, MACADDR, …). All other (w17.field) semantics —
+  // `null`, `unique`, bounds, CHECK constraints, defaults — still apply.
   //
   // Mandatory rule: no dialect is allowed to infer column type from
   // `custom_type`. Every dialect namespace ships its own escape hatch.
@@ -52,9 +45,15 @@ message PgField {
 
   // --- Extension prerequisites ---
   // Postgres extensions that must exist for this column's type to resolve.
-  // The PG emitter prepends `CREATE EXTENSION IF NOT EXISTS "<name>"` to the
-  // migration up-script (deduplicated across columns). For iteration-1 this
-  // is a best-effort hint; the platform (future) will enforce it through a
-  // schema-level prerequisites manifest.
+  // The PG emitter surfaces them to the plan; the hosted platform (future)
+  // is responsible for `CREATE EXTENSION` pre-apply. For iteration-1 this
+  // list is authoring metadata — operators load extensions manually.
   repeated string required_extensions = 11;
+
+  // Field numbers 1 (jsonb), 2 (inet), 3 (tsvector), 4 (hstore) were curated
+  // flags that D13 migrated into core Types (JSON / IP / TSEARCH) and the
+  // iter-1.6 map-carrier AUTO dispatch (hstore). Reserved to prevent
+  // accidental reuse with a different semantic.
+  reserved 1, 2, 3, 4;
+  reserved "jsonb", "inet", "tsvector", "hstore";
 }

@@ -41,7 +41,7 @@ func TestLoadVocabFixture(t *testing.T) {
 		switch string(f.Desc.Name()) {
 		case "slug":
 			slug = f
-		case "metadata":
+		case "embedding":
 			metadata = f
 		}
 	}
@@ -52,9 +52,9 @@ func TestLoadVocabFixture(t *testing.T) {
 		t.Error("slug.Field.unique = false, want true")
 	}
 	if metadata == nil || metadata.PgField == nil {
-		t.Fatal("metadata field or its (w17.pg.field) option missing")
+		t.Fatal("embedding field or its (w17.pg.field) option missing")
 	}
-	if !metadata.PgField.GetJsonb() {
-		t.Error("metadata.PgField.jsonb = false, want true")
+	if got, want := metadata.PgField.GetCustomType(), "vector(1536)"; got != want {
+		t.Errorf("embedding.PgField.custom_type = %q, want %q", got, want)
 	}
 }

@@ -213,11 +213,11 @@ func TestW17VocabularyCompiles(t *testing.T) {
 		t.Error("created_at.field.immutable = false, want true")
 	}
 
-	// --- metadata: (w17.pg.field) jsonb:true (dialect-specific) ---
+	// --- metadata: (w17.field).type = JSON (core Type post-D13, no pg.field needed) ---
 	metaOpts := fieldOptions(t, product, "metadata")
-	metaPgExt := proto.GetExtension(metaOpts, pgpb.E_Field).(*pgpb.PgField)
-	if !metaPgExt.GetJsonb() {
-		t.Error("metadata.pg.field.jsonb = false, want true")
+	metaExt := proto.GetExtension(metaOpts, w17pb.E_Field).(*w17pb.Field)
+	if got, want := metaExt.GetType(), w17pb.Type_JSON; got != want {
+		t.Errorf("metadata.field.type = %v, want %v", got, want)
 	}
 
 	// --- embedding: (w17.pg.field) escape hatch — custom_type + required_extensions ---

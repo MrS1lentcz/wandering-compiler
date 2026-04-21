@@ -6,25 +6,15 @@ import "w17/db.proto";
 import "w17/field.proto";
 import "w17/pg/field.proto";
 
-// Grand-tour fixture: `(w17.pg.field)` curated flags (jsonb, inet,
-// tsvector, hstore) plus the custom_type + required_extensions escape
-// hatch. Verifies the PG passthrough short-circuits columnType() before
-// the carrier×type dispatch — the string carrier is a carry-only
-// placeholder for wire shape, the real column type is the PG one.
+// Grand-tour fixture: core Types that used to be PG-specific flags
+// (JSON, IP, TSEARCH — lifted into field.Type by D13) plus the
+// custom_type + required_extensions escape hatch for things that are
+// still genuinely PG-only (HSTORE, MACADDR, pgvector, PostGIS).
 //
-// NOTE: hstore and pgvector require extensions in the target DB. Our
-// test-apply harness runs on postgres:18-alpine which ships hstore as
-// a contrib module but does NOT pre-install pgvector; the generated
-// SQL is valid but would need `CREATE EXTENSION vector;` before apply
-// on a stock cluster. `required_extensions` is authoring metadata for
-// the hosted platform (D6) — the emitter surfaces it to the plan but
-// does not emit CREATE EXTENSION itself (parked decision: the platform
-// owns extension installation, not the per-migration SQL body).
-//
-// For this fixture to apply on stock postgres:18-alpine, we drop the
-// pgvector column and keep only jsonb / inet / tsvector / hstore +
-// a hand-spelled custom_type that PG 18 accepts natively
-// (MACADDR — another networking type, no extension required).
+// HSTORE graduates from a curated flag to a map-carrier AUTO dispatch
+// in iter-1.6; until then it lives through custom_type. Our test-apply
+// harness installs hstore per DB so the fixture applies on stock
+// postgres:18-alpine.
 message Inventory {
   option (w17.db.table) = {
     name: "inventories",
@@ -41,10 +31,16 @@ message Inventory {
 
   int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
 
-  string payload     = 2 [(w17.field) = { type: TEXT }, (w17.pg.field) = { jsonb: true }];
-  string ip          = 3 [(w17.field) = { type: TEXT }, (w17.pg.field) = { inet: true }];
-  string search_idx  = 4 [(w17.field) = { type: TEXT }, (w17.pg.field) = { tsvector: true }];
-  string attributes  = 5 [(w17.field) = { type: TEXT, null: true }, (w17.pg.field) = { hstore: true }];
+  string payload     = 2 [(w17.field) = { type: JSON }];
+  string ip          = 3 [(w17.field) = { type: IP }];
+  string search_idx  = 4 [(w17.field) = { type: TSEARCH }];
+  string attributes  = 5 [
+    (w17.field)    = { type: TEXT, null: true },
+    (w17.pg.field) = { custom_type: "HSTORE" }
+  ];
 
-  string mac         = 6 [(w17.field) = { type: TEXT }, (w17.pg.field) = { custom_type: "MACADDR" }];
+  string mac         = 6 [
+    (w17.field)    = { type: TEXT },
+    (w17.pg.field) = { custom_type: "MACADDR" }
+  ];
 }
