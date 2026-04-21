@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package irtest.raw_check_empty_name;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+message X {
+  // raw_checks entry with empty name — compiler can't invent one for
+  // an opaque expression, must reject.
+  option (w17.db.table) = {
+    name: "xs",
+    raw_checks: [
+      { expr: "id > 0" }
+    ]
+  };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

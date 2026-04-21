@@ -334,6 +334,58 @@ func TestBuildErrors(t *testing.T) {
 				`rename the explicit index`,
 			},
 		},
+		{
+			name:    "raw_checks[].name empty",
+			fixture: "testdata/errors/raw_check_empty_name.proto",
+			wants: []string{
+				`raw_check_empty_name.proto:`,
+				`raw_checks[0].name is empty`,
+				`why:`,
+				`opaque expression`,
+				`fix:`,
+				`descriptive identifier`,
+			},
+		},
+		{
+			name:    "raw check name collides with derived",
+			fixture: "testdata/errors/raw_check_collides_with_derived.proto",
+			wants: []string{
+				`raw_check_collides_with_derived.proto:`,
+				`"xs_email_blank"`,
+				`collides with`,
+				`why:`,
+				`pg_constraint`,
+				`fix:`,
+				`rename the raw check`,
+			},
+		},
+		{
+			name:    "raw_indexes[].body empty",
+			fixture: "testdata/errors/raw_index_empty_body.proto",
+			wants: []string{
+				`raw_index_empty_body.proto:`,
+				`raw_indexes[0]`,
+				`empty body`,
+				`why:`,
+				`rejects at apply`,
+				`fix:`,
+				`USING gin`,
+			},
+		},
+		{
+			name:    "raw index name collides with synth",
+			fixture: "testdata/errors/raw_index_collides_with_synth.proto",
+			wants: []string{
+				`raw_index_collides_with_synth.proto:`,
+				`raw_indexes[0]`,
+				`"xs_email_uidx"`,
+				`collides with`,
+				`why:`,
+				`share one namespace`,
+				`fix:`,
+				`rename the raw index`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

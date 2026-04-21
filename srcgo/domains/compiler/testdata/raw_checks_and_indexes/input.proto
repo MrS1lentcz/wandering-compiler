@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package m10.raw_checks_and_indexes;
+
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Grand-tour fixture for the escape-hatch vocabulary:
+//
+//   - raw_checks:  cross-column CHECK the per-field Range / Regex /
+//                  Choices can't spell (compare two columns, call a
+//                  function on one).
+//   - raw_indexes: shapes the structured `indexes:` can't spell —
+//                  partial index via WHERE clause, expression index
+//                  via lower(), multi-col with WHERE (soft-delete
+//                  pattern).
+//
+// Everything in raw_* is opaque SQL: wc validates the identifier names
+// (length / reserved / collision with derived or explicit names) but
+// the body is pass-through. Cross-dialect portability is the author's
+// problem — these live under `(w17.db.table)`, same vocabulary for all
+// dialects, but dialect-specific syntax inside the bodies will only
+// apply on that dialect. Iter-1 is Postgres-only anyway.
+message Booking {
+  option (w17.db.table) = {
+    name: "bookings",
+
+    raw_checks: [
+      // Cross-column: end after start. Impossible with per-field Range.
+      { name: "bookings_dates_ordered", expr: "start_at <= end_at" },
+      // Function-call on one column. Per-field vocabulary can't express
+      // "price must be a multiple of 0.01" without a real modulo knob.
+      { name: "bookings_price_cents",   expr: "(price * 100) = floor(price * 100)" }
+    ],
+
+    raw_indexes: [
+      // Partial UNIQUE on email excluding soft-deleted rows — a Django
+      // `UniqueConstraint(fields=['email'], condition=Q(deleted_at__isnull=True))`
+      // equivalent. The structured `indexes:` field has no `where:` knob.
+      {
+        name:   "bookings_email_active_uidx",
+        unique: true,
+        body:   "(email) WHERE deleted_at IS NULL"
+      },
+      // Expression index on lower(customer_name) for case-insensitive
+      // lookup. Structured `indexes:` can only take column names.
+      {
+        name: "bookings_lower_customer_idx",
+        body: "(lower(customer_name))"
+      }
+    ]
+  };
+
+  int64  id             = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string email          = 2 [(w17.field) = { type: EMAIL }];
+  string customer_name  = 3 [(w17.field) = { type: CHAR, max_len: 200 }];
+  double price          = 4 [(w17.field) = { type: MONEY, gte: 0 }];
+
+  google.protobuf.Timestamp start_at   = 5 [(w17.field) = { type: DATETIME }];
+  google.protobuf.Timestamp end_at     = 6 [(w17.field) = { type: DATETIME }];
+  google.protobuf.Timestamp deleted_at = 7 [(w17.field) = { type: DATETIME, null: true }];
+}

@@ -40,6 +40,24 @@ message Table {
   // proto_name of each PK column, in declaration order. Derived view over
   // Columns with pk=true, kept explicit so consumers don't re-walk the list.
   repeated string primary_key = 7;
+
+  // Escape-hatch CHECK / INDEX bodies from (w17.db.table).raw_checks /
+  // .raw_indexes. Carry the opaque SQL body verbatim; name is validated
+  // like any other identifier. See proto/w17/db.proto for the author
+  // contract.
+  repeated RawCheck raw_checks = 8;
+  repeated RawIndex raw_indexes = 9;
+}
+
+message RawCheck {
+  string name = 1;   // constraint identifier (validated)
+  string expr = 2;   // opaque — body between `CHECK (…)`
+}
+
+message RawIndex {
+  string name = 1;   // index identifier (validated; collision-checked vs. derived + explicit Index names)
+  bool   unique = 2;
+  string body = 3;   // opaque — everything after `ON <table>`
 }
 
 message Column {

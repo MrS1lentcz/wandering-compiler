@@ -26,7 +26,18 @@ import "w17/pg/field.proto";
 // a hand-spelled custom_type that PG 18 accepts natively
 // (MACADDR — another networking type, no extension required).
 message Inventory {
-  option (w17.db.table) = { name: "inventories" };
+  option (w17.db.table) = {
+    name: "inventories",
+
+    // GIN indexes on tsvector + jsonb columns — without these the
+    // columns are useless for full-text / containment search. The
+    // structured `indexes:` field defaults to btree and has no knob
+    // for `USING gin`, so raw_indexes is the escape hatch.
+    raw_indexes: [
+      { name: "inventories_search_idx_gin", body: "USING gin (search_idx)" },
+      { name: "inventories_payload_gin",    body: "USING gin (payload jsonb_path_ops)" }
+    ]
+  };
 
   int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
 

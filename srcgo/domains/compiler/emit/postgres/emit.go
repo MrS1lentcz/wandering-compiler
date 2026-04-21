@@ -92,14 +92,29 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 			}
 		}
 	}
+	// Raw CHECK constraints (`(w17.db.table).raw_checks`) — author-supplied
+	// SQL expression rendered verbatim inside `CONSTRAINT <name> CHECK (…)`.
+	// Declaration order is preserved.
+	for _, rc := range t.GetRawChecks() {
+		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s CHECK (%s)", rc.GetName(), rc.GetExpr()))
+	}
 
 	upB.WriteString(strings.Join(lines, ",\n"))
 	upB.WriteString("\n);")
 
-	// Separate CREATE INDEX statements.
+	// Separate CREATE INDEX statements — structured indexes first, then
+	// raw-body indexes. Down-migration reverses this combined order.
 	idxStmts, idxNames, idxErr := renderIndexes(t, colByProto)
 	if idxErr != nil {
 		return "", "", idxErr
+	}
+	for _, ri := range t.GetRawIndexes() {
+		kw := "CREATE INDEX"
+		if ri.GetUnique() {
+			kw = "CREATE UNIQUE INDEX"
+		}
+		idxStmts = append(idxStmts, fmt.Sprintf("%s %s ON %s %s;", kw, ri.GetName(), t.GetName(), ri.GetBody()))
+		idxNames = append(idxNames, ri.GetName())
 	}
 	if len(idxStmts) > 0 {
 		upB.WriteString("\n\n")

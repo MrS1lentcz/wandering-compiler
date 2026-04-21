@@ -186,16 +186,51 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		})
 	}
 
+	// Copy escape-hatch raw CHECK / INDEX bodies from (w17.db.table) into
+	// IR. Raw bodies are opaque to the compiler (SQL pass-through), but
+	// their identifier names go through the same length/reserved/collision
+	// validation as every other emitted identifier.
+	for _, rc := range msg.Table.GetRawChecks() {
+		tbl.RawChecks = append(tbl.RawChecks, &irpb.RawCheck{
+			Name: rc.GetName(),
+			Expr: rc.GetExpr(),
+		})
+	}
+	for _, ri := range msg.Table.GetRawIndexes() {
+		tbl.RawIndexes = append(tbl.RawIndexes, &irpb.RawIndex{
+			Name:   ri.GetName(),
+			Unique: ri.GetUnique(),
+			Body:   ri.GetBody(),
+		})
+	}
+
 	// Finalise index names up front: derivation lives in IR (not in the
 	// emitter) so collision detection and identifier-length validation
 	// are possible at IR time. For explicit indexes the author name wins;
 	// for synths the <table>_<cols>_<{u,}idx> shape is computed here.
-	// Validate every name (length + reserved) and reject duplicates.
+	// Raw indexes carry an author-supplied name and join the same
+	// collision namespace. Validate every name (length + reserved) and
+	// reject duplicates across all three sources.
 	colSQLNameByProto := map[string]string{}
 	for _, c := range tbl.Columns {
 		colSQLNameByProto[c.GetProtoName()] = c.GetName()
 	}
-	idxNameSeen := map[string]int{}
+	idxNameSeen := map[string]string{} // name → origin (for diag)
+	recordIdx := func(name, origin string, dupFix string) {
+		if why := validateIdentifier(name); why != "" {
+			b.err(diag.Atf(msg.Desc, "message %q: %s name %s", msg.Desc.Name(), origin, why).
+				WithWhy("index names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords; derived names inherit the table/column lengths, so a long table × multi-col index is a common offender").
+				WithFix(`shorten the table / column names, or pass an explicit shorter name via (w17.db.table).indexes[].name (or .raw_indexes[].name)`))
+			return
+		}
+		if prev, dup := idxNameSeen[name]; dup {
+			b.err(diag.Atf(msg.Desc, "message %q: %s name %q collides with %s", msg.Desc.Name(), origin, name, prev).
+				WithWhy("two CREATE INDEX statements with the same name fail at apply — Postgres has per-schema unique index names. Explicit `(w17.db.table).indexes[].name`, synth'd UNIQUE from `(w17.field).unique`, storage-index from `(w17.db.column).index`, and `(w17.db.table).raw_indexes[].name` all share one namespace").
+				WithFix(dupFix))
+			return
+		}
+		idxNameSeen[name] = origin
+	}
 	for i, idx := range tbl.Indexes {
 		if idx.Name == "" {
 			sqlCols := make([]string, 0, len(idx.GetFields()))
@@ -204,26 +239,32 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			}
 			idx.Name = derivedIndexName(tbl.GetName(), sqlCols, idx.GetUnique())
 		}
-		if why := validateIdentifier(idx.Name); why != "" {
-			b.err(diag.Atf(msg.Desc, "message %q: index[%d] name %s", msg.Desc.Name(), i, why).
-				WithWhy("index names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords; derived names inherit the table/column lengths, so a long table × multi-col index is a common offender").
-				WithFix(`shorten the table / column names, or pass an explicit shorter name via (w17.db.table).indexes[].name`))
+		recordIdx(idx.Name, fmt.Sprintf("index[%d]", i),
+			"either rename the explicit index to something unique, or drop the redundant synth (remove `unique: true` / `(w17.db.column).index` on the field the explicit index already covers)")
+	}
+	for i, ri := range tbl.RawIndexes {
+		if ri.GetName() == "" {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d].name is empty", msg.Desc.Name(), i).
+				WithWhy("raw indexes carry no field list to derive a name from — the compiler can't invent one").
+				WithFix(`set (w17.db.table).raw_indexes[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<cols>_<method>)`))
 			continue
 		}
-		if prev, dup := idxNameSeen[idx.Name]; dup {
-			b.err(diag.Atf(msg.Desc, "message %q: index[%d] name %q collides with index[%d]", msg.Desc.Name(), i, idx.Name, prev).
-				WithWhy("two CREATE INDEX statements with the same name fail at apply — Postgres has per-schema unique index names. Explicit `(w17.db.table).indexes[].name` can collide with a synth'd UNIQUE from `(w17.field).unique` or storage-index from `(w17.db.column).index` if both resolve to the same identifier").
-				WithFix("either rename the explicit index to something unique, or drop the redundant synth (remove `unique: true` / `(w17.db.column).index` on the field the explicit index already covers)"))
+		if ri.GetBody() == "" {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d] %q has empty body", msg.Desc.Name(), i, ri.GetName()).
+				WithWhy("an empty body would emit `CREATE INDEX … ON <table>` with nothing after — PG rejects at apply").
+				WithFix(`supply the body after ON <table>, e.g. "USING gin (search_tsv)" or "(lower(email)) WHERE deleted_at IS NULL"`))
 			continue
 		}
-		idxNameSeen[idx.Name] = i
+		recordIdx(ri.GetName(), fmt.Sprintf("raw_indexes[%d]", i),
+			"rename the raw index to avoid collision with an existing derived / explicit index name")
 	}
 
-	// Validate CHECK constraint names (derived `<table>_<col>_<variant>`)
-	// fit NAMEDATALEN. Variant suffixes are fixed and non-reserved; we
-	// only length-check. Cross-column / cross-variant collisions are
-	// impossible — attachChecks emits at most one of each variant per
-	// column — so no dedup pass is needed.
+	// Validate CHECK constraint names.
+	// Derived: `<table>_<col>_<variant>` — variant suffixes are fixed and
+	// non-reserved; only length-check. Cross-column / cross-variant
+	// collisions are impossible (attachChecks emits at most one of each
+	// variant per column) but raw-check names share the namespace.
+	ckNameSeen := map[string]string{}
 	for _, c := range tbl.Columns {
 		for j, ck := range c.GetChecks() {
 			name := derivedCheckName(tbl.GetName(), c.GetName(), ck)
@@ -231,8 +272,37 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 				b.err(diag.Atf(msg.Desc, "message %q: column %q check[%d] name %s", msg.Desc.Name(), c.GetProtoName(), j, why).
 					WithWhy("constraint names are <table>_<column>_<variant> — long table/column names overflow Postgres NAMEDATALEN (63 bytes) and silently truncate, risking collisions in pg_constraint").
 					WithFix("shorten the table / column name to make room for the variant suffix (blank/len/range/format/choices)"))
+				continue
 			}
+			ckNameSeen[name] = fmt.Sprintf("column %q check[%d]", c.GetProtoName(), j)
 		}
+	}
+	for i, rc := range tbl.RawChecks {
+		if rc.GetName() == "" {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d].name is empty", msg.Desc.Name(), i).
+				WithWhy("the compiler can't invent a constraint name for an opaque expression").
+				WithFix(`set (w17.db.table).raw_checks[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<what>)`))
+			continue
+		}
+		if rc.GetExpr() == "" {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] %q has empty expr", msg.Desc.Name(), i, rc.GetName()).
+				WithWhy("an empty expr would emit `CHECK ()` — PG rejects at apply").
+				WithFix(`supply the SQL expression that goes inside CHECK(...), e.g. "start_date <= end_date"`))
+			continue
+		}
+		if why := validateIdentifier(rc.GetName()); why != "" {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %s", msg.Desc.Name(), i, why).
+				WithWhy("CHECK constraint names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords").
+				WithFix("shorten or rename the raw check"))
+			continue
+		}
+		if prev, dup := ckNameSeen[rc.GetName()]; dup {
+			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %q collides with %s", msg.Desc.Name(), i, rc.GetName(), prev).
+				WithWhy("CHECK names are unique per table in pg_constraint; raw-check names share the namespace with derived <table>_<column>_<variant> names").
+				WithFix("rename the raw check, or remove the per-field option that synthesised the colliding derived name"))
+			continue
+		}
+		ckNameSeen[rc.GetName()] = fmt.Sprintf("raw_checks[%d]", i)
 	}
 
 	return tbl

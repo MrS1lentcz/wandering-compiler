@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package irtest.raw_index_collides_with_synth;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Raw index name "xs_email_uidx" collides with what the synthesised
+// UNIQUE from `email`'s `unique: true` would produce. Both share the
+// pg_class namespace — IR must reject.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_indexes: [
+      { name: "xs_email_uidx", unique: true, body: "USING gin (search_tsv)" }
+    ]
+  };
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string email      = 2 [(w17.field) = { type: EMAIL, unique: true }];
+  string search_tsv = 3 [(w17.field) = { type: TEXT }];
+}

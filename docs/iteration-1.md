@@ -40,7 +40,7 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
   - Numbers: `NUMBER`, `ID`, `COUNTER`, `MONEY`, `PERCENTAGE` (0–100), `RATIO` (0–1).
   - Arbitrary-precision decimal: `DECIMAL` (carrier: `string` — lossless wire; requires `precision`, optional `scale`).
   - Temporal: `DATE`, `TIME`, `DATETIME` on Timestamp carrier; `INTERVAL` on Duration carrier.
-- **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not; with optional `name` override and `include` covering columns). No auto-generated fields — every DB column is a declared proto field.
+- **`(w17.db.table)` options:** `name`, `indexes` (single or multi-column, unique or not; with optional `name` override and `include` covering columns), `raw_checks` + `raw_indexes` (escape hatches — see D11). No auto-generated fields — every DB column is a declared proto field.
 - **`(w17.field)` options (merged vocabulary):** `type` (required for every carrier except bool), `pk`, `fk`, `orphanable` (FK survives parent delete — see D8), `immutable`, `null` (default `false` → NOT NULL + required), `blank` (string-only, default `false` → `CHECK (col <> '')`), `unique` (data-level uniqueness → UNIQUE INDEX), `max_len` / `min_len` (string carriers), `gt` / `gte` / `lt` / `lte` (numeric carriers), `pattern` (string carriers, regex override), `choices` (FQN of a proto enum — CHECK IN (…) — see D8), `precision` / `scale` (DECIMAL), and a `default` oneof — see D7.
 - **`(w17.db.column)` options (field-level storage overrides):** `index` (single-field non-unique storage index), `name` (SQL column-name override). Orthogonal to `(w17.field).unique`: `unique` is a data semantic, `index` is a pure optimisation.
 - **`(w17.pg.field)` options (Postgres dialect namespace — see D9):** `jsonb`, `inet`, `tsvector`, `hstore`, plus the `custom_type` + `required_extensions` escape hatch for dialect extensions the vocabulary doesn't cover yet (pgvector, PostGIS, custom DOMAINs).
@@ -684,6 +684,71 @@ number. If we injected hidden `created_at` / `updated_at` columns, they'd
 lack a number and the differ would need a parallel identity mechanism for
 them. The two decisions reinforce each other — D3 keeps the IR honest,
 D10 turns that honesty into cheap alter-diff.
+
+### D11 — Table-level escape hatches for CHECK and INDEX (added 2026-04-21)
+
+**Decision.** `(w17.db.table)` carries two opaque-SQL escape hatches
+alongside the curated vocabulary:
+
+- **`raw_checks: [ { name, expr } ]`** — table-level CHECK constraints
+  that the per-field vocabulary (Length / Blank / Range / Regex /
+  Choices) can't spell. `expr` is pass-through SQL rendered inside
+  `CONSTRAINT <name> CHECK (<expr>)`.
+- **`raw_indexes: [ { name, unique, body } ]`** — index shapes the
+  structured `indexes:` field can't spell. `body` is pass-through SQL
+  rendered after `CREATE [UNIQUE] INDEX <name> ON <table>`.
+
+The compiler validates `name` (NAMEDATALEN ≤ 63, not a reserved PG
+keyword, no collision with any other emitted identifier — derived
+synths, explicit indexes, other raw entries) but treats `expr` /
+`body` as opaque. Dialect portability is the author's problem — same
+contract as `(w17.pg.field).custom_type`.
+
+**Rationale.**
+
+1. **Parity gaps with Django that the curated vocabulary can't
+   reasonably close.** Django's `Meta.constraints = [CheckConstraint(…)]`
+   accepts arbitrary Q() expressions that reference multiple columns
+   or call functions; per-field CHECKs can't. Django's `Index(fields=[…],
+   condition=Q(…))` emits partial indexes, `GinIndex` / `GistIndex` /
+   `BrinIndex` emit non-btree indexes, `expressions=[F('lower(col)')]`
+   emits expression indexes — iter-1's structured `indexes:` has none
+   of those knobs. The first real full-text-search use-case in a wc
+   project needs a GIN index on tsvector; without an escape hatch,
+   the user is blocked.
+2. **CLAUDE.md non-negotiable #3 (escape hatches mandatory).** Every
+   generator must have a documented fall-back to hand-written SQL.
+   `(w17.pg.field).custom_type` covers the column-type axis;
+   `raw_checks` / `raw_indexes` cover the table-level constraint and
+   index axes. No generator without an escape hatch.
+3. **Raw (opaque string) over structured (GinIndex / PartialIndex
+   messages) in iter-1.** A structured vocabulary for the common cases
+   (GIN, partial, expression) is iter-2 work — the right shape needs
+   real usage to pin. A raw escape hatch unblocks *now* and composes
+   cleanly with the future structured vocabulary: `raw_indexes` entries
+   that stabilise into a pattern graduate into typed message shapes,
+   exactly as `custom_type` entries graduate into curated flags per D9.
+4. **Alter-diff compatibility.** Raw bodies participate in the differ
+   (iter-2+) by identity-on-name — a raw index changes shape → the
+   differ emits DROP + CREATE with the new body. No fuzzy semantic
+   diffing on opaque SQL; simple, correct, aligned with D10's
+   "identity is explicit, not heuristic" ethos.
+5. **Iter-1 semantics for DB portability.** Raw bodies live on
+   `(w17.db.table)`, the dialect-agnostic vocabulary. That's
+   deliberate: cross-column CHECKs (`start <= end`) and partial
+   indexes (`WHERE deleted_at IS NULL`) are standard SQL, not PG-
+   specific. Things that ARE PG-specific (`USING gin`, `gin_trgm_ops`)
+   live inside the opaque body and simply don't apply on other
+   dialects — same "author's problem" as `custom_type: "JSONB"`.
+
+**Operator-class + extension caveat.** Raw indexes that use operator
+classes (`gin_trgm_ops`, `jsonb_path_ops`) may require PG extensions
+the target DB doesn't have by default. The `required_extensions` list
+lives on `(w17.pg.field)` and is per-column — table-level raw
+indexes have no equivalent surface yet. Iter-1 users annotate one
+of the columns the index covers with `required_extensions` as a
+workaround; iter-2 may lift `required_extensions` to the table level
+for raw-index use cases.
 
 **Parked implementation work (iter-2+).** `irpb.Column` needs a
 `int32 number` field, populated from `protoreflect.FieldDescriptor.Number()`

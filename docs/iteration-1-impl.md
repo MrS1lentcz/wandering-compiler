@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish complete; **iteration-1 closed.**
+**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches complete; **iteration-1 closed.**
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -740,9 +740,57 @@ in code, not in docs:
   on top would confound any iter-2 bug hunt. Close the reliability
   window first, then build forward.
 
+- **D11 raw-escape-hatches (shipped, 2026-04-21) — close Django-parity
+  gaps the curated vocabulary can't reach.** Parity audit surfaced
+  three material gaps that blocked realistic schemas: cross-column
+  CHECK constraints (Django's `CheckConstraint` with multi-col `Q()`),
+  partial / expression / non-btree indexes (Django's `GinIndex`,
+  `Index(..., condition=Q(...))`, `Index(..., expressions=[F(...)])`),
+  and operator-class indexes (e.g. `gin_trgm_ops`). The same fixture
+  set already shipped a `tsvector` column that was effectively
+  useless — no way to build a GIN index on it.
+
+  `(w17.db.table)` grew two opaque-SQL escape hatches matching the
+  `(w17.pg.field).custom_type` shape:
+  - `raw_checks: [{ name, expr }]` — `CONSTRAINT <name> CHECK (<expr>)`
+  - `raw_indexes: [{ name, unique, body }]` — `CREATE [UNIQUE] INDEX
+    <name> ON <table> <body>`
+
+  Name validation goes through the full identifier pipeline
+  (NAMEDATALEN, reserved PG keywords, collision across derived /
+  explicit / raw names). Body / expr are opaque — author owns SQL
+  syntax and apply-time correctness, same contract as `custom_type`.
+  Design rationale + future "graduate to structured messages" path
+  recorded as D11 in `iteration-1.md`.
+
+  IR additions: `irpb.Table.RawChecks` + `irpb.Table.RawIndexes` +
+  two new messages in `ir.proto`. Emitter additions: raw CHECKs
+  render inline with derived CHECKs in declaration order; raw
+  indexes render as separate `CREATE [UNIQUE] INDEX` statements after
+  structured indexes, participate in the down-block reverse-drop.
+
+  Fixture updates:
+  - `pg_dialect` grows two GIN indexes (on `tsvector` + `jsonb`) —
+    previously the columns had no way to be queryable.
+  - New `raw_checks_and_indexes` fixture exercises cross-column CHECK
+    (`start_at <= end_at`), function-call CHECK
+    (`(price * 100) = floor(price * 100)`), partial UNIQUE index
+    (`(email) WHERE deleted_at IS NULL`), and expression index
+    (`(lower(customer_name))`).
+
+  Four new error-class fixtures guard the validation surface:
+  `raw_check_empty_name`, `raw_check_collides_with_derived`,
+  `raw_index_empty_body`, `raw_index_collides_with_synth`.
+
+  All 11 grand-tour fixtures (3 original + 7 M10 + 1 new) stay green
+  on M8 goldens and M9 `make test-apply` against `postgres:18-alpine`.
+
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production
 emitters, `wc lint` / `diff` / `viz` / `changelog`, projections,
-`immutable` runtime enforcement, CHECK-verbosity flag) sits cleanly
-on top of a reliability-sealed iter-1. No known silent-failure
+`immutable` runtime enforcement, CHECK-verbosity flag, **structured
+message shapes for the common raw-index patterns — GinIndex /
+PartialIndex / ExpressionIndex** — D11 writeup explains the
+graduation path) sits cleanly on top of a reliability-sealed iter-1
+with Django-parity escape hatches in place. No known silent-failure
 scenarios remain in the core pipeline.

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package irtest.raw_index_empty_body;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// raw_indexes entry with body unset — would emit `CREATE INDEX … ON xs`
+// with nothing after, which PG rejects. IR catches it up front.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_indexes: [
+      { name: "xs_ghost_idx" }
+    ]
+  };
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

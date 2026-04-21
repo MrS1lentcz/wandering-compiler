@@ -9,4 +9,7 @@ CREATE TABLE inventories (
     mac MACADDR NOT NULL
 );
 
+CREATE INDEX inventories_search_idx_gin ON inventories USING gin (search_idx);
+CREATE INDEX inventories_payload_gin ON inventories USING gin (payload jsonb_path_ops);
+
 COMMIT;
