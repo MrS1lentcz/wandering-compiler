@@ -252,14 +252,44 @@ Each milestone is independently testable. Ship them in order; do not skip.
   then down, then up again, confirming clean apply and clean rollback.
 - **Serves AC #2, AC #3**.
 
-### M10 — pilot adoption
+### M10 — grand-tour fixture matrix (revised 2026-04-21)
 
-- One table from the pilot project (picked from
-  `docs/conventions-global/`) replaces its hand-written migration with
-  `wc`'s output. Pilot applies the SQL manually via `psql -f` since the
-  platform + deploy client don't exist yet (D6). Side-by-side compare for
-  behavioral equivalence.
-- **Serves AC #7**.
+- **Replaces the original "pilot project adoption" framing.** AC #7 was
+  rewritten the same day; see `iteration-1.md` AC #7 rev 2026-04-21 for
+  the "why" writeup. Short version: single-repo adoption only proves
+  what that one repo happens to exercise, and iter-1 has no
+  applied-state tracking to make a real pilot rigorous anyway. A
+  combinatorial synthetic matrix is stronger for vocabulary
+  adequacy — explicit, repo-local, survives refactors, checks into
+  goldens *and* apply-roundtrip.
+- Fixture set under `srcgo/domains/compiler/testdata/` — each new
+  subdirectory is one `input.proto` + `expected.up.sql` +
+  `expected.down.sql`, auto-picked up by the M8 runner
+  (`goldens_test.go`) and the M9 harness (`make test-apply`) without
+  any new wiring.
+- Coverage axes (full list in `iteration-1.md` AC #7): every
+  `(carrier, type)` cell of D2, every `AutoDefault`, every CHECK
+  variant, three PK shapes, four index shapes, four FK shapes, seven
+  table archetypes including PG dialect passthrough + custom_type
+  escape hatch.
+- Scope control: **no global cartesian product.** Each axis is covered
+  at least once, plus a handful of targeted pairings the memory file
+  flagged as interaction-risky (UUID PK + non-null string columns,
+  DECIMAL + numeric range checks, PG custom_type + required_extensions,
+  composite PK + FK-referencing-it, self-ref FK + orphanable). Estimate
+  6–8 fixture directories.
+- Expected outcomes per `iteration-1.md` AC #7 writeup: either the
+  matrix ships green (iter-1 closes) or a fixture surfaces a gap and
+  that gap either (a) gets a narrow IR / emitter fix in the same batch
+  (per-fixture, small) or (b) becomes an iter-2 backlog entry with the
+  fixture parked. Gaps are the **output** of this milestone, not a
+  failure mode.
+- Pre-M10 prep already shipped (commit `b955464`): `attachChecks`
+  blank-synth gated on `semTypeStoresAsString`, `defaultRegexFor`
+  dropped redundant UUID pattern — so fixtures are free to combine UUID
+  PKs, DECIMAL columns, and non-nullable strings without tripping synth
+  paths.
+- **Serves AC #7 (revised), closes iteration-1.**
 
 ## Testing strategy
 
@@ -594,9 +624,12 @@ in code, not in docs:
   transitively proves fresh generator output applies on PG. Serves
   AC #2 and AC #3.
 
-**Next:** M10 — pilot adoption. Pick one table from a real
-`conventions-global/`-style project, regenerate the migration via
-`wc generate`, and compare byte-for-byte against the hand-written
-SQL it replaces. Platform + deploy client don't exist yet (D6), so
-the pilot applies via `psql -f` manually. Serves AC #7 and closes
-iteration-1.
+**Next:** M10 — grand-tour fixture matrix (AC #7 rev 2026-04-21).
+Replaces the original "pilot project adoption" framing — see the M10
+section above and `iteration-1.md` AC #7 rev writeup for the "why"
+discussion. Authoring 6–8 fixture dirs under
+`srcgo/domains/compiler/testdata/` that together cover every iter-1
+vocabulary primitive plus the interaction-risky pairings; each is
+picked up transparently by both M8 (golden) and M9
+(apply-roundtrip). Expected to surface some gaps — those become
+same-batch fixes or iter-2 backlog.

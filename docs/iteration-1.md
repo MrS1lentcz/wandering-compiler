@@ -83,12 +83,51 @@ The pilot example is shown in `docs/experiments/iteration-1-models.md`.
 6. The SQL emitter is invoked through a `DialectEmitter` interface. A stub
    second dialect (even one that panics with "not implemented") exists in the
    codebase to prove the interface is real and not Postgres-shaped by accident.
-7. One pilot project (chosen from `docs/conventions-global/`) replaces its
-   hand-written migration for one table with the generated one, without any
-   behavioral regression. For iteration-1 the pilot applies the generated
-   SQL manually (the platform & deploy client arrive later — see
-   `_parked/migration-delivery.md`). The pilot's hand-written `migrations/`
-   folder goes away once the generator covers all its tables.
+7. **(Revised 2026-04-21.)** A combinatorial **grand-tour fixture set**
+   exercises every iter-1 vocabulary primitive and its interesting
+   pairings, end-to-end through the golden suite (AC #5) *and* the
+   apply-roundtrip harness (AC #2, #3). Coverage axes, each exercised
+   at least once:
+
+   - Every `(carrier, type)` cell of D2 — `CHAR`, `TEXT`, `UUID`, `EMAIL`,
+     `URL`, `SLUG`, `DECIMAL` on `string`; `NUMBER`, `ID`, `COUNTER` on
+     integer carriers; `NUMBER`, `MONEY`, `PERCENTAGE`, `RATIO` on
+     `double`; `DATE` / `TIME` / `DATETIME` on `Timestamp`; `INTERVAL` on
+     `Duration`; `bool` (no subtype).
+   - Every `AutoDefault` variant — `NOW`, `UUID_V4`, `UUID_V7`, `TRUE`,
+     `FALSE`, `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT`, `IDENTITY`.
+   - Every CHECK variant — Length (`min_len` / `max_len`), Blank, Range
+     (`gt` / `gte` / `lt` / `lte`), Regex (type-implied *and* `pattern`
+     override), Choices (proto enum FQN).
+   - PK shapes — single-col `int64` `IDENTITY`, single-col `UUID` +
+     `default_auto: UUID_V7`, composite PK on an m2m join table.
+   - Index shapes — single-col derived-name UNIQUE (via
+     `(w17.field).unique`), multi-col named UNIQUE (via
+     `(w17.db.table).indexes`), non-unique storage index (via
+     `(w17.db.column).index`), `INCLUDE` (covering index).
+   - FK shapes — `orphanable: true` (SET NULL), `orphanable: false`
+     (inferred CASCADE-ish), self-referencing FK, FK into a table with a
+     composite PK.
+   - Table archetypes — standalone, parent→child, m2m join table,
+     self-referential tree, table exercising a `(w17.pg.field)` curated
+     flag (`jsonb` / `inet` / `tsvector` / `hstore`), table exercising
+     the `custom_type` + `required_extensions` escape hatch (pgvector or
+     equivalent).
+
+   Fixtures live in `srcgo/domains/compiler/testdata/` alongside AC #5's
+   original three shapes.
+
+   **Why this replaced the original "pilot project adoption" framing.**
+   Single-repo adoption is only as strong as that repo's coverage — if
+   the pilot lacks m2m, self-FKs, DECIMAL, or PG-specific types, the
+   iter-1 sign-off proves only what that particular repo happens to
+   exercise, not what the vocabulary can express. A combinatorial
+   synthetic matrix makes coverage **explicit**: every primitive is
+   named, every pairing is a file in the tree, regressions are visible
+   in `git diff`. External-repo adoption becomes an iter-2 concern once
+   the hosted platform + deploy client exist to drive it (see
+   `_parked/migration-delivery.md` — iter-1 has no applied-state tracking
+   anyway, which caps how rigorous a real pilot could be).
 
 ## Deliverable
 
@@ -123,10 +162,12 @@ can close. Full detail in
 The iteration closes when:
 
 - All seven acceptance criteria pass in CI.
-- The pilot project has been migrated and its maintainers have signed off.
+- The grand-tour fixture matrix (AC #7 rev 2026-04-21) is green through
+  both the golden suite and the apply-roundtrip harness.
 - All five original open questions have written answers. #1, #3, #4, and #5
   are resolved (D5, D1, D7, D4). #2 remains — minor-dimension tuning (CHECK
-  default verbosity) that can close once a pilot exercises it.
+  default verbosity) that can close once a concrete combo in the matrix
+  surfaces a decision point.
 
 ## Decisions
 
