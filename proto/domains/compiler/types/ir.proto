@@ -101,6 +101,20 @@ message Column {
   // of dialect.
   bool element_is_message = 34;
 
+  // --- SEM_ENUM side-data (D17) ---
+  // FQN of the proto enum providing the values, populated whenever
+  // Type == SEM_ENUM. enum_names / enum_numbers hold the non-sentinel
+  // values in proto declaration order (the *_UNSPECIFIED=0 entry
+  // stripped per proto3 convention).
+  //   string+SEM_ENUM path (PG ENUM storage): emitter uses enum_names
+  //     to emit CREATE TYPE <table>_<col> AS ENUM (names…).
+  //   int+SEM_ENUM path:                      attachChecks synths a
+  //     ChoicesCheck with numbers populated; enum_names stays for
+  //     --verbose / admin-gen use.
+  string enum_fqn = 35;
+  repeated string enum_names = 36;
+  repeated int64 enum_numbers = 37;
+
   repeated Check checks = 40;
 }
 
@@ -185,10 +199,16 @@ message RegexCheck {
   RegexSource source = 2;
 }
 
-// ChoicesCheck — resolved proto enum values for (w17.field).choices.
+// ChoicesCheck — resolved proto enum values for (w17.field).choices on
+// string carriers (CHECK IN ('A','B',…)), OR the numeric CHECK IN (1,2,…)
+// path for int + SEM_ENUM columns. Exactly one of `values` / `numbers`
+// is populated per instance; the emitter dispatches on whichever is set.
 message ChoicesCheck {
   string enum_fqn = 1;
+  // String-name CHECK IN — used for string-carrier `choices:` option.
   repeated string values = 2;
+  // Int-number CHECK IN — used for int-carrier SEM_ENUM (D17).
+  repeated int64 numbers = 3;
 }
 
 // Carrier is the proto wire-type underneath a field.
@@ -256,6 +276,13 @@ enum SemType {
   // carriers. Same as leaving type unset on those carriers but
   // written deliberately. Not valid on scalar carriers.
   SEM_AUTO = 40;
+
+  // Enumerated value. Valid on string (PG → CREATE TYPE AS ENUM),
+  // int32 / int64 (INTEGER/BIGINT + CHECK IN numbers), and auto-
+  // inferred on bare proto-enum fields (int32 + CHECK IN numbers).
+  // Choices FQN resolves to value names (string path) or paired
+  // (name, number) pairs (int / auto-inferred paths).
+  SEM_ENUM = 50;
 }
 
 // FKAction — resolved ON DELETE behaviour. Populated from

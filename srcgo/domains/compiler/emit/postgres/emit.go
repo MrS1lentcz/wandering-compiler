@@ -52,6 +52,13 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 	}
 
 	var upB strings.Builder
+	// D17 — prepend CREATE TYPE <table>_<col> AS ENUM (names…) for every
+	// string-carrier SEM_ENUM column before CREATE TABLE. Declaration
+	// order preserved so goldens stay deterministic.
+	enumTypes := collectPgEnumTypes(t)
+	for _, et := range enumTypes {
+		fmt.Fprintf(&upB, "CREATE TYPE %s AS ENUM (%s);\n\n", et.name, strings.Join(et.quotedValues, ", "))
+	}
 	fmt.Fprintf(&upB, "CREATE TABLE %s (\n", t.GetName())
 
 	lines := make([]string, 0, len(t.GetColumns()))
@@ -121,12 +128,46 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		upB.WriteString(strings.Join(idxStmts, "\n"))
 	}
 
-	// Down: drop indexes (reverse), then drop table.
+	// Down: drop indexes (reverse), then drop table, then drop ENUM types
+	// (reverse declaration order). Indexes live inside / alongside the
+	// table so they go first; the ENUM types are standalone pg_type
+	// objects referenced by the table columns, so they drop after the
+	// table that uses them.
 	var downB strings.Builder
 	for i := len(idxNames) - 1; i >= 0; i-- {
 		fmt.Fprintf(&downB, "DROP INDEX IF EXISTS %s;\n", idxNames[i])
 	}
 	fmt.Fprintf(&downB, "DROP TABLE IF EXISTS %s;", t.GetName())
+	for i := len(enumTypes) - 1; i >= 0; i-- {
+		fmt.Fprintf(&downB, "\nDROP TYPE IF EXISTS %s;", enumTypes[i].name)
+	}
 
 	return upB.String(), downB.String(), nil
+}
+
+// pgEnumType captures the derived CREATE TYPE side-data for a single
+// string-carrier SEM_ENUM column — the type identifier and the already-
+// quoted value list. Collected once per table so emitAddTable can emit
+// the CREATE statements in declaration order and the DROPs in reverse.
+type pgEnumType struct {
+	name         string
+	quotedValues []string
+}
+
+func collectPgEnumTypes(t *irpb.Table) []pgEnumType {
+	var out []pgEnumType
+	for _, col := range t.GetColumns() {
+		if col.GetType() != irpb.SemType_SEM_ENUM || col.GetCarrier() != irpb.Carrier_CARRIER_STRING {
+			continue
+		}
+		quoted := make([]string, 0, len(col.GetEnumNames()))
+		for _, n := range col.GetEnumNames() {
+			quoted = append(quoted, sqlStringLiteral(n))
+		}
+		out = append(out, pgEnumType{
+			name:         pgEnumTypeName(t.GetName(), col.GetName()),
+			quotedValues: quoted,
+		})
+	}
+	return out
 }

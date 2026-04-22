@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package d17.enum_int_backed;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D17 fixture — int-carrier SEM_ENUM. Covers both entry points:
+//   * bare proto-enum field (Case A) — auto-inferred SEM_ENUM on the
+//     int32 wire-type carrier; choices from the descriptor.
+//   * explicit int64 + type: ENUM + choices: — same shape, storage stays
+//     BIGINT, membership via CHECK IN (numbers).
+
+enum Priority {
+  PRIORITY_UNSPECIFIED = 0;
+  LOW                  = 1;
+  MEDIUM               = 2;
+  HIGH                 = 3;
+}
+
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  MINOR                = 10;
+  MAJOR                = 20;
+  CRITICAL             = 30;
+}
+
+message Ticket {
+  option (w17.db.table) = { name: "tickets" };
+
+  int64    id       = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  Priority priority = 2;
+  int64    severity = 3 [(w17.field) = {
+    type: ENUM,
+    choices: "d17.enum_int_backed.Severity"
+  }];
+}

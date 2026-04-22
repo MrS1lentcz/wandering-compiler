@@ -80,6 +80,17 @@ func renderRange(sqlCol string, rc *irpb.RangeCheck) string {
 }
 
 func renderChoices(sqlCol string, cc *irpb.ChoicesCheck) string {
+	// ChoicesCheck splits into two exclusive paths — names (string-carrier
+	// `choices:` option, CHECK IN ('A','B')) and numbers (int-carrier
+	// SEM_ENUM, CHECK IN (1,2)). The IR populates exactly one list per
+	// instance; the emitter renders whichever is set.
+	if len(cc.GetNumbers()) > 0 {
+		parts := make([]string, 0, len(cc.GetNumbers()))
+		for _, n := range cc.GetNumbers() {
+			parts = append(parts, strconv.FormatInt(n, 10))
+		}
+		return fmt.Sprintf("%s IN (%s)", sqlCol, strings.Join(parts, ", "))
+	}
 	quoted := make([]string, 0, len(cc.GetValues()))
 	for _, v := range cc.GetValues() {
 		quoted = append(quoted, sqlStringLiteral(v))

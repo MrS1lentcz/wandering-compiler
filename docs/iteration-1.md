@@ -331,6 +331,8 @@ fill the MySQL / SQLite columns.
 | `bool` | — | `BOOLEAN` | `TINYINT(1)` | `INTEGER` | — | — | — | — | `TRUE`, `FALSE` | — |
 | `bytes` | — | `BYTEA` | `BLOB` | `BLOB` | — | — | — | — | — | — |
 | `bytes` | `JSON` | `JSONB` | `JSON` | `TEXT` | — | — | — | — | `EMPTY_JSON_ARRAY`, `EMPTY_JSON_OBJECT` | — |
+| `string` | `ENUM` | `<table>_<col>` (CREATE TYPE AS ENUM) | `ENUM(...)` (iter-2) | `TEXT` + CHECK IN names (iter-2) | — (type enforces membership) | `choices` | — | `default_string` (enum name literal) | — | — |
+| `int32`/`int64` | `ENUM` | `INTEGER` / `BIGINT` | `INT` / `BIGINT` | `INTEGER` | CHECK IN (numbers…) | `choices` (unless proto-enum field) | — | `default_int` | — | — |
 
 **Cross-axis rules** not in the table:
 
@@ -805,6 +807,104 @@ indexes have no equivalent surface yet. Iter-1 users annotate one
 of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
+
+### D17 — ENUM type: carrier-dispatched storage (added 2026-04-22)
+
+**Decision.** `(w17.field).Type` gains a `ENUM` value that maps, per
+carrier, onto the author's actual intent:
+
+| Carrier | Storage | Membership enforcement |
+|---|---|---|
+| `string`  | PG `CREATE TYPE <table>_<col> AS ENUM (names…)` + column of that type | PG ENUM type itself |
+| `int32` / `int64` | `INTEGER` / `BIGINT` | `CHECK col IN (numbers…)` |
+| proto-enum field (e.g. `Status s = 1;`) | `INTEGER` (proto wire is int32) | `CHECK col IN (numbers…)` — auto-inferred from the descriptor |
+
+Three author paths:
+
+```proto
+// Case A — bare proto-enum field. Auto-inferred SEM_ENUM on int32
+// carrier; choices resolved from the descriptor.
+Status state = 1;
+// → INTEGER NOT NULL CHECK (state IN (1, 2, 3))
+
+// Case B — string-backed with PG ENUM storage.
+string state = 2 [(w17.field) = {
+  type: ENUM,
+  choices: "pkg.Status"
+}];
+// → CREATE TYPE posts_state AS ENUM ('DRAFT','PUBLISHED'); state posts_state NOT NULL
+
+// Case C — explicit int + SEM_ENUM. Same shape as Case A but on an
+// int32/int64 field that isn't itself a proto enum.
+int64 state = 3 [(w17.field) = {
+  type: ENUM,
+  choices: "pkg.Status"
+}];
+// → BIGINT NOT NULL CHECK (state IN (1, 2, 3))
+```
+
+**Open question resolved.** The handoff flagged whether a bare
+proto-enum field should auto-infer SEM_ENUM (option b) or require an
+explicit `type: ENUM` annotation (option a). **D17 ships option b** —
+matches the D14 zero-config philosophy and proto's own wire semantics
+(a proto enum field travels as int32 + known-good number set). Authors
+who want the string+PG ENUM shape opt in explicitly via `string foo = N
+[type: ENUM, choices: "…"]`.
+
+**Invariants enforced at IR time.**
+
+  - SEM_ENUM is valid only on string / int32 / int64 carriers. LIST /
+    MAP + ENUM is rejected (per-element-of-dedicated-type dispatch
+    parks with the collection iteration).
+  - String + SEM_ENUM requires `choices:` — the compiler has no
+    descriptor handle on a `string` field and can't derive an enum
+    reference without it.
+  - Proto-enum field + explicit `choices:` must agree on FQN. A
+    mismatch rejects rather than silently picking one source of truth.
+  - Zero-value (`*_UNSPECIFIED = 0`) is stripped from both the name
+    list (CREATE TYPE) and the number list (CHECK IN) per the proto3
+    sentinel convention — same behaviour as the existing string-
+    `choices:` path.
+  - `<table>_<col>` (the derived CREATE TYPE name) is validated for
+    NAMEDATALEN + reserved keywords at IR time, not apply time.
+
+**What the compiler emits per axis.**
+
+  - Column type: `<table>_<col>` for string path; `INTEGER` / `BIGINT`
+    for int path.
+  - CREATE TYPE prepended before CREATE TABLE (one statement per
+    string-carrier SEM_ENUM column, declaration order).
+  - DROP TYPE appended after DROP TABLE in reverse order — table
+    drops first because the column depends on the ENUM type.
+  - CHECK IN (numbers) attached on int path via the existing
+    `ChoicesCheck` variant extended with a `numbers` field. The
+    emitter's `renderChoices` dispatches on whichever of
+    `values` / `numbers` is populated.
+  - String-only CHECK synths (blank, length, regex) skip on string
+    SEM_ENUM — the dedicated type enforces membership by
+    construction, redundant CHECKs would bloat pg_constraint.
+
+**Escape hatches.**
+
+  - Author wants raw string column + CHECK IN names (no PG ENUM
+    type): use `type: CHAR, choices: "..."` — the existing D2 path.
+  - Author wants custom PG storage (domain type, int4range,
+    anything): `(w17.pg.field).custom_type` on a TEXT column, or
+    `(w17.db.table).raw_checks` for a dialect-specific expression.
+  - Author wants to override auto-inferred ENUM on a proto-enum
+    field: add explicit `type: NUMBER` — the field resolves as a
+    plain integer without the CHECK.
+
+**Rationale.** Django + SQLModel + most ORMs ship a single "enum"
+declaration that the DB layer renders as per-dialect optimal storage
+(PG native ENUM, MySQL inline ENUM(...), SQLite TEXT+CHECK). The
+compiler collapses the three authoring surfaces (bare proto enum,
+string+CHECK, int+CHECK) into one type token with carrier-driven
+dispatch — users don't have to know dialect ENUM quirks, and proto
+enum fields Just Work out of the box.
+
+Capability: `ENUM_TYPE` = `{MinVersion: "8.3"}` in the PG catalog
+(CREATE TYPE AS ENUM landed in PG 8.3).
 
 ### D16 — Dialect-capability catalog + inspection interface (added 2026-04-21)
 

@@ -147,6 +147,18 @@ enum Type {
   // scalar element the author can refine to the element's sem type
   // directly (e.g. `repeated string [type: URL]` = array of URLs).
   AUTO = 40;
+
+  // Enumerated value (carrier: string / int32 / int64; also auto-inferred
+  // on bare proto-enum fields). Dispatch per carrier:
+  //   string  → PG `CREATE TYPE <table>_<col> AS ENUM (names…)` + column
+  //             of that type; MySQL `ENUM(...)`; SQLite TEXT + CHECK IN names.
+  //   int32/int64 → INTEGER / BIGINT column + CHECK IN (numbers…).
+  //   proto-enum field (e.g. `Status s = 1;`) — auto-dispatches to int32
+  //             carrier + ENUM sem + choices=FQN derived from the enum.
+  // Requires `choices:` on the string-carrier path; on int and proto-enum
+  // paths the numbers come from the enum descriptor (names stripped of the
+  // *_UNSPECIFIED=0 sentinel per proto3 convention).
+  ENUM = 50;
 }
 
 // AutoDefault — dynamically resolved default value. Emitters render each

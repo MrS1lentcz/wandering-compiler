@@ -1,0 +1,6 @@
+BEGIN;
+
+DROP TABLE IF EXISTS posts;
+DROP TYPE IF EXISTS posts_state;
+
+COMMIT;

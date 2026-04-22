@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package d17.enum_string_backed;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D17 fixture — string-carrier SEM_ENUM (Case B). Exercises the PG
+// CREATE TYPE AS ENUM storage path: string column stored as a dedicated
+// enumerated type, membership enforced by the type itself (no CHECK IN).
+// default_string sets DEFAULT 'DRAFT' which PG accepts against the ENUM.
+
+enum Visibility {
+  VISIBILITY_UNSPECIFIED = 0;
+  DRAFT                  = 1;
+  PRIVATE                = 2;
+  PUBLIC                 = 3;
+}
+
+message Post {
+  option (w17.db.table) = { name: "posts" };
+
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string state      = 2 [(w17.field) = {
+    type: ENUM,
+    choices: "d17.enum_string_backed.Visibility",
+    default_string: "DRAFT"
+  }];
+}

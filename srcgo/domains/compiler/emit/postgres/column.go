@@ -16,7 +16,7 @@ import (
 // The emitter falls back to a table-level PRIMARY KEY line for composite
 // keys (see emit.go).
 func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.Column) (string, error) {
-	typeSQL, err := columnType(col)
+	typeSQL, err := columnType(t.GetName(), col)
 	if err != nil {
 		return "", fmt.Errorf("column %q: %w", col.GetProtoName(), err)
 	}
@@ -79,7 +79,12 @@ func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.C
 //
 // ir.Build rejects overrides (1) and (2) set simultaneously, so the
 // order below is safe: custom_type first, then db_type, then preset.
-func columnType(col *irpb.Column) (string, error) {
+//
+// tableName is used for deriving PG ENUM type names (<table>_<col>) for
+// string-carrier SEM_ENUM columns. Callers that synthesise a column
+// without a table (pgArrayOf element dispatch) may pass "" — element-
+// level SEM_ENUM on LIST/MAP is rejected at IR time.
+func columnType(tableName string, col *irpb.Column) (string, error) {
 	if pg := col.GetPg(); pg != nil {
 		if raw := pg.GetCustomType(); raw != "" {
 			return raw, nil
@@ -121,6 +126,11 @@ func columnType(col *irpb.Column) (string, error) {
 			return "INET", nil
 		case irpb.SemType_SEM_TSEARCH:
 			return "TSVECTOR", nil
+		case irpb.SemType_SEM_ENUM:
+			if tableName == "" {
+				return "", fmt.Errorf("string+SEM_ENUM requires table context for CREATE TYPE name derivation")
+			}
+			return pgEnumTypeName(tableName, col.GetName()), nil
 		case irpb.SemType_SEM_DECIMAL:
 			if col.GetPrecision() <= 0 {
 				return "", fmt.Errorf("DECIMAL requires precision (ir invariant)")
@@ -133,7 +143,9 @@ func columnType(col *irpb.Column) (string, error) {
 
 	case irpb.Carrier_CARRIER_INT32:
 		switch col.GetType() {
-		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID:
+		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_ENUM:
+			// int32 + SEM_ENUM: storage stays INTEGER; membership is enforced
+			// by the CHECK IN (numbers) the IR attaches in resolveEnumColumn.
 			return "INTEGER", nil
 		case irpb.SemType_SEM_COUNTER:
 			// COUNTER is defined as int64 in D2; int32 is not valid here but
@@ -144,7 +156,9 @@ func columnType(col *irpb.Column) (string, error) {
 
 	case irpb.Carrier_CARRIER_INT64:
 		switch col.GetType() {
-		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER:
+		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER, irpb.SemType_SEM_ENUM:
+			// int64 + SEM_ENUM: storage stays BIGINT; CHECK IN (numbers)
+			// enforces membership (see resolveEnumColumn).
 			return "BIGINT", nil
 		}
 
@@ -215,7 +229,10 @@ func pgArrayOf(col *irpb.Column) (string, error) {
 		Precision: col.GetPrecision(),
 		Scale:     col.Scale,
 	}
-	elemType, err := columnType(element)
+	// Element has no table context — SEM_ENUM on list/map elements is
+	// rejected at IR time (resolveEnumColumn's scalar-only guard), so
+	// passing "" never reaches the ENUM branch.
+	elemType, err := columnType("", element)
 	if err != nil {
 		return "", fmt.Errorf("pgArrayOf: element: %w", err)
 	}
@@ -404,4 +421,14 @@ func displayCarrier(c irpb.Carrier) string {
 
 func displaySemType(s irpb.SemType) string {
 	return strings.TrimPrefix(s.String(), "SEM_")
+}
+
+// pgEnumTypeName derives the PG ENUM type name for a string-carrier
+// SEM_ENUM column. Single source of truth shared between columnType
+// (renders the column type), emitAddTable (prepends CREATE TYPE and
+// appends DROP TYPE), and the IR-time identifier validation in
+// buildTable. The <table>_<column> shape matches the constraint-name
+// convention and is NAMEDATALEN-validated at IR time.
+func pgEnumTypeName(tableName, colName string) string {
+	return tableName + "_" + colName
 }

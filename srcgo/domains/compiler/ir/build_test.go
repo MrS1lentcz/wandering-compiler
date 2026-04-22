@@ -474,6 +474,28 @@ func TestBuildErrors(t *testing.T) {
 				`raw_checks`,
 			},
 		},
+		{
+			name:    "string+ENUM without choices rejected",
+			fixture: "testdata/errors/enum_requires_choices.proto",
+			wants: []string{
+				`enum_requires_choices.proto:`,
+				`type ENUM on string carrier requires choices`,
+				`why:`,
+				`resolve value names`,
+				`fix:`,
+				`choices: "<package>.<EnumName>"`,
+			},
+		},
+		{
+			name:    "ENUM on bool carrier rejected",
+			fixture: "testdata/errors/enum_on_bool_carrier.proto",
+			wants: []string{
+				`enum_on_bool_carrier.proto:`,
+				`bool carrier must not set a semantic type`,
+				`why:`,
+				`BOOLEAN`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

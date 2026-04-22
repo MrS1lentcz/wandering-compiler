@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-21).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface complete; **iteration-1 fully closed.** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) complete; **iter-1 schema-gap close-out in progress (D17 shipped, D18 / D19 / D20 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -841,6 +841,60 @@ in code, not in docs:
   All 13 grand-tour fixtures (3 original + 7 M10 + 1 D11 + 2 D12
   new) green on M8 goldens + M9 `make test-apply` against
   `postgres:18-alpine`.
+
+- **D17 ENUM type (shipped, 2026-04-22) — schema-gap close-out,
+  first of four before alter-diff.** `(w17.field).Type = ENUM` is
+  a carrier-dispatched preset with three author paths — bare
+  proto-enum field (auto-inferred), `string + ENUM + choices:`
+  (PG ENUM storage), and `int + ENUM + choices:` (CHECK IN
+  numbers). Full rationale + invariants + escape hatches live in
+  `iteration-1.md` D17.
+
+  Proto changes: `w17.Type` gains `ENUM = 50`; `ir.SemType` gains
+  `SEM_ENUM = 50`; `ir.Column` gains `enum_fqn` / `enum_names` /
+  `enum_numbers`; `ir.ChoicesCheck` gains `repeated int64 numbers`
+  (exclusive with the existing `values` list, emitter dispatches
+  on whichever is populated).
+
+  IR changes: `protoKindToScalarCarrier` routes `EnumKind` →
+  `CARRIER_INT32` so proto-enum fields get a real carrier.
+  `buildColumn` auto-infers `SEM_ENUM` on scalar proto-enum
+  fields and resolves enum side-data via the new
+  `resolveEnumColumn` helper (mirrors the `choices:` resolver but
+  returns both names and numbers). SEM_ENUM joins the non-
+  stringStorage list so blank / length / regex / choices-string
+  synths skip on string+ENUM columns (the PG ENUM type enforces
+  membership). Int + SEM_ENUM synths a `ChoicesCheck{numbers:…}`.
+  `<table>_<col>` identifier validation for the derived PG ENUM
+  type name runs alongside the existing CHECK-constraint name
+  length checks.
+
+  PG emitter: `columnType` takes a table name (threaded from
+  `renderColumn`) and emits the derived type identifier for
+  string+SEM_ENUM. `emitAddTable` prepends `CREATE TYPE
+  <table>_<col> AS ENUM (names…)` statements before `CREATE
+  TABLE` and appends `DROP TYPE IF EXISTS <table>_<col>;` after
+  `DROP TABLE` on the down path. `renderChoices` dispatches on
+  `ChoicesCheck.Numbers` vs `.Values`.
+
+  Capability catalog: `CapEnumType = "ENUM_TYPE"` in
+  `emit/capabilities.go`, `{MinVersion: "8.3"}` in the PG
+  catalog (CREATE TYPE AS ENUM landed in PG 8.3).
+
+  Two positive fixtures land in `testdata/`:
+  `enum_string_backed` (string + ENUM + PG CREATE TYPE) and
+  `enum_int_backed` (bare proto-enum field + explicit
+  `int64 + ENUM + choices:` in the same table). Two new error
+  fixtures — `enum_requires_choices.proto` and
+  `enum_on_bool_carrier.proto` — join `TestBuildErrors`. All 15
+  grand-tour fixtures (13 previous + 2 D17 new) green on M8
+  goldens + M9 `make test-apply` against `postgres:18-alpine`.
+
+  **Open-question resolution.** Auto-infer (option b from the
+  handoff) ships as the chosen default for bare proto-enum
+  fields: matches D14 zero-config philosophy + proto wire
+  semantics. Authors opt out via explicit `type: NUMBER` or
+  move to string+ENUM for PG-native storage.
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

@@ -299,8 +299,9 @@ make schemagen
 - [x] Iter-1 closed through D16 (capability catalog + inspection interface)
 - [x] `iteration-2-backlog.md` captures all parked items
 - [x] `iteration-1-coverage.md` captures Django parity + test coverage
-- [ ] **← YOU ARE HERE.** Start D17 (ENUM type) next.
-- [ ] D18 (Generated columns)
+- [x] D17 (ENUM type, shipped 2026-04-22; open question resolved as
+      option b — auto-infer on bare proto-enum fields)
+- [ ] **← YOU ARE HERE.** Start D18 (Generated columns) next.
 - [ ] D19 (Schema-qualified names)
 - [ ] D20 (Index sort order + NULLS FIRST/LAST)
 - [ ] Open `iteration-2.md` with alter-diff as M1

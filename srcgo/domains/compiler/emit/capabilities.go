@@ -102,6 +102,10 @@ const (
 	// Array (scalar[]) — PG native; others fall back to JSON.
 	CapArray = "ARRAY"
 
+	// Dedicated enumerated type (PG `CREATE TYPE … AS ENUM`; MySQL
+	// `ENUM(...)` inline on column; SQLite TEXT + CHECK IN names).
+	CapEnumType = "ENUM_TYPE"
+
 	// Indexes + constraints.
 	CapIncludeIndex       = "INCLUDE_INDEX"        // covering index
 	CapPartialIndex       = "PARTIAL_INDEX"        // CREATE INDEX … WHERE

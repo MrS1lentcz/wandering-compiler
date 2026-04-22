@@ -44,6 +44,11 @@ var pgCatalog = map[string]emit.Requirement{
 	emit.CapBYTEA:            {},
 	emit.CapBoolean:          {},
 	emit.CapArray:            {MinVersion: "7.4"},
+	// CREATE TYPE <name> AS ENUM (…) landed in PostgreSQL 8.3
+	// alongside the broader enum feature; earlier versions have no
+	// dedicated enumerated type (compiler dispatches to VARCHAR +
+	// CHECK IN names on those targets).
+	emit.CapEnumType: {MinVersion: "8.3"},
 
 	// Index + constraint features.
 	emit.CapIncludeIndex:       {MinVersion: "11.0"},

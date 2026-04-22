@@ -299,6 +299,22 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		ckNameSeen[rc.GetName()] = fmt.Sprintf("raw_checks[%d]", i)
 	}
 
+	// D17 — validate PG ENUM type identifier (<table>_<col>) for every
+	// string-carrier SEM_ENUM column so length / reserved-keyword
+	// failures surface at IR time instead of apply. Mirrors the CHECK
+	// constraint name validation above.
+	for _, c := range tbl.Columns {
+		if c.GetType() != irpb.SemType_SEM_ENUM || c.GetCarrier() != irpb.Carrier_CARRIER_STRING {
+			continue
+		}
+		typeName := fmt.Sprintf("%s_%s", tbl.GetName(), c.GetName())
+		if why := validateIdentifier(typeName); why != "" {
+			b.err(diag.Atf(msg.Desc, "message %q: column %q ENUM type name %s", msg.Desc.Name(), c.GetProtoName(), why).
+				WithWhy("PG derives the ENUM type name from <table>_<column>; long table / column names overflow NAMEDATALEN (63 bytes) and silently truncate — a reserved-keyword collision would fail at CREATE TYPE apply time").
+				WithFix("shorten the table or column name, or override the column via (w17.db.column) = { name: \"alt\" }"))
+		}
+	}
+
 	return tbl
 }
 
@@ -360,6 +376,15 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	semType := irpb.SemType_SEM_UNSPECIFIED
 	if fieldOpt != nil {
 		semType = protoTypeToSem(fieldOpt.GetType())
+	}
+	// D17: a bare scalar proto-enum field (e.g. `Status state = 1;`) auto-
+	// infers SEM_ENUM on its int32 wire-type carrier. Matches the D14
+	// zero-config philosophy — authors opt out with an explicit type only
+	// when they want different storage. Gated on carrier to skip
+	// `repeated Status` (list element happens to have EnumKind but the
+	// column-level carrier is LIST — that path falls through to SEM_AUTO).
+	if semType == irpb.SemType_SEM_UNSPECIFIED && desc.Kind() == protoreflect.EnumKind && carrier == irpb.Carrier_CARRIER_INT32 {
+		semType = irpb.SemType_SEM_ENUM
 	}
 	if semType == irpb.SemType_SEM_UNSPECIFIED {
 		semType = defaultSemTypeFor(carrier)
@@ -544,7 +569,10 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 					WithWhy("pattern emits a regex CHECK; regex only applies to strings").
 					WithFix("drop pattern, or change the proto field to a string carrier"))
 			}
-			if fieldOpt.GetChoices() != "" {
+			// D17: choices: IS permitted on int + SEM_ENUM (it names the
+			// enum whose numeric values drive CHECK IN). Reject only when
+			// the column isn't a numeric-ENUM column.
+			if fieldOpt.GetChoices() != "" && semType != irpb.SemType_SEM_ENUM {
 				b.err(diag.Atf(desc, "field %q: choices is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
 					WithWhy("choices emits `CHECK col IN ('A','B',…)` matched against enum *value names*, which are strings").
 					WithFix("drop choices, or change the proto field to a string carrier"))
@@ -653,7 +681,81 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		b.attachChecks(col, fieldOpt, carrier, semType, desc)
 	}
 
+	// D17 — SEM_ENUM side-data: resolve the enum descriptor, populate
+	// column metadata, and synth CHECK IN (numbers) on int carriers.
+	// Runs after attachChecks so the ENUM constraint sorts last (matches
+	// the string-`choices:` output position inside attachChecks).
+	if semType == irpb.SemType_SEM_ENUM {
+		if err := b.resolveEnumColumn(col, desc, fieldOpt, carrier); err != nil {
+			b.err(err)
+			return nil
+		}
+	}
+
 	return col
+}
+
+// resolveEnumColumn populates SEM_ENUM side-data on a column (enum FQN +
+// non-sentinel names / numbers) and, for integer carriers, attaches a
+// CHECK IN (numbers) constraint. Called after the carrier × sem
+// validation so the three legitimate paths are distinguishable here:
+//
+//  1. proto-enum field (e.g. `Status state = 1;`) — FQN from descriptor;
+//     `choices:` option optional but must match if set.
+//  2. string / int carrier with explicit `type: ENUM` — `choices:` is
+//     required (the compiler has no descriptor to derive the FQN from).
+//  3. proto-enum field with explicit `type: ENUM` — same as (1) with
+//     redundant (but permitted) annotation.
+func (b *builder) resolveEnumColumn(col *irpb.Column, desc protoreflect.FieldDescriptor, opt *w17pb.Field, carrier irpb.Carrier) *diag.Error {
+	protoName := string(desc.Name())
+	// Collection carriers aren't in scope for ENUM dispatch in iter-1 —
+	// emitting `<table>_<col> AS ENUM (…)` for an array / map element
+	// requires prepending CREATE TYPE and array-typing the column, which
+	// needs plumbing the derived type name through pgArrayOf. Reject
+	// explicit `type: ENUM` on LIST/MAP here; auto-infer is already
+	// gated to scalar carriers above.
+	if carrier != irpb.Carrier_CARRIER_STRING && carrier != irpb.Carrier_CARRIER_INT32 && carrier != irpb.Carrier_CARRIER_INT64 {
+		return diag.Atf(desc, "field %q: type ENUM is not supported on %s carrier (iter-1)", protoName, displayCarrier(carrier)).
+			WithWhy("iter-1 ENUM dispatches to string (CREATE TYPE AS ENUM) or int (CHECK IN numbers); collection-of-enum storage (arrays of a dedicated type) is parked until the collection iteration that revisits per-element dispatch").
+			WithFix("change the proto field to a scalar (string / int32 / int64 / proto-enum), or drop type: ENUM and use raw_checks for collection-level membership constraints")
+	}
+	var fqn string
+	if desc.Kind() == protoreflect.EnumKind {
+		fqn = string(desc.Enum().FullName())
+		if opt != nil && opt.GetChoices() != "" && opt.GetChoices() != fqn {
+			return diag.Atf(desc, "field %q: choices %q disagrees with proto-enum field's own enum %q", protoName, opt.GetChoices(), fqn).
+				WithWhy("a proto-enum field carries its enum reference in the descriptor; an explicit `choices:` with a different FQN would silently override one of the two — pick one source of truth").
+				WithFix(fmt.Sprintf(`drop choices: (enum is inferred as %q), or change the field's proto type to match choices:`, fqn))
+		}
+	} else {
+		if opt == nil || opt.GetChoices() == "" {
+			return diag.Atf(desc, "field %q: type ENUM on %s carrier requires choices", protoName, displayCarrier(carrier)).
+				WithWhy("the compiler needs a proto enum to resolve value names (for PG CREATE TYPE storage) and numbers (for int-carrier CHECK IN); without a descriptor handle on the field itself, choices: is the only way to name one").
+				WithFix(`add choices: "<package>.<EnumName>" to (w17.field), e.g. choices: "catalog.v1.ProductStatus"`)
+		}
+		fqn = opt.GetChoices()
+	}
+
+	names, numbers, resolveErr := b.resolveEnumMembers(desc, fqn)
+	if resolveErr != nil {
+		return resolveErr
+	}
+	col.EnumFqn = fqn
+	col.EnumNames = names
+	col.EnumNumbers = numbers
+
+	// int-carrier SEM_ENUM (both explicit-type + proto-enum-field paths
+	// land here): CHECK IN (1, 2, …). The string-carrier path goes the
+	// CREATE TYPE route — PG's ENUM type enforces membership, no CHECK
+	// needed at the IR layer.
+	if carrier == irpb.Carrier_CARRIER_INT32 || carrier == irpb.Carrier_CARRIER_INT64 {
+		col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Choices{Choices: &irpb.ChoicesCheck{
+			EnumFqn: fqn,
+			Numbers: numbers,
+		}}})
+	}
+
+	return nil
 }
 
 func (b *builder) attachChecks(col *irpb.Column, opt *w17pb.Field, carrier irpb.Carrier, semType irpb.SemType, origin protoreflect.FieldDescriptor) {
@@ -806,28 +908,39 @@ func (b *builder) resolveDefault(desc protoreflect.FieldDescriptor, opt *w17pb.F
 // fully-qualified enum name and returns the ordered value-name slice with the
 // mandatory *_UNSPECIFIED zero sentinel stripped.
 func (b *builder) resolveEnumValues(origin protoreflect.FieldDescriptor, fqn string) ([]string, *diag.Error) {
+	names, _, err := b.resolveEnumMembers(origin, fqn)
+	return names, err
+}
+
+// resolveEnumMembers returns both non-sentinel names and numbers for a
+// fully-qualified enum. Shared between the string-`choices:` CHECK path
+// (names only) and SEM_ENUM dispatch (D17 — uses both names for PG
+// CREATE TYPE storage and numbers for int-carrier CHECK IN).
+func (b *builder) resolveEnumMembers(origin protoreflect.FieldDescriptor, fqn string) ([]string, []int64, *diag.Error) {
 	enum := findEnum(origin.ParentFile(), protoreflect.FullName(fqn))
 	if enum == nil {
-		return nil, diag.Atf(origin, "field %q: choices enum %q not found", origin.Name(), fqn).
+		return nil, nil, diag.Atf(origin, "field %q: choices enum %q not found", origin.Name(), fqn).
 			WithWhy("choices takes a fully-qualified proto enum name; the IR builder walked the current file and its imports and could not locate it").
 			WithFix(`verify the FQN (package + enum name, e.g. "catalog.v1.ProductStatus") and make sure the defining .proto is imported`)
 	}
 	values := enum.Values()
-	out := make([]string, 0, values.Len())
+	names := make([]string, 0, values.Len())
+	numbers := make([]int64, 0, values.Len())
 	for i := 0; i < values.Len(); i++ {
 		v := values.Get(i)
 		if v.Number() == 0 {
 			// Proto3 convention: 0-value is *_UNSPECIFIED / sentinel.
 			continue
 		}
-		out = append(out, string(v.Name()))
+		names = append(names, string(v.Name()))
+		numbers = append(numbers, int64(v.Number()))
 	}
-	if len(out) == 0 {
-		return nil, diag.Atf(origin, "field %q: choices enum %q has no non-zero values", origin.Name(), fqn).
+	if len(names) == 0 {
+		return nil, nil, diag.Atf(origin, "field %q: choices enum %q has no non-zero values", origin.Name(), fqn).
 			WithWhy("every declared enum value had number 0 (the sentinel); a CHECK IN () would match nothing").
 			WithFix("add at least one real value to the enum (e.g. DRAFT = 1)")
 	}
-	return out, nil
+	return names, numbers, nil
 }
 
 // resolveFKs verifies every FK target table/column exists among compiled tables.
@@ -1055,6 +1168,11 @@ func protoKindToScalarCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bo
 		return irpb.Carrier_CARRIER_INT64, true
 	case protoreflect.DoubleKind:
 		return irpb.Carrier_CARRIER_DOUBLE, true
+	case protoreflect.EnumKind:
+		// D17: proto enum fields travel on the int32 wire type — dispatch
+		// to the int32 carrier so SEM_ENUM side-data (CHECK IN numbers)
+		// can attach without a dedicated carrier.
+		return irpb.Carrier_CARRIER_INT32, true
 	case protoreflect.MessageKind:
 		switch fd.Message().FullName() {
 		case "google.protobuf.Timestamp":
@@ -1165,6 +1283,8 @@ func protoTypeToSem(t w17pb.Type) irpb.SemType {
 		return irpb.SemType_SEM_DATETIME
 	case w17pb.Type_INTERVAL:
 		return irpb.SemType_SEM_INTERVAL
+	case w17pb.Type_ENUM:
+		return irpb.SemType_SEM_ENUM
 	}
 	return irpb.SemType_SEM_UNSPECIFIED
 }
@@ -1215,28 +1335,28 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 	case irpb.Carrier_CARRIER_STRING:
 		switch sem {
 		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_TEXT, irpb.SemType_SEM_UUID, irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL, irpb.SemType_SEM_SLUG, irpb.SemType_SEM_DECIMAL,
-			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH:
+			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH, irpb.SemType_SEM_ENUM:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
 			return diag.Atf(desc, "field %q: string carrier requires a semantic type", name).
 				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID, JSONB, INET, TSVECTOR) with different constraints; the compiler won't guess").
-				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH")
+				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH, ENUM")
 		default:
 			return diag.Atf(desc, "field %q: type %s is not valid on a string carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH").
+				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH, ENUM").
 				WithFix("pick one of the string-valid types, or change the carrier")
 		}
 	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64:
 		switch sem {
-		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER:
+		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER, irpb.SemType_SEM_ENUM:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
 			return diag.Atf(desc, "field %q: %s carrier requires a semantic type", name, displayCarrier(carrier)).
-				WithWhy("int32/int64 can carry NUMBER / ID / COUNTER — each emits a different SQL shape (PK vs indexed FK vs bounded counter)").
-				WithFix("add one of: NUMBER, ID, COUNTER")
+				WithWhy("int32/int64 can carry NUMBER / ID / COUNTER / ENUM — each emits a different SQL shape (PK vs indexed FK vs bounded counter vs CHECK IN numbers)").
+				WithFix("add one of: NUMBER, ID, COUNTER, ENUM")
 		default:
 			return diag.Atf(desc, "field %q: type %s is not valid on an integer carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts integer carriers to NUMBER, ID, COUNTER").
+				WithWhy("the D2 carrier×type table restricts integer carriers to NUMBER, ID, COUNTER, ENUM").
 				WithFix("pick an integer-valid type, or change the carrier (e.g. double for MONEY)")
 		}
 	case irpb.Carrier_CARRIER_DOUBLE:
@@ -1468,7 +1588,12 @@ func semTypeStoresAsString(sem irpb.SemType) bool {
 		irpb.SemType_SEM_DECIMAL,
 		irpb.SemType_SEM_JSON,
 		irpb.SemType_SEM_IP,
-		irpb.SemType_SEM_TSEARCH:
+		irpb.SemType_SEM_TSEARCH,
+		irpb.SemType_SEM_ENUM:
+		// SEM_ENUM on string carrier routes to PG CREATE TYPE AS ENUM —
+		// the dedicated type (not VARCHAR/TEXT) enforces membership, so
+		// blank / length / regex / choices synths would be redundant at
+		// best and type-check failures at worst.
 		return false
 	}
 	return true
