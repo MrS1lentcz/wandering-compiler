@@ -50,6 +50,9 @@ var pgCatalog = map[string]emit.Requirement{
 	// dedicated enumerated type (compiler dispatches to VARCHAR +
 	// CHECK IN names on those targets).
 	emit.CapEnumType: {MinVersion: "8.3"},
+	// Schema-qualified identifiers (<schema>.<table>) have been
+	// available on every PG release we support; no minimum version.
+	emit.CapSchemaQualified: {},
 
 	// Index + constraint features.
 	emit.CapIncludeIndex:       {MinVersion: "11.0"},

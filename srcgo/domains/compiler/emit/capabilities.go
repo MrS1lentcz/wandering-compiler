@@ -106,6 +106,14 @@ const (
 	// `ENUM(...)` inline on column; SQLite TEXT + CHECK IN names).
 	CapEnumType = "ENUM_TYPE"
 
+	// Schema-qualified identifiers (PG `schema.table`). Module-level
+	// namespace delivered by D19. PG has universal support (every
+	// version); MySQL's "schema = database" quirk makes it unavailable
+	// there; SQLite has no schema concept. Name-prefix mode (D19's
+	// sibling strategy) is dialect-agnostic and doesn't need a cap —
+	// any emitter that accepts an identifier accepts `<prefix>_<name>`.
+	CapSchemaQualified = "SCHEMA_QUALIFIED"
+
 	// Indexes + constraints.
 	CapIncludeIndex       = "INCLUDE_INDEX"        // covering index
 	CapPartialIndex       = "PARTIAL_INDEX"        // CREATE INDEX … WHERE

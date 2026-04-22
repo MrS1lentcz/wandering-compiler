@@ -37,6 +37,47 @@ extend google.protobuf.FieldOptions {
   Column column = 51002;
 }
 
+// (w17.db.module) — file-level namespacing. Declares how every table
+// defined in this .proto file gets namespaced at the SQL layer. The
+// module (= domain in conventions-global) is the unit: every .proto
+// in one module must agree on this setting — iter-2 multi-file
+// compilation enforces that. Per-message override is deliberately
+// not supported; mixing "one table out of the group" is a code
+// smell we refuse to model.
+//
+// Two mutually-exclusive strategies:
+//
+//   schema: "<name>"   — PG-native namespace. Emits
+//                        CREATE TABLE <schema>.<table> and qualifies
+//                        every reference (FK, DROP) the same way.
+//                        Default schema name in PG is "public" —
+//                        leave unset to get the default behaviour.
+//
+//   prefix: "<name>"   — name-based namespace. Emits
+//                        CREATE TABLE <prefix>_<table>. Works on
+//                        every dialect including those without
+//                        PG-style schemas (MySQL, SQLite). Max
+//                        prefix length 32 characters so the derived
+//                        identifier (<prefix>_<table>_<col>_<check>)
+//                        still fits NAMEDATALEN.
+//
+// Usage (one per .proto file):
+//   option (w17.db.module) = { schema: "reporting" };
+//   // or
+//   option (w17.db.module) = { prefix: "catalog" };
+//
+// Unset: bare names, default schema — legacy / flat deployment.
+extend google.protobuf.FileOptions {
+  Module module = 51004;
+}
+
+message Module {
+  oneof namespace {
+    string schema = 1;
+    string prefix = 2;
+  }
+}
+
 message Table {
   string name = 1;
   repeated Index indexes = 2;

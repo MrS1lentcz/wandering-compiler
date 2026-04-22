@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package d19.module_prefix_empty;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D19 error — prefix declared but value is empty.
+option (w17.db.module) = { prefix: "" };
+
+message User {
+  option (w17.db.table) = { name: "users" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 80 }];
+}

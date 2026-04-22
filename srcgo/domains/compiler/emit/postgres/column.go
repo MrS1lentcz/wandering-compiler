@@ -64,9 +64,12 @@ func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.C
 		tgtCol := fk.GetTargetColumn()
 		// The target may live in the same table (self-FK) or another table in
 		// the same schema. resolveFKs already verified existence; we trust
-		// the IR here.
+		// the IR here. Under D19 SCHEMA namespace we qualify with
+		// `<schema>.<target>`; iter-1 is same-file so target lives in the
+		// same schema as the owning table. PREFIX mode had the prefix
+		// baked into TargetTable at IR build time.
 		action := fkActionSQL(fk.GetOnDelete())
-		parts = append(parts, fmt.Sprintf("REFERENCES %s(%s)", tgtTable, tgtCol))
+		parts = append(parts, fmt.Sprintf("REFERENCES %s(%s)", qualifiedIdentifier(t, tgtTable), tgtCol))
 		if action != "" {
 			parts = append(parts, "ON DELETE "+action)
 		}

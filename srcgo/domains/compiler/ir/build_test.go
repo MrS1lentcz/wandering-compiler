@@ -532,6 +532,41 @@ func TestBuildErrors(t *testing.T) {
 				`plain column`,
 			},
 		},
+		{
+			name:    "module schema is a reserved PG system schema",
+			fixture: "testdata/errors/module_schema_reserved.proto",
+			wants: []string{
+				`module_schema_reserved.proto:`,
+				`"pg_catalog" is a reserved PostgreSQL system schema`,
+				`why:`,
+				`pg_*`,
+				`fix:`,
+				`reporting`,
+			},
+		},
+		{
+			name:    "module prefix is empty",
+			fixture: "testdata/errors/module_prefix_empty.proto",
+			wants: []string{
+				`module_prefix_empty.proto:`,
+				`(w17.db.module).prefix is empty`,
+				`why:`,
+				`ambiguous`,
+				`fix:`,
+				`{ prefix:`,
+			},
+		},
+		{
+			name:    "module prefix overflows NAMEDATALEN",
+			fixture: "testdata/errors/module_prefix_overflow.proto",
+			wants: []string{
+				`module_prefix_overflow.proto:`,
+				`NAMEDATALEN`,
+				`why:`,
+				`63 bytes`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

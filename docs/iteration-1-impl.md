@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) complete; **iter-1 schema-gap close-out in progress (D17, D18 shipped; D19, D20 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19 shipped; D21, D22, D23 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -950,6 +950,96 @@ in code, not in docs:
   `virtual:` sibling flag on `(w17.db.column)` for emitters that
   support it; until then, `raw_indexes` covers the
   expression-index shape that's the most common VIRTUAL substitute.
+
+- **D19 module namespace (shipped, 2026-04-22) — schema-gap
+  close-out, third of four before alter-diff.** New file-level
+  option `(w17.db.module)` picks one of two mutually-exclusive
+  namespacing strategies: `schema: "<name>"` (PG-native qualified
+  `<schema>.<table>`) or `prefix: "<name>"` (dialect-agnostic
+  `<prefix>_<table>`). Module-immutable per D19 rule — no
+  per-message override; iter-2 multi-file will assert consistency
+  across sibling files. Full rationale + invariants live in
+  `iteration-1.md` D19.
+
+  Proto changes: new `w17.db.Module` message with `oneof { schema,
+  prefix }`; extends `google.protobuf.FileOptions` as field 51004.
+  `ir.Schema` gains `namespace_mode` + `namespace`; `ir.Table`
+  also carries a per-table copy (Ops are emitter-local in iter-1
+  — plan carries only `AddTable.Table`, not the enclosing
+  Schema). New `ir.NamespaceMode` enum mirrors the oneof.
+
+  Loader: reads `(w17.db.module)` via `FileOptions` reparse in
+  the same pattern as the existing message/field options. Stores
+  on `LoadedFile.Module` for ir.Build to consume.
+
+  IR changes: new `resolveNamespace` validates + populates the
+  Schema-level namespace before any `buildTable` runs. SCHEMA
+  mode: name must be a valid identifier AND not a PG system
+  schema (`pg_*`, `information_schema`, `pg_toast`). PREFIX
+  mode: name must be a valid identifier — no artificial length
+  cap; overflow is caught naturally downstream on derived names.
+  `buildTable` applies the prefix (when active) to every
+  module-owned identifier: Table.Name, author-supplied
+  `indexes[].name`, `raw_checks[].name`, `raw_indexes[].name`,
+  FK `TargetTable`. Derived names (constraint, index, PG ENUM
+  type) inherit the prefix because they're constructed from
+  `Table.Name`. NAMEDATALEN validation runs against the
+  post-prefix effective identifier, so long-prefix overflow
+  fails loudly at IR time with file:line:col + fix.
+
+  PG emitter: two new helpers in `emit.go` — `qualifiedTable(t)`
+  returns `<schema>.<name>` in SCHEMA mode, bare otherwise;
+  `qualifiedIdentifier(t, bare)` does the same for non-table
+  identifiers (DROP INDEX, CREATE/DROP TYPE). PREFIX mode is a
+  no-op at emit time — prefix already baked into IR. Call sites
+  updated: `CREATE TABLE`, `CREATE INDEX ... ON`, `REFERENCES`
+  (in `column.go`), `DROP TABLE / INDEX / TYPE`, `CREATE TYPE`.
+  CREATE INDEX name stays bare per PG syntax (index auto-scopes
+  to table's schema); DROP INDEX qualifies for robustness.
+
+  What the emitter does NOT do: `CREATE SCHEMA` is never emitted
+  (same logic as extensions per D6 / D9 — deploy-client /
+  platform job). The Makefile `test-apply` harness pre-creates
+  `reporting` alongside the hstore + citext extensions so the
+  positive fixture applies cleanly; future schemas will extend
+  the setup block.
+
+  Capability catalog: `CapSchemaQualified = "SCHEMA_QUALIFIED"`
+  in `emit/capabilities.go`, `{}` (always available) in the PG
+  catalog.
+
+  Two positive fixtures land in `testdata/`: `namespace_schema`
+  (reporting schema, two tables with FK, index, UNIQUE, blank
+  checks — qualifies everywhere) and `namespace_prefix`
+  (catalog prefix, two tables with FK + BLOCK, author-named
+  index, raw_check, bare proto-enum auto-inferred ENUM —
+  prefix applies to every identifier). Three new error
+  fixtures — `module_schema_reserved.proto`,
+  `module_prefix_empty.proto`, `module_prefix_overflow.proto` —
+  join `TestBuildErrors`. All 20 grand-tour fixtures (16
+  previous + 2 D17 new + 2 D19 new; wait that's 18… the
+  previous counts tallied 15 + 1 D18 = 16, so 16 + 2 = 18)
+  green on M8 goldens + M9 `make test-apply` against
+  `postgres:18-alpine` (schema mode needs `CREATE SCHEMA
+  reporting` from the harness, done).
+
+  **Design notes.**
+    - "One of the group lives outside" is a code smell we refuse
+      to model. Django mixes `app_label` prefix with an optional
+      `db_table` per-model override; we don't. Module = unit,
+      rule = uniform.
+    - PREFIX baked into IR, SCHEMA qualifies at emit time. The
+      asymmetry matches the underlying semantics: PREFIX
+      modifies the identifier itself (so IR should see the
+      final form); SCHEMA is a separate slot in PG's namespace
+      model (so IR keeps the identifier bare and the emitter
+      qualifies). This also gives iter-2's differ distinct
+      signals: rename = Table.Name changed; move = Schema
+      namespace changed.
+    - Cross-schema FK: same-file means same-namespace in iter-1,
+      so it's a null case. PG natively supports
+      `REFERENCES other_schema.table(col)`; iter-2's cross-file
+      FK syntax will grow to carry the target's module.
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

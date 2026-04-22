@@ -36,6 +36,7 @@ var expectedPgCaps = []string{
 	emit.CapBoolean,
 	emit.CapArray,
 	emit.CapEnumType,
+	emit.CapSchemaQualified,
 
 	// Index + constraint features
 	emit.CapIncludeIndex,

@@ -80,6 +80,8 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | Django Meta | w17 | Notes |
 |---|---|---|
 | `db_table` | ✅ | `(w17.db.table).name` |
+| `app_label` (as schema prefix) | ✅ | `(w17.db.module) = { prefix: "<name>" }` — module-level, immutable across the module. See D19 |
+| PG schema qualification (SQLAlchemy `__table_args__ = {'schema': 'X'}`) | ✅ | `(w17.db.module) = { schema: "<name>" }` — PG-native, mutually exclusive with prefix. See D19 |
 | `db_tablespace` | ⛔ | iter-2+ |
 | `db_table_comment` (4.2+) | ⛔ | iter-2 with admin gen |
 | `indexes = [Index(…)]` | ✅ | `(w17.db.table).indexes` covers fields + name + unique + include; `raw_indexes` covers WHERE / USING / expressions / opclasses |

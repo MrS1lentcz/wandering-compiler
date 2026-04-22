@@ -43,7 +43,11 @@ func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []s
 		} else {
 			b.WriteString("CREATE INDEX ")
 		}
-		fmt.Fprintf(&b, "%s ON %s (%s)", idx.GetName(), t.GetName(), strings.Join(sqlCols, ", "))
+		// CREATE INDEX name is bare per PG syntax — index lives in the
+		// schema of its table automatically. The table in the ON clause
+		// is schema-qualified under D19 SCHEMA mode (PREFIX mode already
+		// baked the prefix into both identifier names at IR time).
+		fmt.Fprintf(&b, "%s ON %s (%s)", idx.GetName(), qualifiedTable(t), strings.Join(sqlCols, ", "))
 		if len(sqlInclude) > 0 {
 			fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(sqlInclude, ", "))
 		}

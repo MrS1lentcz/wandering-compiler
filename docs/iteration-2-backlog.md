@@ -130,6 +130,17 @@ chat history.
 
 ### Structured index shapes (graduate from raw_indexes)
 
+> **Promoted 2026-04-22: this is D23, scheduled right after D22 and
+> before alter-diff (iter-2 M1).** User flagged that the original
+> piecemeal D20 "index sort order + NULLS FIRST/LAST" slot should
+> be replaced by a broader indexes + constraints dynamic redesign
+> matching Django's shape. NULLS FIRST/LAST lands inside this
+> redesign (as a field on the new `IndexColumn` inside the
+> structured messages), not as a standalone feature. Must happen
+> BEFORE alter-diff so the differ works against the final
+> index/CHECK IR shape, not an intermediate one that would be
+> rewritten.
+
 **Why.** D11 raw_indexes is the escape hatch; it takes opaque SQL
 bodies. When patterns stabilise (GIN, GIST, partial, expression),
 they graduate to typed message shapes (`GinIndex`, `PartialIndex`,

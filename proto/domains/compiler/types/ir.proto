@@ -18,6 +18,23 @@ option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/c
 // Schema is a validated authoring input ready for the differ and emitters.
 message Schema {
   repeated Table tables = 1;
+
+  // Module-level namespace (D19). Populated from (w17.db.module).
+  // `namespace_mode` + `namespace` together describe how emitters
+  // qualify every table / index / FK / DROP in this schema. Empty
+  // `namespace` with NAMESPACE_MODE_NONE = bare names + default
+  // dialect schema.
+  NamespaceMode namespace_mode = 2;
+  string namespace = 3;
+}
+
+// NamespaceMode — which strategy the module picked (D19). Mirrors the
+// oneof in (w17.db.module) 1:1; kept as an IR enum so consumers don't
+// import the authoring vocabulary. NONE = module option unset.
+enum NamespaceMode {
+  NAMESPACE_MODE_NONE = 0;
+  NAMESPACE_MODE_SCHEMA = 1;    // PG schema qualification: <namespace>.<table>
+  NAMESPACE_MODE_PREFIX = 2;    // name prefixing: <namespace>_<table>
 }
 
 // SourceLocation anchors an IR node to its originating position in the
@@ -47,6 +64,16 @@ message Table {
   // contract.
   repeated RawCheck raw_checks = 8;
   repeated RawIndex raw_indexes = 9;
+
+  // Module namespace (D19). Copied onto every Table from Schema so
+  // emitters see the information Op-local (plan Ops only carry Table,
+  // not Schema). PREFIX mode: Table.Name is already prefixed in IR
+  // (derived index / check / enum-type names inherit); emitter uses
+  // Name as-is. SCHEMA mode: Table.Name is bare; emitter qualifies
+  // <namespace>.<Name> at every identifier emission site. NONE:
+  // bare everywhere.
+  NamespaceMode namespace_mode = 10;
+  string namespace = 11;
 }
 
 message RawCheck {

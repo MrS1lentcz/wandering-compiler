@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package d19.namespace_schema;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+option (w17.db.module) = { schema: "reporting" };
+
+// D19 fixture — SCHEMA namespace. Every table / index / FK / DROP
+// references the `reporting.<name>` qualifier; index / type names
+// stay bare per PG CREATE INDEX convention (PG auto-scopes them to
+// the table's schema). Same-file FK across two tables inside the
+// module lives in the same schema.
+
+message Dashboard {
+  option (w17.db.table) = { name: "dashboards" };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string title = 2 [(w17.field) = { type: CHAR, max_len: 120, unique: true }];
+}
+
+message Widget {
+  option (w17.db.table) = {
+    name: "widgets",
+    indexes: [{ fields: ["dashboard_id", "kind"] }]
+  };
+
+  int64  id           = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  dashboard_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "dashboards.id", deletion_rule: CASCADE }
+  ];
+  string kind         = 3 [(w17.field) = { type: CHAR, max_len: 40 }];
+}

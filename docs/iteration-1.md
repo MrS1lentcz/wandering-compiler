@@ -808,6 +808,116 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D19 — Module namespace: schema XOR prefix (added 2026-04-22)
+
+**Decision.** Each compilation module (= proto file in iter-1; = proto
+domain directory in iter-2) picks exactly one of two namespacing
+strategies, declared in a new file-level option:
+
+```proto
+// PG-native schema qualification — every table lives in <name>
+option (w17.db.module) = { schema: "reporting" };
+// → CREATE TABLE reporting.events (...); REFERENCES reporting.users(id); …
+
+// Name-prefix convention — works on every dialect (including MySQL +
+// SQLite which have no PG-style schema concept)
+option (w17.db.module) = { prefix: "catalog" };
+// → CREATE TABLE catalog_events (...); REFERENCES catalog_users(id); …
+
+// Default (no option) — bare names, land in PG's default schema
+// (usually `public`), Django-flat layout
+```
+
+The two strategies are **mutually exclusive** (proto `oneof` enforces)
+and **module-immutable**: no per-message override. A module that mixes
+one table outside its namespace is a code smell we refuse to model —
+it would create patterns like `reporting.public_events` or
+`catalog_foreign_events` that nobody wants. Iter-2 multi-file
+compilation enforces the module rule by rejecting any `.proto` whose
+`(w17.db.module)` disagrees with its siblings.
+
+**Why both strategies.**
+
+  - **SCHEMA mode** is PG-native, zero overhead — PG's own namespace
+    mechanism keeps indexes / constraints / sequences / types
+    auto-scoped. Natural for multi-tenant (per-tenant schema),
+    blue/green migration swaps, or logical separation (`auth`,
+    `reporting`, `billing` side-by-side in one DB).
+  - **PREFIX mode** is dialect-agnostic — MySQL's "schema = database"
+    quirk and SQLite's lack of schemas make PG-style qualification
+    unavailable there. Prefix mode produces identifiers every dialect
+    accepts: `catalog_products` works identically on PG, MySQL,
+    SQLite. Django's `app_modelname` convention lands here.
+
+**Invariants enforced at IR time.**
+
+  - SCHEMA mode: name is a valid identifier (NAMEDATALEN, no reserved
+    keyword) AND not a PG system schema (`pg_*`, `information_schema`,
+    `pg_toast`). Reserved check runs at IR time so authors never
+    accidentally shadow pg_catalog.
+  - PREFIX mode: name is a valid identifier. No artificial cap —
+    overflow is caught naturally on the post-prefix effective
+    identifier, which must itself fit 63 bytes.
+  - Empty namespace value on either oneof branch = error (author
+    picked a strategy but forgot to name it).
+  - Derived index / CHECK constraint / PG ENUM type names run through
+    the existing NAMEDATALEN validation against the **post-prefix**
+    form, so prefix overflow fails loudly with file:line:col instead
+    of silently truncating at apply.
+  - Author-supplied names (`indexes[].name`, `raw_checks[].name`,
+    `raw_indexes[].name`) also get the module prefix applied — "no
+    per-message override" applies here too. Author picks the suffix;
+    the compiler picks (and enforces) the prefix.
+
+**What the compiler emits.**
+
+  - **SCHEMA mode:** CREATE TABLE `<schema>.<name>`, REFERENCES
+    `<schema>.<target>`, DROP TABLE `<schema>.<name>`, DROP INDEX
+    `<schema>.<idx_name>`, DROP TYPE `<schema>.<type_name>`. CREATE
+    INDEX name itself is bare per PG syntax (index auto-scopes to the
+    table's schema). `Table.Name` stays bare in IR so the differ can
+    detect namespace changes separately from rename operations in
+    iter-2.
+  - **PREFIX mode:** every identifier the module owns is
+    `<prefix>_<bare>`, baked into IR at build time. Emitter sees
+    fully-prefixed identifiers and renders them straight — no
+    qualification dispatch at emit time. Uniform across dialects.
+  - **NONE mode (default):** bare identifiers, no qualification.
+
+**What the compiler does NOT emit.** `CREATE SCHEMA reporting` is
+never part of the migration body. Creating the schema is a
+deploy-client / platform job (same logic as PG extensions per D6 /
+D9) — the migration only uses the schema, not creates it. Operators
+provision the schema + its GRANTs before applying migrations.
+
+**Cross-schema FK.** Same-file in iter-1 means same-namespace —
+cross-schema FK is a null case. When iter-2's multi-file / cross-
+domain FK lands, PG natively supports `REFERENCES auth.users(id)` so
+nothing about the wire format changes; only the `(w17.db.column).fk`
+syntax grows to carry the target's module (likely a qualified form
+like `"auth.users.id"` or by-module-reference).
+
+**Identity for iter-2 alter-diff.** Table identity for rename /
+schema-move detection is deferred: per-table identity key has not
+been pinned (D10 only pins per-column). Plausible candidates are
+`MessageFqn` (proto-stable across namespace changes) or `(mode, ns,
+name)` tuple (name changes are renames; namespace changes are a
+schema-level op). The IR captures every fact the differ needs; the
+choice lands inside the D23 indexes+constraints overhaul next to
+alter-diff.
+
+**Rationale.** Django's `app_label` is prefix-mode (Django has no
+schema concept); SQLAlchemy exposes PG schemas directly via
+`__table_args__ = {'schema': 'reporting'}`. wc ships both as
+orthogonal strategies with a common "module-level, immutable" rule —
+author picks per module, compiler applies uniformly. The rule
+catches "one table out of the group" as a code smell rather than
+silently accepting it.
+
+Capability: `SCHEMA_QUALIFIED` = `{}` in the PG catalog (available on
+every supported version). Prefix mode needs no capability — any
+emitter accepting identifiers accepts `<prefix>_<name>`.
+
 ### D18 — Generated columns: GENERATED ALWAYS AS … STORED (added 2026-04-22)
 
 **Decision.** `(w17.db.column)` gains an opaque `generated_expr: string`

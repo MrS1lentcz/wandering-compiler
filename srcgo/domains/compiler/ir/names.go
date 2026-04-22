@@ -62,6 +62,28 @@ func derivedCheckName(table, sqlCol string, ck *irpb.Check) string {
 	return fmt.Sprintf("%s_%s_%s", table, sqlCol, checkSuffix(ck))
 }
 
+// applyPrefix returns the post-prefix effective SQL identifier for a
+// module-level PREFIX namespace. Empty prefix = no prefix. Used to
+// derive the final CREATE TABLE / CREATE INDEX name that actually
+// lands in PG so NAMEDATALEN validation can run on the form the DB
+// will see. Called at IR time (identifier length validation) and at
+// emit time (identifier rendering) — single source of truth for the
+// prefix-concatenation shape.
+//
+// Schema mode (namespace lives in a separate slot, not concatenated
+// into the name) uses the bare identifier — callers route the
+// qualification through the emitter's schema helper instead.
+func applyPrefix(prefix, bare string) string {
+	// Preserve empty bare: author-supplied names are validated
+	// downstream against `"" → diag error`; prefixing would mask the
+	// empty state (catalog_ would pass both the emptiness check and
+	// identifier validation) and land a malformed name in SQL.
+	if prefix == "" || bare == "" {
+		return bare
+	}
+	return prefix + "_" + bare
+}
+
 func checkSuffix(ck *irpb.Check) string {
 	switch ck.GetVariant().(type) {
 	case *irpb.Check_Length:
@@ -76,6 +98,30 @@ func checkSuffix(ck *irpb.Check) string {
 		return "choices"
 	}
 	return "check"
+}
+
+// pgReservedSchemas names PostgreSQL system schemas that author code must
+// not settle into. `pg_catalog` + `pg_toast` + `information_schema` are
+// explicitly reserved; anything starting with `pg_` is reserved by
+// convention for PostgreSQL system use (catalogs, toast, temp). Rejecting
+// these at IR time keeps authors from accidentally landing tables in
+// system schemas (silently creates user tables in pg_catalog-adjacent
+// space, which is legal but strongly discouraged).
+//
+// This list is PG-specific and lives here because iter-1 is PG-only.
+// When MySQL / SQLite emitters land, the reserved-namespace check should
+// graduate to a dialect-indexed map (MySQL reserves `mysql`,
+// `performance_schema`, etc.; SQLite has no schema concept).
+func isReservedPgSchema(name string) bool {
+	lower := strings.ToLower(name)
+	if strings.HasPrefix(lower, "pg_") {
+		return true
+	}
+	switch lower {
+	case "information_schema":
+		return true
+	}
+	return false
 }
 
 // pgReservedKeywords is the Postgres "category R" reserved-word list —

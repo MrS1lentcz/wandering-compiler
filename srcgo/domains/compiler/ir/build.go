@@ -34,6 +34,18 @@ import (
 func Build(lf *loader.LoadedFile) (*irpb.Schema, error) {
 	b := &builder{lf: lf, msgByTable: map[string]*loader.LoadedMessage{}}
 	schema := &irpb.Schema{}
+	b.resolveNamespace(schema)
+	if len(b.errs) > 0 {
+		// Namespace errors are fatal (every downstream identifier
+		// validation runs against the effective name); bail before
+		// buildTable sees a half-populated state.
+		return nil, errors.Join(b.errs...)
+	}
+	b.namespaceMode = schema.GetNamespaceMode()
+	b.namespace = schema.GetNamespace()
+	if b.namespaceMode == irpb.NamespaceMode_NAMESPACE_MODE_PREFIX {
+		b.prefix = b.namespace
+	}
 	for _, msg := range lf.Messages {
 		if msg.Table == nil {
 			// Messages without (w17.db.table) aren't compiler inputs in
@@ -56,10 +68,80 @@ func Build(lf *loader.LoadedFile) (*irpb.Schema, error) {
 	return schema, nil
 }
 
+// resolveNamespace reads (w17.db.module) off the loader, validates it,
+// and populates Schema.namespace_mode + Schema.namespace. Called before
+// buildTable so the prefix, when active, is available for derived-name
+// length validation (table_name, check_name, index_name, enum_type_name
+// all overflow differently under a prefix).
+//
+// Validation:
+//   - SCHEMA mode: namespace must be non-empty, valid identifier, and
+//     not a reserved PG system schema (`pg_*`, `information_schema`).
+//   - PREFIX mode: namespace must be non-empty and a valid identifier.
+//     No artificial max-length cap beyond NAMEDATALEN — the derived
+//     `<prefix>_<table>_<col>_<variant>` validation in buildTable
+//     catches overflow honestly.
+//   - NONE (default): nothing to validate.
+func (b *builder) resolveNamespace(schema *irpb.Schema) {
+	mod := b.lf.Module
+	if mod == nil {
+		return
+	}
+	switch ns := mod.GetNamespace().(type) {
+	case *dbpb.Module_Schema:
+		name := ns.Schema
+		if name == "" {
+			b.err(diag.Atf(b.lf.File, "(w17.db.module).schema is empty").
+				WithWhy("declaring the schema oneof variant without a value leaves the module in an ambiguous state — prefer to drop the option entirely for default-schema behaviour, or set a real schema name").
+				WithFix(`either remove option (w17.db.module) from this file, or set it to { schema: "<name>" }`))
+			return
+		}
+		if why := validateIdentifier(name); why != "" {
+			b.err(diag.Atf(b.lf.File, "(w17.db.module).schema: %s", why).
+				WithWhy("the schema name lands in PG `search_path` and every qualified identifier; it must survive NAMEDATALEN and not clash with reserved keywords").
+				WithFix("pick a snake_case identifier under 63 bytes that isn't a PG reserved keyword"))
+			return
+		}
+		if isReservedPgSchema(name) {
+			b.err(diag.Atf(b.lf.File, "(w17.db.module).schema %q is a reserved PostgreSQL system schema", name).
+				WithWhy("PostgreSQL reserves `pg_*`, `information_schema`, and `pg_toast` for system catalogs / toast tables / introspection; creating user tables in those schemas is legal but breaks pg_dump / role assumptions and is universally discouraged").
+				WithFix(`rename the schema — avoid the "pg_" prefix and "information_schema". Typical picks: "reporting", "auth", "billing"`))
+			return
+		}
+		schema.NamespaceMode = irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA
+		schema.Namespace = name
+	case *dbpb.Module_Prefix:
+		name := ns.Prefix
+		if name == "" {
+			b.err(diag.Atf(b.lf.File, "(w17.db.module).prefix is empty").
+				WithWhy("declaring the prefix oneof variant without a value leaves the module in an ambiguous state").
+				WithFix(`either remove option (w17.db.module) from this file, or set it to { prefix: "<name>" }`))
+			return
+		}
+		if why := validateIdentifier(name); why != "" {
+			b.err(diag.Atf(b.lf.File, "(w17.db.module).prefix: %s", why).
+				WithWhy("the prefix prepends onto every SQL identifier in this module (table names, derived check / index / type names); it must itself be a valid PG identifier").
+				WithFix("pick a short snake_case identifier — typical picks are 2-8 chars like `auth`, `catalog`, `billing`"))
+			return
+		}
+		schema.NamespaceMode = irpb.NamespaceMode_NAMESPACE_MODE_PREFIX
+		schema.Namespace = name
+	}
+}
+
 type builder struct {
 	lf         *loader.LoadedFile
 	errs       []error
 	msgByTable map[string]*loader.LoadedMessage
+	// Module-level namespace (D19). Populated once by resolveNamespace
+	// from loader's LoadedFile.Module; copied onto every Table via
+	// buildTable so emitters see the info Op-local. `prefix` is a
+	// convenience alias: non-empty iff namespaceMode == PREFIX. Kept
+	// separately so hot-path helpers (applyPrefix in derived-name
+	// construction) don't re-check the mode.
+	namespaceMode irpb.NamespaceMode
+	namespace     string
+	prefix        string
 }
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
@@ -71,16 +153,32 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			WithFix(`add option (w17.db.table) = { name: "snake_case_plural" };`))
 		return nil
 	}
-	if why := validateIdentifier(msg.Table.GetName()); why != "" {
+	// Validate the EFFECTIVE name that will land in PG. In PREFIX
+	// namespace mode (D19) the effective form is `<prefix>_<name>`; in
+	// SCHEMA or NONE modes the effective form is the bare name (schema
+	// qualification lives in a separate slot and doesn't concatenate
+	// into identifier bytes). Running the check on the effective name
+	// catches NAMEDATALEN overflow under prefix mode at IR time
+	// instead of at apply time.
+	effectiveName := applyPrefix(b.prefix, msg.Table.GetName())
+	if why := validateIdentifier(effectiveName); why != "" {
 		b.err(diag.Atf(msg.Desc, "message %q: %s", msg.Desc.Name(), why).
 			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
 			WithFix("rename the table via (w17.db.table).name to a shorter / non-reserved identifier (snake_case, plural)"))
 		return nil
 	}
 	tbl := &irpb.Table{
-		Name:       msg.Table.GetName(),
-		MessageFqn: string(msg.Desc.FullName()),
-		Location:   sourceLocation(msg.Desc),
+		// Name is the effective SQL name that will land in PG. In PREFIX
+		// mode the prefix is baked in here so every downstream
+		// consumer (derived index / check / type names, emit-time FK
+		// references, raw_index / raw_check name collision namespace)
+		// sees one canonical identifier. SCHEMA / NONE modes leave
+		// Name bare and the emitter qualifies with `<ns>.<Name>`.
+		Name:          effectiveName,
+		MessageFqn:    string(msg.Desc.FullName()),
+		Location:      sourceLocation(msg.Desc),
+		NamespaceMode: b.namespaceMode,
+		Namespace:     b.namespace,
 	}
 
 	for _, f := range msg.Fields {
@@ -114,9 +212,14 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			b.err(actionErr)
 			continue
 		}
+		// D19 — FK target is written bare by the author (e.g.
+		// `fk: "customers.id"`); apply the module prefix here so the
+		// IR-side FK references the same post-prefix name as the
+		// target Table.Name. SCHEMA / NONE modes leave it bare; the
+		// emitter qualifies SCHEMA references at render time.
 		tbl.ForeignKeys = append(tbl.ForeignKeys, &irpb.ForeignKey{
 			Column:       col.GetProtoName(),
-			TargetTable:  ref.table,
+			TargetTable:  applyPrefix(b.prefix, ref.table),
 			TargetColumn: ref.column,
 			OnDelete:     action,
 		})
@@ -145,7 +248,10 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			}
 		}
 		tbl.Indexes = append(tbl.Indexes, &irpb.Index{
-			Name:    idx.GetName(),
+			// Author-supplied name gets the module prefix so it shares
+			// the same post-prefix identifier namespace as derived
+			// names. In SCHEMA / NONE modes applyPrefix is identity.
+			Name:    applyPrefix(b.prefix, idx.GetName()),
 			Fields:  append([]string(nil), idx.GetFields()...),
 			Unique:  idx.GetUnique(),
 			Include: append([]string(nil), idx.GetInclude()...),
@@ -185,14 +291,18 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 	// their identifier names go through the same length/reserved/collision
 	// validation as every other emitted identifier.
 	for _, rc := range msg.Table.GetRawChecks() {
+		// Author-supplied raw_check / raw_index names get the module
+		// prefix so they share the same post-prefix identifier
+		// namespace as derived names. In SCHEMA / NONE modes
+		// applyPrefix is identity.
 		tbl.RawChecks = append(tbl.RawChecks, &irpb.RawCheck{
-			Name: rc.GetName(),
+			Name: applyPrefix(b.prefix, rc.GetName()),
 			Expr: rc.GetExpr(),
 		})
 	}
 	for _, ri := range msg.Table.GetRawIndexes() {
 		tbl.RawIndexes = append(tbl.RawIndexes, &irpb.RawIndex{
-			Name:   ri.GetName(),
+			Name:   applyPrefix(b.prefix, ri.GetName()),
 			Unique: ri.GetUnique(),
 			Body:   ri.GetBody(),
 		})

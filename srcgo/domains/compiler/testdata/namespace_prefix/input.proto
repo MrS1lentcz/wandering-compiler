@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package d19.namespace_prefix;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+option (w17.db.module) = { prefix: "catalog" };
+
+// D19 fixture — PREFIX namespace. Every SQL identifier that the
+// module owns gets `catalog_` prepended: table names, derived
+// constraint names, derived index names, raw index / raw check
+// author-supplied names, FK target references, PG ENUM type names.
+// Emitter sees fully-prefixed identifiers (baked in at IR time).
+
+enum ProductStatus {
+  PRODUCT_STATUS_UNSPECIFIED = 0;
+  DRAFT = 1;
+  ACTIVE = 2;
+  ARCHIVED = 3;
+}
+
+message Category {
+  option (w17.db.table) = { name: "categories" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 80, unique: true }];
+}
+
+message Product {
+  option (w17.db.table) = {
+    name: "products",
+    indexes: [{ fields: ["category_id"], name: "by_category" }],
+    raw_checks: [{ name: "price_non_negative", expr: "price >= 0" }]
+  };
+
+  int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  category_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "categories.id", deletion_rule: BLOCK }
+  ];
+  string sku         = 3 [(w17.field) = { type: CHAR, max_len: 40, unique: true }];
+  ProductStatus status = 4;
+  double price       = 5 [(w17.field) = { type: MONEY }];
+}

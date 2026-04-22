@@ -31,6 +31,7 @@ import (
 // location lookups by diag.At.
 type LoadedFile struct {
 	File     protoreflect.FileDescriptor
+	Module   *dbpb.Module
 	Messages []*LoadedMessage
 }
 
@@ -82,6 +83,20 @@ func Load(ctx context.Context, path string, importPaths []string) (*LoadedFile, 
 	}
 
 	loaded := &LoadedFile{File: file}
+
+	// File-level (w17.db.module) namespacing (D19). Whole-module option;
+	// later multi-file iterations will assert every file in the module
+	// carries an identical payload here.
+	fileOpts, err := reparse[*descriptorpb.FileOptions](file.Options())
+	if err != nil {
+		return nil, diag.Atf(file, "internal: re-marshal file options: %v", err).
+			WithWhy("protocompile returned options as dynamicpb; we re-marshal through the global registry to decode concrete extensions").
+			WithFix("this is a compiler bug — please file an issue with the failing .proto attached")
+	}
+	if proto.HasExtension(fileOpts, dbpb.E_Module) {
+		loaded.Module = proto.GetExtension(fileOpts, dbpb.E_Module).(*dbpb.Module)
+	}
+
 	msgs := file.Messages()
 	for i := 0; i < msgs.Len(); i++ {
 		md := msgs.Get(i)

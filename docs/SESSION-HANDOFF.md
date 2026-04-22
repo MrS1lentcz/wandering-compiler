@@ -31,6 +31,20 @@ See also:
 Each is a standalone commit for review hygiene. Order reflects
 user preference (ENUM first, user's highlighted design).
 
+> **Reorg note (2026-04-22 session).** The original four-feature
+> batch (ENUM / generated / schema-qualified / index sort) shipped
+> the first two as D17 + D18. The remaining two were reshaped: the
+> "schema-qualified" slot grew to cover **namespace as a module-
+> level binary choice (schema XOR prefix)** — now D19. The "index
+> sort order" slot has been **pulled OUT of this batch** and folded
+> into a broader "indexes + constraints dynamic redesign" (new D23)
+> that lands right after D22, replacing the piecemeal D20 shape.
+> D21 (default table name) + D22 (optional bundle: COMMENT ON +
+> path-family presets + MAC_ADDRESS + SMALL_INTEGER) slot in
+> between. See the Progress block at the bottom for the canonical
+> order — the section below preserves the original D19/D20
+> design-detail text for historical context only.
+
 ### 1. ENUM type — **NEXT ACTION, not started**
 
 **Design (agreed):**
@@ -303,9 +317,32 @@ make schemagen
       option b — auto-infer on bare proto-enum fields)
 - [x] D18 (Generated columns, shipped 2026-04-22; STORED-only per
       PG 18 surface, VIRTUAL parked for multi-dialect iter-2+)
-- [ ] **← YOU ARE HERE.** Start D19 (Schema-qualified names) next.
-- [ ] D20 (Index sort order + NULLS FIRST/LAST)
-- [ ] Open `iteration-2.md` with alter-diff as M1
+- [x] D19 (namespace = schema XOR prefix via `(w17.db.module)`
+      FileOptions extend; module-immutable, no per-message override;
+      PREFIX baked into IR, SCHEMA qualifies at emit time; shipped
+      2026-04-22)
+- [ ] **← YOU ARE HERE.** Start D21 (default table name =
+      `snake_case(message.local_name)`, no pluralisation, no
+      package-derived prefix — verze v modelech nejsou; namespace
+      řeší D19 orthogonálně). **Note:** D21 replaces the original
+      "D20 index sort order" slot in the queue.
+- [ ] D22 (optional bundle — COMMENT ON auto-from-docstring +
+      override annotation; path-family presets IMAGE_PATH /
+      POSIX_PATH / FILE_PATH with `extensions` list + `*` wildcard;
+      MAC_ADDRESS with CHECK when storage doesn't enforce;
+      SMALL_INTEGER preset).
+- [ ] **D23 (right after D22, before alter-diff) — indexes +
+      constraints dynamic redesign.** Originally scoped as D20 "index
+      sort order + NULLS FIRST/LAST" but user flagged 2026-04-22 that
+      the right move is a broader overhaul matching Django's shape
+      (structured `GinIndex` / `PartialIndex` / `ExpressionIndex`
+      messages graduating from `raw_indexes`, column-level sort +
+      nulls inside indexes, structured CHECK variants beyond the
+      current raw_checks escape hatch). NULLS FIRST/LAST lands inside
+      this redesign, not as a standalone feature. Must happen BEFORE
+      alter-diff so the differ works against the final index/CHECK IR
+      shape, not an intermediate one that will be rewritten.
+- [ ] Open `iteration-2.md` with alter-diff as M1 (after D23).
 
 After D17–D20 land, schema declaration is exhaustively closed and
 iter-2 alter-diff can begin against the most complete IR iter-1 will

@@ -51,15 +51,19 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		colByProto[c.GetProtoName()] = c
 	}
 
+	qualTable := qualifiedTable(t)
+
 	var upB strings.Builder
 	// D17 — prepend CREATE TYPE <table>_<col> AS ENUM (names…) for every
 	// string-carrier SEM_ENUM column before CREATE TABLE. Declaration
-	// order preserved so goldens stay deterministic.
+	// order preserved so goldens stay deterministic. Under SCHEMA
+	// namespace (D19) the type lives in the same schema as the table;
+	// under PREFIX mode the type name was already prefixed in IR.
 	enumTypes := collectPgEnumTypes(t)
 	for _, et := range enumTypes {
-		fmt.Fprintf(&upB, "CREATE TYPE %s AS ENUM (%s);\n\n", et.name, strings.Join(et.quotedValues, ", "))
+		fmt.Fprintf(&upB, "CREATE TYPE %s AS ENUM (%s);\n\n", qualifiedIdentifier(t, et.name), strings.Join(et.quotedValues, ", "))
 	}
-	fmt.Fprintf(&upB, "CREATE TABLE %s (\n", t.GetName())
+	fmt.Fprintf(&upB, "CREATE TABLE %s (\n", qualTable)
 
 	lines := make([]string, 0, len(t.GetColumns()))
 	// One line per column.
@@ -120,7 +124,11 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		if ri.GetUnique() {
 			kw = "CREATE UNIQUE INDEX"
 		}
-		idxStmts = append(idxStmts, fmt.Sprintf("%s %s ON %s %s;", kw, ri.GetName(), t.GetName(), ri.GetBody()))
+		// Raw index body references columns directly (author wrote the
+		// `ON <body>` tail); the table reference is our responsibility.
+		// Index name is bare per PG CREATE INDEX syntax (index lives in
+		// the table's schema automatically).
+		idxStmts = append(idxStmts, fmt.Sprintf("%s %s ON %s %s;", kw, ri.GetName(), qualTable, ri.GetBody()))
 		idxNames = append(idxNames, ri.GetName())
 	}
 	if len(idxStmts) > 0 {
@@ -132,17 +140,60 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 	// (reverse declaration order). Indexes live inside / alongside the
 	// table so they go first; the ENUM types are standalone pg_type
 	// objects referenced by the table columns, so they drop after the
-	// table that uses them.
+	// table that uses them. DROP INDEX / DROP TYPE carry the schema
+	// qualifier under SCHEMA namespace (robustness against search_path);
+	// PREFIX mode had the prefix baked into the identifier at IR time.
 	var downB strings.Builder
 	for i := len(idxNames) - 1; i >= 0; i-- {
-		fmt.Fprintf(&downB, "DROP INDEX IF EXISTS %s;\n", idxNames[i])
+		fmt.Fprintf(&downB, "DROP INDEX IF EXISTS %s;\n", qualifiedIdentifier(t, idxNames[i]))
 	}
-	fmt.Fprintf(&downB, "DROP TABLE IF EXISTS %s;", t.GetName())
+	fmt.Fprintf(&downB, "DROP TABLE IF EXISTS %s;", qualTable)
 	for i := len(enumTypes) - 1; i >= 0; i-- {
-		fmt.Fprintf(&downB, "\nDROP TYPE IF EXISTS %s;", enumTypes[i].name)
+		fmt.Fprintf(&downB, "\nDROP TYPE IF EXISTS %s;", qualifiedIdentifier(t, enumTypes[i].name))
 	}
 
 	return upB.String(), downB.String(), nil
+}
+
+// qualifiedTable renders the table-identifier form used inside CREATE
+// TABLE, CREATE INDEX ... ON, REFERENCES, DROP TABLE, and every other
+// statement that names the table itself. Three cases:
+//
+//   NONE   → bare <name>
+//   SCHEMA → <namespace>.<name> (PG schema qualification)
+//   PREFIX → <name> — the prefix is already baked into Table.Name at IR
+//            build time (see applyPrefix in ir.Build); no further work
+//            at emit time. Treating PREFIX identically to NONE keeps
+//            the identifier-rendering path uniform across every
+//            emitter site.
+//
+// Schema qualification is emitter-private: IR stores the bare name +
+// mode + namespace, and the emitter builds the final identifier.
+// SCHEMA mode keeps Table.Name bare so the differ can detect
+// namespace changes separately from rename operations in iter-2.
+func qualifiedTable(t *irpb.Table) string {
+	if t.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		return t.GetNamespace() + "." + t.GetName()
+	}
+	return t.GetName()
+}
+
+// qualifiedIdentifier renders the schema-qualified form for non-table
+// identifiers that live inside the table's namespace: indexes
+// (DROP INDEX schema.idx), PG ENUM types (CREATE TYPE schema.type_name,
+// DROP TYPE schema.type_name). PREFIX mode: the identifier arrives
+// already prefixed from IR — pass through.
+//
+// CREATE INDEX is special: PG syntax `CREATE INDEX <name> ON <table>`
+// does not take a schema qualifier on the index name (the index
+// automatically lands in the schema of <table>). That site uses the
+// bare identifier directly; this helper is for DROP INDEX + CREATE /
+// DROP TYPE.
+func qualifiedIdentifier(t *irpb.Table, bare string) string {
+	if t.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		return t.GetNamespace() + "." + bare
+	}
+	return bare
 }
 
 // pgEnumType captures the derived CREATE TYPE side-data for a single
