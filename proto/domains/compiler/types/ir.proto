@@ -304,6 +304,13 @@ enum SemType {
   // String carrier. Storage: PG TSVECTOR, others deferred (iter-2+).
   SEM_TSEARCH = 9;
 
+  // String carrier. Storage: PG MACADDR (native enforces format),
+  // MySQL/SQLite VARCHAR(17) + regex CHECK. Native PG type rejects
+  // malformed values on INSERT/UPDATE, so no IR-time regex CHECK
+  // emits on the default path; `db_type: VARCHAR` override activates
+  // the regex synthesis (paralleling the UUID preset). (D22b)
+  SEM_MAC = 60;
+
   // Numeric carriers.
   SEM_NUMBER = 10;
   SEM_ID = 11;

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package d22.mac_address;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22b fixture — MAC_ADDRESS preset on string carrier. Exercises:
+//   (a) default path → PG MACADDR native storage, no regex CHECK
+//       (native type enforces format on INSERT/UPDATE),
+//   (b) db_type: VARCHAR override → VARCHAR(17) storage, regex
+//       CHECK + blank CHECK synthesised automatically ("max
+//       defensibility" when the native type isn't in play).
+message NetworkDevice {
+  option (w17.db.table) = { name: "devices" };
+
+  int64  id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Native MACADDR storage — PG type enforces format; no regex/blank.
+  string wired_mac = 2 [(w17.field) = { type: MAC_ADDRESS }];
+
+  // VARCHAR(17) storage — regex + blank CHECKs synthesise; max_len
+  // default of 17 fits the xx:xx:xx:xx:xx:xx form.
+  string spare_mac = 3 [
+    (w17.field)     = { type: MAC_ADDRESS, null: true },
+    (w17.db.column) = { db_type: VARCHAR }
+  ];
+}

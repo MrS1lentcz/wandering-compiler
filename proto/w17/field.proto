@@ -118,6 +118,10 @@ enum Type {
                // Also valid on bytes carrier for when the caller holds a []byte.
   IP    = 8;   // IP address (v4/v6); PG → INET, MySQL → VARCHAR(45), SQLite → TEXT
   TSEARCH = 9; // full-text search document; PG → TSVECTOR, MySQL → TEXT + FULLTEXT index (iter-2), SQLite → TEXT + FTS5 (iter-2)
+  MAC_ADDRESS = 60; // IEEE 802 MAC address; PG → MACADDR (native enforces format),
+                    // MySQL/SQLite → VARCHAR(17) + regex CHECK. Author uses
+                    // `db_type: VARCHAR` to force string storage on PG; regex
+                    // CHECK activates automatically in that path.
 
   // Numeric carriers (carrier: int32 / int64 / double — see D2 table)
   NUMBER     = 10;

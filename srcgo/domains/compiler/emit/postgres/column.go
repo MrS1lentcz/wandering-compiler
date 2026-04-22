@@ -133,6 +133,8 @@ func columnType(tableName string, col *irpb.Column) (string, error) {
 			return "JSONB", nil
 		case irpb.SemType_SEM_IP:
 			return "INET", nil
+		case irpb.SemType_SEM_MAC:
+			return "MACADDR", nil
 		case irpb.SemType_SEM_TSEARCH:
 			return "TSVECTOR", nil
 		case irpb.SemType_SEM_ENUM:

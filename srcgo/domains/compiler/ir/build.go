@@ -596,6 +596,15 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			if col.MaxLen <= 0 {
 				col.MaxLen = 2048
 			}
+		case irpb.SemType_SEM_MAC:
+			// 17 = xx:xx:xx:xx:xx:xx / xx-xx-xx-xx-xx-xx form (the
+			// two human-readable MAC shapes). Unused on the default
+			// MACADDR storage path (native type has no sizing knob);
+			// activates VARCHAR(17) when the author opts into
+			// string-backed storage via `db_type: VARCHAR`.
+			if col.MaxLen <= 0 {
+				col.MaxLen = 17
+			}
 		case irpb.SemType_SEM_TEXT:
 			// optional upper bound.
 		default:
@@ -1452,6 +1461,8 @@ func protoTypeToSem(t w17pb.Type) irpb.SemType {
 		return irpb.SemType_SEM_IP
 	case w17pb.Type_TSEARCH:
 		return irpb.SemType_SEM_TSEARCH
+	case w17pb.Type_MAC_ADDRESS:
+		return irpb.SemType_SEM_MAC
 	case w17pb.Type_NUMBER:
 		return irpb.SemType_SEM_NUMBER
 	case w17pb.Type_ID:
@@ -1526,15 +1537,16 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 	case irpb.Carrier_CARRIER_STRING:
 		switch sem {
 		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_TEXT, irpb.SemType_SEM_UUID, irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL, irpb.SemType_SEM_SLUG, irpb.SemType_SEM_DECIMAL,
-			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH, irpb.SemType_SEM_ENUM:
+			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH, irpb.SemType_SEM_ENUM,
+			irpb.SemType_SEM_MAC:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
 			return diag.Atf(desc, "field %q: string carrier requires a semantic type", name).
-				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID, JSONB, INET, TSVECTOR) with different constraints; the compiler won't guess").
-				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH, ENUM")
+				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID, JSONB, INET, MACADDR, TSVECTOR) with different constraints; the compiler won't guess").
+				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, TSEARCH, ENUM")
 		default:
 			return diag.Atf(desc, "field %q: type %s is not valid on a string carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, TSEARCH, ENUM").
+				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, TSEARCH, ENUM").
 				WithFix("pick one of the string-valid types, or change the carrier")
 		}
 	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64:
@@ -1757,6 +1769,16 @@ func defaultRegexFor(sem irpb.SemType) string {
 		return `^[^@\s]+@[^@\s]+\.[^@\s]+$`
 	case irpb.SemType_SEM_URL:
 		return `^https?://.+$`
+	case irpb.SemType_SEM_MAC:
+		// IEEE 802 MAC, accepting colon OR hyphen separators. PG's
+		// native MACADDR also accepts dotted-quad + compact forms —
+		// this regex activates only on string-backed storage paths
+		// (db_type override), where the author has opted into
+		// VARCHAR-style storage and needs the compiler to enforce
+		// something. On the default PG path the MACADDR type
+		// enforces format itself so the regex never fires (see
+		// semTypeStoresAsString excluding SEM_MAC).
+		return `^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$`
 	}
 	return ""
 }
@@ -1779,6 +1801,7 @@ func semTypeStoresAsString(sem irpb.SemType) bool {
 		irpb.SemType_SEM_DECIMAL,
 		irpb.SemType_SEM_JSON,
 		irpb.SemType_SEM_IP,
+		irpb.SemType_SEM_MAC,
 		irpb.SemType_SEM_TSEARCH,
 		irpb.SemType_SEM_ENUM:
 		// SEM_ENUM on string carrier routes to PG CREATE TYPE AS ENUM —
