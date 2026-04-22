@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.decimal_scale_exceeds;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// DECIMAL with scale > precision — rejected at applyDecimalPrecision.
+// Scale counts digits after the decimal point and cannot exceed total
+// digits.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id     = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string amount = 2 [(w17.field) = { type: DECIMAL, precision: 4, scale: 10 }];
+}

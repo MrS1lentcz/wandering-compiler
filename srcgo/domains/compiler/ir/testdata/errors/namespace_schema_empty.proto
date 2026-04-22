@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ir.namespace_schema_empty;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// (w17.db.module) with schema oneof set to empty string — rejected
+// at resolveNamespace. Declaring the oneof variant with no value
+// leaves the module in an ambiguous state.
+option (w17.db.module) = { schema: "" };
+
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

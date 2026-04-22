@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ir.raw_check_name_reserved;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// raw_check name equal to a reserved keyword — rejected at
+// registerRawCheck's validateIdentifier branch.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_checks: [
+      { name: "select", expr: "id > 0" }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

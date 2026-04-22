@@ -2,10 +2,24 @@ package loader_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 )
+
+// TestLoadNonexistentFile — protocompile surfaces a compile error when
+// the requested path doesn't resolve. Load wraps it with the
+// `parse <path>` prefix so callers can tell which import failed.
+func TestLoadNonexistentFile(t *testing.T) {
+	_, err := loader.Load(context.Background(), "does_not_exist.proto", []string{"."})
+	if err == nil {
+		t.Fatal("expected compile error for missing file, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse does_not_exist.proto:") {
+		t.Errorf("error missing parse-prefix: %v", err)
+	}
+}
 
 // TestLoadVocabFixture exercises the public Load API on the same fixture
 // the M1 vocab test uses. It asserts the LoadedFile shape without

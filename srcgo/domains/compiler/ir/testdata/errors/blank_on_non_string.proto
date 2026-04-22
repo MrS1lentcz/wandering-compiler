@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.blank_on_non_string;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// blank set on a non-string carrier — rejected at
+// validateStringNumericOptions. blank relaxes the implicit `col <> ''`
+// CHECK which only applies to strings.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  bool  flag  = 2 [(w17.field) = { blank: true }];
+}

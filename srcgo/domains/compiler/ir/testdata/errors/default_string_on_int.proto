@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.default_string_on_int;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// default_string on an int carrier — rejected at resolveDefault.
+// default_string emits a string literal and can't coerce to INTEGER.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 count = 2 [(w17.field) = { type: NUMBER, default_string: "0" }];
+}

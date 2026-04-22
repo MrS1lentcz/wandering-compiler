@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.range_on_non_numeric;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// gt/gte/lt/lte set on a non-numeric carrier (and non-DECIMAL) —
+// rejected at validateStringNumericOptions. Range CHECK emits a
+// numeric comparison; undefined for non-numeric types.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string title = 2 [(w17.field) = { type: CHAR, max_len: 80, gte: 0, lte: 100 }];
+}

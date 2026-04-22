@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.collection_string_synth_on_map;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// String-only synth option (pattern) on a map carrier — rejected at
+// validateStringNumericOptions. Map carriers can't express per-element
+// CHECKs without subqueries.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  map<string, string> tags = 2 [(w17.field) = { pattern: "^[A-Z]+$" }];
+}

@@ -28,10 +28,25 @@ enum Severity {
 message Ticket {
   option (w17.db.table) = { name: "tickets" };
 
+  // Nested enum inside the message — exercises findEnumInContainer's
+  // recursive walk into Messages().
+  enum Channel {
+    CHANNEL_UNSPECIFIED = 0;
+    EMAIL               = 1;
+    SLACK               = 2;
+    PAGERDUTY           = 3;
+  }
+
   int64    id       = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
   Priority priority = 2;
   int64    severity = 3 [(w17.field) = {
     type: ENUM,
     choices: "d17.enum_int_backed.Severity"
+  }];
+  // Reference to the nested enum by its FQN — `d17.enum_int_backed
+  // .Ticket.Channel`. Exercises recursive walk through Messages().
+  int32    channel  = 4 [(w17.field) = {
+    type: ENUM,
+    choices: "d17.enum_int_backed.Ticket.Channel"
   }];
 }

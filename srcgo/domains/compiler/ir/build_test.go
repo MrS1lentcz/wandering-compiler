@@ -779,6 +779,229 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "DECIMAL with negative scale",
+			fixture: "testdata/errors/decimal_scale_negative.proto",
+			wants: []string{
+				`decimal_scale_negative.proto:`,
+				`DECIMAL scale must be >= 0`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "DECIMAL with scale exceeding precision",
+			fixture: "testdata/errors/decimal_scale_exceeds.proto",
+			wants: []string{
+				`decimal_scale_exceeds.proto:`,
+				`DECIMAL scale (10) exceeds precision (4)`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "precision set on non-DECIMAL type",
+			fixture: "testdata/errors/precision_on_non_decimal.proto",
+			wants: []string{
+				`precision_on_non_decimal.proto:`,
+				`precision/scale only apply to type DECIMAL`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "max_len on non-string carrier",
+			fixture: "testdata/errors/max_len_on_non_string.proto",
+			wants: []string{
+				`max_len_on_non_string.proto:`,
+				`max_len is only valid on string carriers`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "max_len on wrong string sem type",
+			fixture: "testdata/errors/max_len_on_wrong_sem.proto",
+			wants: []string{
+				`max_len_on_wrong_sem.proto:`,
+				`max_len is not valid on type UUID`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "min_len on non-string carrier",
+			fixture: "testdata/errors/min_len_on_non_string.proto",
+			wants: []string{
+				`min_len_on_non_string.proto:`,
+				`min_len is only valid on string carriers`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "blank on non-string carrier",
+			fixture: "testdata/errors/blank_on_non_string.proto",
+			wants: []string{
+				`blank_on_non_string.proto:`,
+				`blank is only valid on string carriers`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "pattern on non-string carrier",
+			fixture: "testdata/errors/pattern_on_non_string.proto",
+			wants: []string{
+				`pattern_on_non_string.proto:`,
+				`pattern is only valid on string carriers`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "range bounds on non-numeric carrier",
+			fixture: "testdata/errors/range_on_non_numeric.proto",
+			wants: []string{
+				`range_on_non_numeric.proto:`,
+				`gt/gte/lt/lte require a numeric carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "string-only synth on map carrier",
+			fixture: "testdata/errors/collection_string_synth_on_map.proto",
+			wants: []string{
+				`collection_string_synth_on_map.proto:`,
+				`min_len / blank / pattern / choices are not supported on MAP carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "index name equals reserved keyword",
+			fixture: "testdata/errors/index_name_reserved.proto",
+			wants: []string{
+				`index_name_reserved.proto:`,
+				`index[0] name`,
+				`reserved`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "raw_index name equals reserved keyword",
+			fixture: "testdata/errors/raw_index_name_reserved.proto",
+			wants: []string{
+				`raw_index_name_reserved.proto:`,
+				`raw_indexes[0] name`,
+				`reserved`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "raw_check name equals reserved keyword",
+			fixture: "testdata/errors/raw_check_name_reserved.proto",
+			wants: []string{
+				`raw_check_name_reserved.proto:`,
+				`raw_checks[0] name`,
+				`reserved`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "namespace schema empty string",
+			fixture: "testdata/errors/namespace_schema_empty.proto",
+			wants: []string{
+				`namespace_schema_empty.proto:`,
+				`(w17.db.module).schema is empty`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_auto UUID_V4 on non-UUID type",
+			fixture: "testdata/errors/autodefault_uuidv4_wrong_type.proto",
+			wants: []string{
+				`autodefault_uuidv4_wrong_type.proto:`,
+				`default_auto: UUID_V4 requires string carrier with type UUID`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_auto EMPTY_JSON_ARRAY on non-JSON",
+			fixture: "testdata/errors/autodefault_empty_json_wrong_type.proto",
+			wants: []string{
+				`autodefault_empty_json_wrong_type.proto:`,
+				`default_auto: EMPTY_JSON_ARRAY requires type: JSON`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_auto TRUE on int carrier",
+			fixture: "testdata/errors/autodefault_true_on_int.proto",
+			wants: []string{
+				`autodefault_true_on_int.proto:`,
+				`default_auto: TRUE requires a bool carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_auto IDENTITY on string carrier",
+			fixture: "testdata/errors/autodefault_identity_on_string.proto",
+			wants: []string{
+				`autodefault_identity_on_string.proto:`,
+				`default_auto: IDENTITY requires int32/int64 with type: ID`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_string on non-string carrier",
+			fixture: "testdata/errors/default_string_on_int.proto",
+			wants: []string{
+				`default_string_on_int.proto:`,
+				`default_string requires a string carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_int on non-integer carrier",
+			fixture: "testdata/errors/default_int_on_string.proto",
+			wants: []string{
+				`default_int_on_string.proto:`,
+				`default_int requires an integer carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "default_double on non-double carrier",
+			fixture: "testdata/errors/default_double_on_string.proto",
+			wants: []string{
+				`default_double_on_string.proto:`,
+				`default_double requires a double carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "raw_index empty name",
+			fixture: "testdata/errors/raw_index_empty_name.proto",
+			wants: []string{
+				`raw_index_empty_name.proto:`,
+				`raw_indexes[0].name is empty`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

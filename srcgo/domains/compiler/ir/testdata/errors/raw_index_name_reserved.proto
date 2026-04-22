@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ir.raw_index_name_reserved;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// raw_index name equal to a reserved keyword — rejected at
+// recordIndexName's validateIdentifier branch (called on the raw path
+// via validateIndexNames).
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_indexes: [
+      { name: "order", body: "USING gin (name)" }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

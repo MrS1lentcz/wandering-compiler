@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.autodefault_identity_on_string;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// default_auto: IDENTITY on a string column — rejected at
+// validateAutoDefault. IDENTITY generates sequence values; only valid
+// on int ID columns.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  string id = 1 [(w17.field) = { type: CHAR, max_len: 64, pk: true, default_auto: IDENTITY }];
+}

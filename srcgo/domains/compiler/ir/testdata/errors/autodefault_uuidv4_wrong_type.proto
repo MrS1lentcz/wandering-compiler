@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.autodefault_uuidv4_wrong_type;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// default_auto: UUID_V4 on a non-UUID sem type — rejected at
+// validateAutoDefault. UUID generators only make sense on UUID columns.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64, default_auto: UUID_V4 }];
+}

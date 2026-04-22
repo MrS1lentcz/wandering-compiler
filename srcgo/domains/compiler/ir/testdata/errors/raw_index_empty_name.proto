@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package ir.raw_index_empty_name;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// raw_indexes[].name empty — rejected at validateRawIndexShape.
+// The compiler can't derive a name from an opaque body.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_indexes: [
+      { body: "USING gin (name)" }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 32 }];
+}

@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.max_len_on_wrong_sem;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// max_len set on a string sem type that doesn't render as VARCHAR
+// (UUID renders as UUID, JSON as JSONB, IP as INET, …). Rejected at
+// applyMaxLenOnString's default branch.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id  = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string uid = 2 [(w17.field) = { type: UUID, max_len: 36 }];
+}

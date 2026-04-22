@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.autodefault_empty_json_wrong_type;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// default_auto: EMPTY_JSON_ARRAY on a non-JSON column — rejected at
+// validateAutoDefault. '[]' literal is only valid on JSONB-shaped
+// columns.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string note = 2 [(w17.field) = { type: CHAR, max_len: 64, default_auto: EMPTY_JSON_ARRAY }];
+}

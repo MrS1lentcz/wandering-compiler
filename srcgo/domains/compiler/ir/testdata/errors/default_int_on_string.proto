@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package ir.default_int_on_string;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// default_int on a string carrier — rejected at resolveDefault.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 32, default_int: 0 }];
+}

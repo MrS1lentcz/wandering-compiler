@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.pattern_on_non_string;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// pattern set on a non-string carrier — rejected at
+// validateStringNumericOptions. Regex CHECK only applies to strings.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 count = 2 [(w17.field) = { type: NUMBER, pattern: "^[0-9]+$" }];
+}
