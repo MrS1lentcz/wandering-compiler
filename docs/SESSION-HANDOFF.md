@@ -415,3 +415,137 @@ here." The next substantive block is **iter-2 M1 alter-diff**.
 - Commit hygiene: one feature = one commit. Push after each.
 - Run `make test-apply` before every ship to catch regressions
   on all 26 fixtures.
+
+---
+
+## 2026-04-23 — Conventions + Coverage Sweep (post iter-1 close-out)
+
+Session ran **two full phases** before alter-diff, at user's explicit
+request (`/clear` context; user statement "bez toho se nehnem dal" —
+without this we don't move on):
+
+### Phase A — conventions-global compliance
+Audit found 4 functions egregiously over the 50-LOC cap in
+`quality.md §Code Structure`. Refactored:
+
+- `ir.buildTable`: 313 → 20 LOC + 9 per-stage helpers
+- `ir.buildColumn`: 440 → 50 LOC + 14 per-stage helpers
+- `pg.columnType`: 141 → 35 LOC + 8 per-carrier helpers
+- `pg.emitAddTable`: 143 → 30 LOC + 6 sub-stage helpers
+
+Remaining 18 functions over 50 LOC are pure dispatch switches or
+cohesive matrix validators — registered in
+[`docs/core-functions.md`](core-functions.md) with invariant +
+rationale (the "special description" clause of quality.md).
+
+Other cleanup: `srcgo/domains/compiler/examples/iteration-1/happy.proto`
+moved to conventional `cmd/cli/testdata/happy.proto`; CLAUDE.md Known
+Issues updated with real deviations (core functions, missing Makefile
+targets, absent `srcgo/lib/` tier).
+
+### Phase B — coverage sweep
+Baseline coverage pre-sweep: 89.0 % cross-package (the single-binary
+numbers in the older handoff are misleading — they reflect only what a
+given test binary executes, not the union). Closed the gap to
+**97.8 %** through:
+
+- 1 new positive fixture (`empty_schema`) + 8 existing fixtures
+  extended (index_methods with BTREE/GIST/SPGIST/NULLS_FIRST,
+  numeric_spectrum with default_double / default_string-on-DECIMAL,
+  multi_unique with UNIQUE+INCLUDE + explicit single-col-unique
+  collision, fks_parent_child with self-FK BLOCK + explicit
+  single-col-index collision, pg_dialect with required_extensions,
+  storage_override with rare db_types, comments with column-rename
+  + non-FK index, lists_and_maps with repeated Message +
+  map<string,Timestamp/Duration>, enum_int_backed with nested enum).
+- **34 new error fixtures** added (26 iter-1 baseline → 60 total),
+  each firing one previously-uncovered validator branch.
+- 3 new unit test files: `emit/postgres/column_dispatch_test.go`
+  (exhaustive per-carrier dispatch), `ir/helpers_test.go` (pure-fn
+  helpers + regexpQuote + validateIdentifier + checkSuffix +
+  describeKind + resolveComment), plus extensions to
+  `writer_test.go` (3 IO-error branches) and `loader_test.go`
+  (nonexistent-file path).
+- `srcgo/cover-all.sh` merge script for accurate cross-package
+  coverage with `-coverpkg` (single `go test ./... -coverpkg=…`
+  reports union but per-package binaries don't see each other).
+
+Remaining ~2.2 % gap documented in
+[`iteration-1-coverage.md §3.3-bis`](iteration-1-coverage.md) as
+three structural exception categories:
+1. `log.Fatalf` paths in `Config.NewConfigFromEnv` + `app.OutputDir`
+   (need subprocess re-invocation; low-ROI).
+2. Protoreflect defensive branches (`diag.At file==nil`,
+   `loader.reparse` round-trip errors — unreachable from real
+   protocompile-loaded descriptors).
+3. Emit-layer `"ir invariant violated"` error returns — the IR
+   validators catch the invalid combos upstream; several covered
+   directly by synthetic-IR unit tests, rest remain as defence-
+   in-depth.
+
+None of these are user-visible bugs.
+
+### Commit log for Phase A + B
+```
+88a0198 docs: iteration-1-coverage close-out — 97.8% + known exceptions
+081091a tests: pgArrayOf error propagation from element columnType
+4ae1d2c tests: NUMERIC needs precision + ENUM on list carrier
+e285e31 tests: oneof + list sem mismatch + path extension edges
+3244c7c tests: fk_target_column_missing + dup-synth skip branches
+e2f85e5 tests: namespace keyword + enum disagreement + helper unit tests
+b4be992 tests: NAMEDATALEN overflow for CHECK + ENUM type names + more
+a1fa6e7 tests: regexpQuote + validateIdentifier edges + emit error paths
+e0e3ae3 tests: 20 more error fixtures + loader/writer unit tests
+f0e861e tests: 10 new error fixtures close remaining validator branches
+d565007 tests: ir/helpers unit tests close pure-func branches
+ee7d191 tests: unit suite for emit/postgres dispatch + sqlite stub + check branches
+0da4ac2 fixtures: extend 7 goldens to close proto coverage gaps + empty-schema case
+46ba6d6 cleanup: examples -> cmd/cli/testdata + CLAUDE.md Known Issues
+4ead790 refactor: split 4 largest core fns + core-functions registry
+```
+
+### Resume point for the next session — **iter-2 M1 alter-diff**
+
+Iter-1 close-out is now *really* done (schema-declaration IR closed,
+conventions compliant, coverage at 97.8%). Next substantive block is
+unchanged from the earlier handoff: **alter-diff**.
+
+**First step when resuming:**
+1. `git log --oneline -15` to refresh context (recent commits are the
+   coverage sweep — iteration-1 is untouched since D23).
+2. Skim `docs/iteration-1-impl.md` Status block once to refresh (no
+   new iter-1 changes since the Phase-B sweep).
+3. Read `docs/iteration-2-backlog.md` — alter-diff is top of Big
+   Blocks; local-schema-validator + DQL are the other iter-2+
+   must-haves.
+4. Open (create) `docs/iteration-2.md` and sketch alter-diff M1 spec.
+   Key anchors already in place:
+   - **D10** (`project_differ_identity.md` memory): alter-diff uses
+     proto field numbers, not names — rename detection is free, no
+     Ent/Atlas heuristics.
+   - **Table identity**: open question per D19's "identity for
+     iter-2 alter-diff" section — `MessageFqn` vs `(mode, ns, name)`
+     tuple. Resolve before coding.
+   - IR now carries everything (namespace, Table.Comment,
+     IndexMethod, per-field desc/nulls/opclass, storage_index,
+     comments, choices, …) — no proto reshaping needed.
+
+### Available background work (still not blocking alter-diff)
+
+- Push 97.8 → 100 % via subprocess-based log.Fatalf tests and
+  synthetic-descriptor tests for protoreflect defensive branches.
+  Tracked as deliberate exceptions; pull forward only if a pilot
+  shows a user-visible gap.
+- More raw-SQL edge fixtures (EXCLUDE constraints, deferrable FKs)
+  — parked per iter-2-backlog.
+- DQL iteration — huge separate milestone, still parked.
+
+### Non-negotiable reminders for next session (unchanged)
+
+- Keep the escape-hatch discipline: new condition / expression
+  surfaces route through `raw_*` until DQL lands
+  (`project_dql_planned.md`).
+- Per-feature D-records in `docs/iteration-2.md`, same format as
+  iter-1 (Decision + Invariants + Escape Hatches + Rationale).
+- Commit hygiene: one feature = one commit. Push after each.
+- `make test-apply` before every ship — 16 fixtures on PG 18.
