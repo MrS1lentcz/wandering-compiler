@@ -190,6 +190,10 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		Location:      sourceLocation(msg.Desc),
 		NamespaceMode: b.namespaceMode,
 		Namespace:     b.namespace,
+		// D22 — resolved comment: explicit (w17.db.table).comment
+		// override wins, else proto message's leading comment, else
+		// empty. Emitter emits COMMENT ON TABLE iff non-empty.
+		Comment: resolveComment(msg.Table.GetComment(), msg.Desc),
 	}
 
 	for _, f := range msg.Fields {
@@ -473,6 +477,13 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		col.StorageIndex = lf.Column.GetIndex()
 		col.GeneratedExpr = lf.Column.GetGeneratedExpr()
 	}
+	// D22 — resolved comment: explicit (w17.db.column).comment
+	// override wins, else proto field's leading comment, else empty.
+	var columnCommentOverride string
+	if lf.Column != nil {
+		columnCommentOverride = lf.Column.GetComment()
+	}
+	col.Comment = resolveComment(columnCommentOverride, desc)
 
 	// The resolved SQL column name (proto name by default, overridden via
 	// (w17.db.column).name) must survive Postgres's NAMEDATALEN cap and
@@ -1282,6 +1293,38 @@ func sourceLocation(d protoreflect.Descriptor) *irpb.SourceLocation {
 		sl.Col = int32(loc.StartColumn + 1)
 	}
 	return sl
+}
+
+// resolveComment implements D22 precedence for SQL-visible comments:
+// the explicit annotation override wins; otherwise the proto
+// descriptor's leading comment is used; otherwise empty (no COMMENT
+// ON statement will emit).
+//
+// Proto leading-comment format from protoreflect: lines preserved
+// with a leading " " (the space after `//` in the source). We strip
+// that per line and trim outer whitespace, preserving intentional
+// inner paragraph breaks. Multi-line comments stay multi-line in
+// pg_description — psql `\d+` renders them verbatim.
+func resolveComment(override string, d protoreflect.Descriptor) string {
+	if override != "" {
+		return override
+	}
+	if d == nil {
+		return ""
+	}
+	file := d.ParentFile()
+	if file == nil {
+		return ""
+	}
+	raw := file.SourceLocations().ByDescriptor(d).LeadingComments
+	if raw == "" {
+		return ""
+	}
+	lines := strings.Split(raw, "\n")
+	for i, line := range lines {
+		lines[i] = strings.TrimPrefix(line, " ")
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func protoKindToCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bool) {

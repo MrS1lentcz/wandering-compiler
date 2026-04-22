@@ -74,6 +74,13 @@ message Table {
   // bare everywhere.
   NamespaceMode namespace_mode = 10;
   string namespace = 11;
+
+  // Resolved SQL-visible comment (D22). Emitter renders as
+  // `COMMENT ON TABLE <qualified> IS '<text>';` when non-empty.
+  // ir.Build resolves precedence: (w17.db.table).comment override
+  // wins; otherwise falls back to the proto message's leading
+  // comment; otherwise empty (no COMMENT statement emitted).
+  string comment = 12;
 }
 
 message RawCheck {
@@ -149,6 +156,13 @@ message Column {
   // validation in ir.Build enforces the incompatible-field set
   // (default / pk / fk) before the expression is carried forward.
   string generated_expr = 38;
+
+  // Resolved SQL-visible comment (D22). Emitter renders as
+  // `COMMENT ON COLUMN <qualified>.<col> IS '<text>';` when
+  // non-empty. Same precedence resolution as Table.comment —
+  // (w17.db.column).comment override wins; otherwise proto field's
+  // leading comment; otherwise empty.
+  string comment = 39;
 
   repeated Check checks = 40;
 }

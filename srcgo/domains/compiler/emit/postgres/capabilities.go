@@ -53,6 +53,9 @@ var pgCatalog = map[string]emit.Requirement{
 	// Schema-qualified identifiers (<schema>.<table>) have been
 	// available on every PG release we support; no minimum version.
 	emit.CapSchemaQualified: {},
+	// COMMENT ON TABLE / COLUMN — SQL:1999 feature, present in every
+	// PG release we support.
+	emit.CapCommentOn: {},
 
 	// Index + constraint features.
 	emit.CapIncludeIndex:       {MinVersion: "11.0"},

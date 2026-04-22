@@ -7,4 +7,8 @@ CREATE TABLE events (
     CONSTRAINT events_kind_blank CHECK (kind <> '')
 );
 
+COMMENT ON TABLE events IS 'Golden: minimal table with no indexes of any flavour — no unique, no
+(w17.db.column).index, no (w17.db.table).indexes, no FK. Exercises the
+"up has no CREATE INDEX / down has no DROP INDEX" branch of emission.';
+
 COMMIT;

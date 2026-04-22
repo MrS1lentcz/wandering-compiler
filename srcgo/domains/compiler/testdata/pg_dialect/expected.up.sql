@@ -12,4 +12,14 @@ CREATE TABLE inventories (
 CREATE INDEX inventories_search_idx_gin ON inventories USING gin (search_idx);
 CREATE INDEX inventories_payload_gin ON inventories USING gin (payload jsonb_path_ops);
 
+COMMENT ON TABLE inventories IS 'Grand-tour fixture: core Types that used to be PG-specific flags
+(JSON, IP, TSEARCH — lifted into field.Type by D13) plus the
+custom_type + required_extensions escape hatch for things that are
+still genuinely PG-only (HSTORE, MACADDR, pgvector, PostGIS).
+
+HSTORE graduates from a curated flag to a map-carrier AUTO dispatch
+in iter-1.6; until then it lives through custom_type. Our test-apply
+harness installs hstore per DB so the fixture applies on stock
+postgres:18-alpine.';
+
 COMMIT;

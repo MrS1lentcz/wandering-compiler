@@ -1,0 +1,45 @@
+syntax = "proto3";
+
+package d22.comments;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22 fixture — COMMENT ON TABLE / COLUMN emitted from:
+//   (a) proto leading comments (auto),
+//   (b) (w17.db.table).comment / (w17.db.column).comment override,
+//   (c) mix: field with annotation override while sibling pulls
+//       its comment from the proto leading comment.
+// Also exercises apostrophe escaping.
+
+// Published article visible to subscribers.
+// Rows are immutable once published — use archive_at for soft delete.
+message Article {
+  option (w17.db.table) = { name: "articles" };
+
+  // Primary key, auto-incrementing.
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Proto-side developer note; DB-facing comment overrides.
+  string title = 2 [
+    (w17.field)     = { type: CHAR, max_len: 200 },
+    (w17.db.column) = { comment: "Visible article title; shouldn't exceed 200 characters." }
+  ];
+
+  // Author's byline, e.g. "Jane's commentary".
+  string byline = 3 [(w17.field) = { type: CHAR, max_len: 100 }];
+
+  int64 view_count = 4 [(w17.field) = { type: COUNTER }];
+}
+
+// Full override: the proto leading comment is developer-flavoured,
+// but (w17.db.table).comment ships the tight DB-facing version.
+message Subscriber {
+  option (w17.db.table) = {
+    name: "subscribers",
+    comment: "Email recipients for published articles."
+  };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string email = 2 [(w17.field) = { type: EMAIL, unique: true }];
+}

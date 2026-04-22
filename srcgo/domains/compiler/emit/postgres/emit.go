@@ -136,6 +136,18 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		upB.WriteString(strings.Join(idxStmts, "\n"))
 	}
 
+	// D22 — COMMENT ON TABLE / COLUMN for every element with a
+	// resolved comment. Emitted after CREATE TABLE + indexes so the
+	// pg_class / pg_attribute rows exist. Deterministic order: table
+	// first, then columns in declaration order. Down: no explicit
+	// reset needed — DROP TABLE removes entries in pg_description
+	// transitively.
+	commentStmts := collectCommentStmts(t, qualTable)
+	if len(commentStmts) > 0 {
+		upB.WriteString("\n\n")
+		upB.WriteString(strings.Join(commentStmts, "\n"))
+	}
+
 	// Down: drop indexes (reverse), then drop table, then drop ENUM types
 	// (reverse declaration order). Indexes live inside / alongside the
 	// table so they go first; the ENUM types are standalone pg_type
@@ -194,6 +206,25 @@ func qualifiedIdentifier(t *irpb.Table, bare string) string {
 		return t.GetNamespace() + "." + bare
 	}
 	return bare
+}
+
+// collectCommentStmts renders COMMENT ON TABLE + COMMENT ON COLUMN
+// statements for every resolved non-empty comment on the table.
+// Table first, then columns in IR declaration order. Qualified names
+// pick up the schema namespace; column comments key off the column
+// SQL name (respecting (w17.db.column).name overrides). Apostrophes
+// in the comment body are SQL-escaped by doubling (sqlStringLiteral).
+func collectCommentStmts(t *irpb.Table, qualTable string) []string {
+	var out []string
+	if c := t.GetComment(); c != "" {
+		out = append(out, fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qualTable, sqlStringLiteral(c)))
+	}
+	for _, col := range t.GetColumns() {
+		if c := col.GetComment(); c != "" {
+			out = append(out, fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", qualTable, col.GetName(), sqlStringLiteral(c)))
+		}
+	}
+	return out
 }
 
 // pgEnumType captures the derived CREATE TYPE side-data for a single

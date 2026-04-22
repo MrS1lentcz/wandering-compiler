@@ -6,4 +6,11 @@ CREATE TABLE attachments (
     preview BYTEA NULL
 );
 
+COMMENT ON TABLE attachments IS 'Grand-tour fixture: bytes carrier → BYTEA (PG). Exercises both nullable
+and NOT NULL bytes columns and the bare-annotation path (bytes has no
+SemType refinement, so (w17.field) is optional the same way it is on
+bool carriers).';
+COMMENT ON COLUMN attachments.signature IS 'Bare bytes column — no (w17.field) needed. NOT NULL by default.';
+COMMENT ON COLUMN attachments.preview IS 'Nullable bytes column via (w17.field).null.';
+
 COMMIT;

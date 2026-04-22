@@ -19,4 +19,42 @@ CREATE TABLE containers (
     timeouts INTERVAL[] NOT NULL
 );
 
+COMMENT ON TABLE containers IS 'Grand-tour fixture for iter-1.6: CARRIER_MAP + CARRIER_LIST + AUTO +
+element typing on repeated.
+
+AUTO dispatch (PG):
+  map<string, string>       → HSTORE (requires hstore extension)
+  map<string, other>        → JSONB
+  map<string, Message>      → JSONB
+  repeated <scalar>         → <scalar PG type>[]
+  repeated <Message>        → JSONB (PG row[] is too fiddly cross-dialect)
+  repeated <Timestamp/Duration> → native array (TIMESTAMPTZ[] / INTERVAL[])
+
+Element typing on repeated: (w17.field).type refines the element''s
+sem-type (e.g. `repeated string + type: URL` = array of URLs →
+VARCHAR(2048)[]). max_len from field.Type preset carries into the
+element''s VARCHAR(N) sizing.';
+COMMENT ON COLUMN containers.tags IS '--- Maps (AUTO dispatch) ---
+map<string, string> → HSTORE on PG.';
+COMMENT ON COLUMN containers.counters IS 'map<string, int64> → JSONB on PG (HSTORE is string-string only).';
+COMMENT ON COLUMN containers.labels IS 'Explicit AUTO is equivalent to leaving type unset — written here as
+documentation.';
+COMMENT ON COLUMN containers.blobs IS 'map<string, bytes> → JSONB (HSTORE is string-string only; non-string
+values route through JSONB).';
+COMMENT ON COLUMN containers.notes IS '--- Lists (AUTO + explicit element sem) ---
+Bare repeated string → TEXT[] (element''s default TEXT).';
+COMMENT ON COLUMN containers.homepages IS 'Element-typed: URL preset on the element → VARCHAR(2048)[].';
+COMMENT ON COLUMN containers.short_tags IS 'Element-typed with author-supplied max_len: CHAR + max_len on
+element → VARCHAR(64)[].';
+COMMENT ON COLUMN containers.ids IS 'Integer array → BIGINT[] (element NUMBER default on int64).';
+COMMENT ON COLUMN containers.related_ids IS 'Int32 array with explicit ID element type — still INTEGER[] because
+ID maps to INTEGER on int32 (same as NUMBER).';
+COMMENT ON COLUMN containers.events IS 'Timestamp array → TIMESTAMPTZ[] (element DATETIME default).';
+COMMENT ON COLUMN containers.flags IS 'Boolean array → BOOLEAN[].';
+COMMENT ON COLUMN containers.scores IS 'Double array (zero-config) → DOUBLE PRECISION[].';
+COMMENT ON COLUMN containers.prices IS 'Double array with preset element sem (MONEY) → NUMERIC(19, 4)[].
+Proves fixed-shape numeric presets carry into array-element storage.';
+COMMENT ON COLUMN containers.signatures IS 'Bytes array → BYTEA[].';
+COMMENT ON COLUMN containers.timeouts IS 'Duration array → INTERVAL[].';
+
 COMMIT;

@@ -15,4 +15,10 @@ CREATE TABLE measurements (
     CONSTRAINT measurements_exact_amount_range CHECK (exact_amount BETWEEN 0 AND 1000000000)
 );
 
+COMMENT ON TABLE measurements IS 'Grand-tour fixture: every numeric (carrier, type) cell of D2 plus
+explicit range CHECKs and DECIMAL with precision/scale. DECIMAL +
+range bounds (gte/lte) is exercised on `exact_amount` — the IR
+builder''s `numericForRange` check accepts CARRIER_STRING +
+SEM_DECIMAL per iteration-1.md D2.';
+
 COMMIT;

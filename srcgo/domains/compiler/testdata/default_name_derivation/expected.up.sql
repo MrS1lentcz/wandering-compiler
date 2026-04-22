@@ -28,4 +28,7 @@ CREATE TABLE ye_olde_profiles (
     CONSTRAINT ye_olde_profiles_name_blank CHECK (name <> '')
 );
 
+COMMENT ON TABLE ye_olde_profiles IS 'Explicit override wins — derived would be "legacy_profile", author
+keeps the historical table name.';
+
 COMMIT;

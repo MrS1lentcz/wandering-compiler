@@ -19,4 +19,15 @@ CREATE TABLE products (
 
 CREATE UNIQUE INDEX products_slug_uidx ON products (slug);
 
+COMMENT ON TABLE products IS 'Golden: single-table schema focused on types the happy fixture barely
+covers — SLUG (regex), URL (regex), DATE with CURRENT_DATE default,
+PERCENTAGE with author-supplied bounds, COUNTER.
+
+UUID pk and DECIMAL are deliberately NOT used here: both are
+string-carrier in IR (so the blank-check synth fires) but render as
+non-string SQL types (UUID / NUMERIC), so the emitted `CHECK (col <>
+'''')` would fail at apply time. That''s a pipeline gap — see
+docs/iteration-1-impl.md "Known gaps" — not something the golden
+should canonise.';
+
 COMMIT;

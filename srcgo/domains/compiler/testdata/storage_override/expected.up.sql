@@ -17,4 +17,27 @@ CREATE TABLE articles (
 
 CREATE UNIQUE INDEX articles_email_uidx ON articles (email);
 
+COMMENT ON TABLE articles IS 'Grand-tour fixture for D14 — field.Type (data semantic) and
+(w17.db.column).db_type (storage) as orthogonal axes. Exercises:
+
+  - CHAR validation + TEXT storage: bio keeps char_length CHECK <= 6000
+    (storage isn''t VARCHAR-backed so the length CHECK is not subsumed)
+    but renders as TEXT.
+  - EMAIL validation + CITEXT storage: email keeps the format regex
+    + blank CHECK, renders as CITEXT so UNIQUE INDEX is case-
+    insensitive without extra WHERE clauses.
+  - JSON vs JSONB explicit: text_config forces JSON (whitespace-
+    preserving, not indexed) instead of the preset''s JSONB default.
+  - int64 NUMBER default + BIGINT storage override (explicit even
+    though it matches the preset — regression guard that unchanged
+    semantics still flow through the db_type path).
+  - Zero-config columns exercise D14 per-carrier defaults: `notes`
+    is bare `string` → TEXT, `visits` is bare `int32` → INTEGER,
+    `archived` is bare `bool` → BOOLEAN.';
+COMMENT ON COLUMN articles.notes IS 'Zero-config — no (w17.field), default TEXT / INTEGER / BOOLEAN.';
+COMMENT ON COLUMN articles.bio IS 'Data semantic + storage override: CHAR(6000) char_length CHECK, TEXT storage.';
+COMMENT ON COLUMN articles.email IS 'EMAIL validation (regex + blank), CITEXT storage.';
+COMMENT ON COLUMN articles.text_config IS 'JSON semantic, text-stored JSON (not JSONB).';
+COMMENT ON COLUMN articles.counter IS 'Redundant-but-explicit: BIGINT via db_type even though default is BIGINT.';
+
 COMMIT;

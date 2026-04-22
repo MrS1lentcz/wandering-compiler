@@ -8,4 +8,9 @@ CREATE TABLE events (
     timeout INTERVAL NOT NULL
 );
 
+COMMENT ON TABLE events IS 'Grand-tour fixture: every temporal (carrier, type) cell of D2 plus
+all three shapes of default_auto: NOW (DATE → CURRENT_DATE, TIME →
+CURRENT_TIME, DATETIME → NOW()). google.protobuf.Duration maps to
+INTERVAL with no default_auto support in iter-1 — column stays bare.';
+
 COMMIT;

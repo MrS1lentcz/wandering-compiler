@@ -9,9 +9,25 @@ CREATE TABLE user_profiles (
 
 CREATE UNIQUE INDEX user_profiles_email_uidx ON user_profiles (email);
 
+COMMENT ON TABLE user_profiles IS 'Grand-tour fixture: shared-PK one-to-one pattern — the only Django
+multi-table-inheritance shape that survives the "no schema inheritance"
+rule (gRPC has no inheritance; table inheritance beyond 1:1 is rarely
+useful). Profile extensions, role-specific data tables, sparse
+subtyping — all resolve to "child table where PK is also FK to parent".
+
+Expressed today with existing vocabulary — no new ir nodes needed.
+The child''s `profile_id` field carries pk: true AND an fk — single-col
+PK that is also a single-col FK, one shared identity value across
+tables. FK target check recognises parents.id as single-col-unique;
+topo sort emits parent first; ON DELETE CASCADE is inferred
+(default for NOT NULL FKs) so deleting the parent automatically
+collapses the extension row.';
+
 CREATE TABLE admin_extras (
     profile_id BIGINT NOT NULL PRIMARY KEY REFERENCES user_profiles(id) ON DELETE CASCADE,
     permissions JSONB NOT NULL
 );
+
+COMMENT ON COLUMN admin_extras.profile_id IS 'Shared-PK: single-col PK that is ALSO an FK to the parent.';
 
 COMMIT;

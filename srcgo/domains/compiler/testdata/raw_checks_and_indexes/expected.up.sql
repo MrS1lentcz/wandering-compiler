@@ -19,4 +19,21 @@ CREATE TABLE bookings (
 CREATE UNIQUE INDEX bookings_email_active_uidx ON bookings (email) WHERE deleted_at IS NULL;
 CREATE INDEX bookings_lower_customer_idx ON bookings (lower(customer_name));
 
+COMMENT ON TABLE bookings IS 'Grand-tour fixture for the escape-hatch vocabulary:
+
+  - raw_checks:  cross-column CHECK the per-field Range / Regex /
+                 Choices can''t spell (compare two columns, call a
+                 function on one).
+  - raw_indexes: shapes the structured `indexes:` can''t spell —
+                 partial index via WHERE clause, expression index
+                 via lower(), multi-col with WHERE (soft-delete
+                 pattern).
+
+Everything in raw_* is opaque SQL: wc validates the identifier names
+(length / reserved / collision with derived or explicit names) but
+the body is pass-through. Cross-dialect portability is the author''s
+problem — these live under `(w17.db.table)`, same vocabulary for all
+dialects, but dialect-specific syntax inside the bodies will only
+apply on that dialect. Iter-1 is Postgres-only anyway.';
+
 COMMIT;

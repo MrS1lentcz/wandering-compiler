@@ -114,6 +114,13 @@ const (
 	// any emitter that accepts an identifier accepts `<prefix>_<name>`.
 	CapSchemaQualified = "SCHEMA_QUALIFIED"
 
+	// COMMENT ON TABLE / COLUMN IS '...' — SQL:1999 feature, universal
+	// on PG, supported by MySQL (as inline `COMMENT '...'` syntax on
+	// column and table definitions — different surface, same effect),
+	// not available on stock SQLite (comments live in sqlite_master
+	// only for the CREATE statement text).
+	CapCommentOn = "COMMENT_ON"
+
 	// Indexes + constraints.
 	CapIncludeIndex       = "INCLUDE_INDEX"        // covering index
 	CapPartialIndex       = "PARTIAL_INDEX"        // CREATE INDEX … WHERE

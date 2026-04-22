@@ -97,6 +97,15 @@ message Table {
   //    expression indexes (lower(col)), operator classes (gin_trgm_ops)
   repeated RawCheck raw_checks = 3;
   repeated RawIndex raw_indexes = 4;
+
+  // SQL-visible table comment (D22). Emits
+  // `COMMENT ON TABLE <table> IS '<text>';`. Defaults to the proto
+  // message's leading comment when unset; authoring this field
+  // overrides the default (e.g. when the proto comment is
+  // developer-oriented but the DB-facing documentation should be
+  // different). Empty value = no COMMENT emitted, even if a leading
+  // comment exists.
+  string comment = 5;
 }
 
 message Index {
@@ -203,6 +212,13 @@ message Column {
   // and `fk:` on the same column (generated columns can't be FK
   // sources in PG). `unique:` and `null:` remain allowed. See D18.
   string generated_expr = 6;
+
+  // SQL-visible column comment (D22). Emits
+  // `COMMENT ON COLUMN <table>.<col> IS '<text>';`. Same
+  // precedence as (w17.db.table).comment — defaults to the proto
+  // field's leading comment, override here if the DB-facing text
+  // should differ from the developer comment.
+  string comment = 7;
 }
 
 // DbType — enumerated SQL column types, covering the common cross-dialect

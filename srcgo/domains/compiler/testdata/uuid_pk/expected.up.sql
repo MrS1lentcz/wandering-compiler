@@ -13,4 +13,11 @@ CREATE TABLE sessions (
     CONSTRAINT sessions_note_blank CHECK (note <> '')
 );
 
+COMMENT ON TABLE sessions IS 'Grand-tour fixture: UUID PK + UUID_V7 auto; UUID_V4 auto on a second
+column; CHAR with max_len (VARCHAR); EMAIL (type-implied regex);
+TEXT with explicit min_len + max_len (length CHECK with both bounds).
+Exercises the pre-M10 attachChecks fix: UUID columns must not receive
+a `CHECK (col <> '''')` synth (fails at apply on PG''s UUID type) and
+the redundant UUID regex is no longer emitted.';
+
 COMMIT;
