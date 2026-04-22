@@ -42,6 +42,14 @@ message Container {
   // values route through JSONB).
   map<string, bytes> blobs = 12;
 
+  // map<string, Timestamp> — Timestamp values are treated as scalars;
+  // exercises populateElement's Timestamp/Duration message-as-scalar
+  // fallthrough branch.
+  map<string, google.protobuf.Timestamp> last_seen = 18;
+
+  // map<string, Duration> — same fallthrough branch for Duration.
+  map<string, google.protobuf.Duration> intervals = 19;
+
   // --- Lists (AUTO + explicit element sem) ---
   // Bare repeated string → TEXT[] (element's default TEXT).
   repeated string notes = 5;

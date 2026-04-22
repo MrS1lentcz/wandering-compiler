@@ -6,6 +6,8 @@ CREATE TABLE containers (
     counters JSONB NOT NULL,
     labels HSTORE NOT NULL,
     blobs JSONB NOT NULL,
+    last_seen JSONB NOT NULL,
+    intervals JSONB NOT NULL,
     notes TEXT[] NOT NULL,
     homepages VARCHAR(2048)[] NOT NULL,
     short_tags VARCHAR(64)[] NOT NULL,
@@ -42,6 +44,10 @@ COMMENT ON COLUMN containers.labels IS 'Explicit AUTO is equivalent to leaving t
 documentation.';
 COMMENT ON COLUMN containers.blobs IS 'map<string, bytes> → JSONB (HSTORE is string-string only; non-string
 values route through JSONB).';
+COMMENT ON COLUMN containers.last_seen IS 'map<string, Timestamp> — Timestamp values are treated as scalars;
+exercises populateElement''s Timestamp/Duration message-as-scalar
+fallthrough branch.';
+COMMENT ON COLUMN containers.intervals IS 'map<string, Duration> — same fallthrough branch for Duration.';
 COMMENT ON COLUMN containers.notes IS '--- Lists (AUTO + explicit element sem) ---
 Bare repeated string → TEXT[] (element''s default TEXT).';
 COMMENT ON COLUMN containers.homepages IS 'Element-typed: URL preset on the element → VARCHAR(2048)[].';

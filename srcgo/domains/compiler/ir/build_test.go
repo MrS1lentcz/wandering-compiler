@@ -1053,6 +1053,28 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "derived CHECK name overflow",
+			fixture: "testdata/errors/check_name_overflow.proto",
+			wants: []string{
+				`check_name_overflow.proto:`,
+				`check[`,
+				`63 bytes`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "derived ENUM type name overflow",
+			fixture: "testdata/errors/enum_type_name_overflow.proto",
+			wants: []string{
+				`enum_type_name_overflow.proto:`,
+				`ENUM type name`,
+				`63 bytes`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

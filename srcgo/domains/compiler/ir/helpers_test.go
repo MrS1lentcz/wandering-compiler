@@ -1,12 +1,33 @@
 package ir
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	w17pb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17"
 )
+
+// loadForDescribeTest loads the lists_and_maps fixture from the compiler
+// testdata directory so describeKind / populateElement unit tests can
+// grab real FieldDescriptors for every carrier shape. Relative path
+// assumes this test file lives at srcgo/domains/compiler/ir/.
+func loadForDescribeTest(t *testing.T) (*loader.LoadedFile, error) {
+	t.Helper()
+	return loader.Load(context.Background(), "input.proto",
+		[]string{"../testdata/lists_and_maps", "../../../../proto"})
+}
+
+// protoreflectName is a local alias — the field-descriptor API takes a
+// protoreflect.Name, which is just a string with a different compile-time
+// type. Saves ugly conversions in the table-driven tests.
+func protoreflectName(s string) protoreflect.Name {
+	return protoreflect.Name(s)
+}
 
 // TestParseFKRef covers every branch of the parser: happy two-segment
 // form + each malformed shape (zero dots, too many dots, empty segments)
@@ -210,6 +231,44 @@ func TestValidateIdentifier(t *testing.T) {
 			}
 			if !strings.Contains(got, c.wantWhy) {
 				t.Errorf("validateIdentifier(%q) = %q, want containing %q", c.in, got, c.wantWhy)
+			}
+		})
+	}
+}
+
+// TestDescribeKind exercises the three non-scalar branches of
+// describeKind (IsList, IsMap, MessageKind) that are unreachable from
+// Build (protoKindToCarrier accepts list/map before describeKind runs).
+// We pass synthetic FieldDescriptors pulled from the loader.
+func TestDescribeKind(t *testing.T) {
+	// Load the lists_and_maps fixture to get descriptors of every
+	// carrier shape.
+	lf, err := loadForDescribeTest(t)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	container := lf.Messages[0].Desc // Container
+	fields := container.Fields()
+
+	cases := []struct {
+		field string
+		want  string
+	}{
+		// map<string, string> tags = 2 → describeKind's IsMap branch.
+		{"tags", "map"},
+		// repeated string notes = 5 → IsList branch, element Kind = string.
+		{"notes", "repeated string"},
+		// int64 id = 1 → scalar fallthrough, Kind = int64.
+		{"id", "int64"},
+	}
+	for _, c := range cases {
+		t.Run(c.field, func(t *testing.T) {
+			fd := fields.ByName(protoreflectName(c.field))
+			if fd == nil {
+				t.Fatalf("field %q not found", c.field)
+			}
+			if got := describeKind(fd); got != c.want {
+				t.Errorf("describeKind(%q) = %q, want %q", c.field, got, c.want)
 			}
 		})
 	}

@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ir.check_name_overflow;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Table + column name combination where the derived CHECK name
+// `<table>_<col>_<variant>` overflows NAMEDATALEN (63 bytes) even
+// though both parts individually fit. Rejected at validateCheckNames.
+message X {
+  option (w17.db.table) = { name: "a_table_name_with_exactly_thirty_two_chars" }; // 42 bytes
+
+  int64  id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // 20-char name + 42-char table + `_blank` suffix → 69 bytes total.
+  string some_long_text_col = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package ir.enum_type_name_overflow;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// String-backed SEM_ENUM whose derived PG type name `<table>_<col>`
+// overflows NAMEDATALEN (63 bytes). Rejected at validateEnumTypeNames.
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  PENDING            = 1;
+  ACTIVE             = 2;
+}
+
+message X {
+  option (w17.db.table) = { name: "a_very_long_table_that_plus_col_name_will_overflow_nametatalen" }; // 62 bytes
+
+  int64  id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // 62 + "_" + "state" = 68 bytes → overflow.
+  string state = 2 [(w17.field) = {
+    type: ENUM,
+    choices: "ir.enum_type_name_overflow.Status"
+  }];
+}
