@@ -336,28 +336,82 @@ make schemagen
       map; partial/expression indexes park to DQL iteration via
       `raw_indexes`; HASH/GIN/GIST/BRIN/SPGIST × options
       invariants enforced IR-time; shipped 2026-04-22)
-- [ ] **← YOU ARE HERE.** Iter-1 schema-gap close-out done. Next:
-      open `iteration-2.md` with alter-diff as M1, against an IR
-      that's closed on every schema-declaration axis iter-1 will
-      ever carry.
-- [ ] D22 (optional bundle — COMMENT ON auto-from-docstring +
-      override annotation; path-family presets IMAGE_PATH /
-      POSIX_PATH / FILE_PATH with `extensions` list + `*` wildcard;
-      MAC_ADDRESS with CHECK when storage doesn't enforce;
-      SMALL_INTEGER preset).
-- [ ] **D23 (right after D22, before alter-diff) — indexes +
-      constraints dynamic redesign.** Originally scoped as D20 "index
-      sort order + NULLS FIRST/LAST" but user flagged 2026-04-22 that
-      the right move is a broader overhaul matching Django's shape
-      (structured `GinIndex` / `PartialIndex` / `ExpressionIndex`
-      messages graduating from `raw_indexes`, column-level sort +
-      nulls inside indexes, structured CHECK variants beyond the
-      current raw_checks escape hatch). NULLS FIRST/LAST lands inside
-      this redesign, not as a standalone feature. Must happen BEFORE
-      alter-diff so the differ works against the final index/CHECK IR
-      shape, not an intermediate one that will be rewritten.
-- [ ] Open `iteration-2.md` with alter-diff as M1 (after D23).
+- [x] Coverage sweep + E2E framework scaffold (shipped 2026-04-22,
+      commit `f2e81c3`): unit tests pushed core from 76.9% → 88.5%
+      cross-package; `docs/testing-e2e.md` documents the iter-2+
+      E2E scope (target-version matrix, extensions, permissions,
+      alter-diff data survival, multi-dialect) + harness sketch +
+      deliberate deferral of full harness build until deploy
+      client + alter-diff land.
 
-After D17–D20 land, schema declaration is exhaustively closed and
-iter-2 alter-diff can begin against the most complete IR iter-1 will
-ever have.
+---
+
+## Resume point — 2026-04-22 end-of-session
+
+**Iter-1 schema-gap close-out is DONE.** Every axis iter-1 will
+ever carry is shipped; the IR is closed against schema-declaration
+churn. Alter-diff (iter-2 M1) can start against the most complete
+IR iter-1 will ever produce, with no mid-iteration reshapes
+blocking the differ work.
+
+Commit log for the close-out sweep:
+```
+f2e81c3 tests: coverage sweep — 76.9% → 88.5% core + E2E scaffold doc
+232c7ea D23: indexes structured — method + per-field sort/nulls/opclass + storage
+73d7a61 D22 docs: consolidated D-record + Status + handoff + coverage
+c36eb7d D22d: path-family presets — POSIX_PATH / FILE_PATH / IMAGE_PATH
+4b2bea2 D22c: SMALL_INTEGER preset — int32 → SMALLINT
+c780db7 D22b: MAC_ADDRESS preset — MACADDR native + VARCHAR override
+61784e7 D22a: COMMENT ON TABLE / COLUMN — auto from proto doc-strings + override
+a21bc5b ir: pin camelToSnake acronym behaviour with unit test
+63443fd D21: default table name = snake_case(message.local_name)
+42e8aa3 D19: module namespace — schema XOR prefix via (w17.db.module)
+6b3e404 D18: GENERATED ALWAYS AS (expr) STORED on (w17.db.column).generated_expr
+04cf565 D17: ENUM type — carrier-dispatched storage
+```
+
+### Where to resume next session
+
+User's choice at session end was "clear context and continue from
+here." The next substantive block is **iter-2 M1 alter-diff**.
+
+**First step when resuming:**
+1. `git log --oneline -15` to refresh commit history.
+2. Read `docs/iteration-1-impl.md` trailing Status block (iter-1
+   is closed — nothing more to ship there).
+3. Read `docs/iteration-2-backlog.md` — alter-diff is the top of
+   Big Blocks; the local-schema-validator + DQL items are the
+   other two mustshave items recorded from this session.
+4. Open `docs/iteration-2.md` (doesn't exist yet — create it)
+   and sketch the alter-diff M1 spec. Key anchors already in
+   place:
+     - **D10** (`project_differ_identity.md` memory): alter-diff
+       uses proto field numbers, not names — rename detection
+       is free, no Ent/Atlas heuristics.
+     - **Table identity**: open question per D19's "identity for
+       iter-2 alter-diff" section — `MessageFqn` vs `(mode, ns,
+       name)` tuple. Resolve before coding.
+     - IR already carries everything (namespace, Table.Comment,
+       IndexMethod, …) — no more proto reshaping for alter-diff.
+
+### Available background work (not blocking alter-diff)
+
+- **Coverage to 95%+**: remaining gaps are mostly defensive
+  branches + `main.go` CLI entry. Doable but diminishing returns.
+- **More raw-SQL edge fixtures**: EXCLUDE constraints, deferrable
+  FKs — these are parked per iter-2-backlog, can be pulled
+  forward if a pilot surfaces need.
+- **DQL iteration** (Doctrine-like ORM) — parked per user; huge
+  block, separate milestone.
+
+### Non-negotiable reminders for next session
+
+- Keep the escape-hatch discipline: new condition / expression
+  surfaces route through `raw_*`, not structured, until DQL
+  lands. (See `project_dql_planned.md` memory.)
+- Keep writing per-feature D-records in `docs/iteration-2.md`
+  same format as iter-1 (Decision + Invariants + Escape Hatches
+  + Rationale).
+- Commit hygiene: one feature = one commit. Push after each.
+- Run `make test-apply` before every ship to catch regressions
+  on all 26 fixtures.
