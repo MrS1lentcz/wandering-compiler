@@ -164,6 +164,28 @@ func TestElementDefaultSemFor(t *testing.T) {
 	}
 }
 
+// TestPgArrayOfElementError — pgArrayOf propagates columnType errors
+// from the synthetic element through its own wrap. Construct a LIST
+// column whose element would fail columnType (DECIMAL with no
+// precision) and assert the wrapped error.
+func TestPgArrayOfElementError(t *testing.T) {
+	col := &irpb.Column{
+		Name:           "amounts",
+		ProtoName:      "amounts",
+		Carrier:        irpb.Carrier_CARRIER_LIST,
+		ElementCarrier: irpb.Carrier_CARRIER_STRING,
+		Type:           irpb.SemType_SEM_DECIMAL,
+		// No Precision — element columnType errors out.
+	}
+	_, err := pgArrayOf(col)
+	if err == nil {
+		t.Fatal("expected err when element has no precision, got nil")
+	}
+	if !strings.Contains(err.Error(), "pgArrayOf: element:") {
+		t.Errorf("err %q missing pgArrayOf wrap", err.Error())
+	}
+}
+
 // TestPgEnumTypeName pins the <table>_<col> convention for string-backed
 // SEM_ENUM types. IR validates the resulting identifier against
 // NAMEDATALEN at build time; the emitter trusts that validation.
