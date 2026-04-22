@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ir.index_empty_fields;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Index with fields: [] — zero entries is not a valid index. Distinct
+// from "index entry with empty name" (that's a non-empty list where
+// one element's name is ""). IR rejects at validateIndexFieldRefs.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    indexes: [
+      { name: "xs_empty", fields: [] }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

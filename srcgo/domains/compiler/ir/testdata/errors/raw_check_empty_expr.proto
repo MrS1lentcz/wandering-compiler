@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package ir.raw_check_empty_expr;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// raw_checks entry with empty expr — an empty body would emit
+// CHECK () which PG rejects. IR catches at registerRawCheck.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    raw_checks: [
+      { name: "xs_always_true", expr: "" }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

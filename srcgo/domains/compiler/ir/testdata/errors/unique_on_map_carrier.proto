@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.unique_on_map_carrier;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// unique: true on a map field — IR rejects at validateCollectionPkUnique.
+// Whole-map equality isn't what authors want; use raw_indexes to spell
+// a GIN on the element instead.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  map<string, string> tags = 2 [(w17.field) = { unique: true }];
+}

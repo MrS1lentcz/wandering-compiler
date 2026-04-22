@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ir.deletion_rule_without_fk;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// deletion_rule set on a column that has no fk — the rule has no
+// referenced parent to act on. IR rejects at
+// validateDeletionRuleWithoutFk.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 mate = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { deletion_rule: BLOCK }
+  ];
+}

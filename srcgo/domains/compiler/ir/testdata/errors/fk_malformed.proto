@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ir.fk_malformed;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// fk: must be "<table>.<column>" — a single-segment value like "id"
+// is rejected at parseFKRef. Distinct from fk_target_missing which
+// exercises the target resolution path.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id     = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 mate_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "malformed_single_segment" }
+  ];
+}

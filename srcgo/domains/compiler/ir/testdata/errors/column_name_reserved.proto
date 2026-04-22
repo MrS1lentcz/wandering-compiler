@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ir.column_name_reserved;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// (w17.db.column).name override to a PG reserved keyword. Distinct
+// from default_name_reserved (which is about the derived column name
+// equalling a proto field name that happens to be reserved) —
+// this exercises the validateColumnName rejection on an explicit
+// override.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // "order" is a reserved PG keyword; renaming the SQL column to it
+  // via (w17.db.column).name must be rejected.
+  string note = 2 [
+    (w17.field)     = { type: CHAR, max_len: 64 },
+    (w17.db.column) = { name: "order" }
+  ];
+}

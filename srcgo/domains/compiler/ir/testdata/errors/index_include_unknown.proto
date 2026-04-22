@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package ir.index_include_unknown;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Index.include references a proto field that isn't declared on this
+// message. Same validation family as index_field_unknown but on the
+// INCLUDE branch.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    indexes: [
+      { name: "xs_cover",
+        fields: [{ name: "name" }],
+        include: ["ghost_field"] }
+    ]
+  };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name  = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

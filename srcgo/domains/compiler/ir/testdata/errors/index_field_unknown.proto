@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ir.index_field_unknown;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Index.fields references a proto field that isn't declared on this
+// message. IR rejects at validateIndexFieldRefs with a file:line:col
+// diagnostic anchored to the message declaration.
+message X {
+  option (w17.db.table) = {
+    name: "xs",
+    indexes: [
+      { name: "xs_ghost", fields: [{ name: "ghost_field" }] }
+    ]
+  };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name  = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

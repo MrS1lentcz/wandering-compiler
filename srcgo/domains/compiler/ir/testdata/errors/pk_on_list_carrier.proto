@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.pk_on_list_carrier;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// pk: true on a repeated field — IR rejects at
+// validateCollectionPkUnique because whole-array equality semantics
+// are almost never the intent.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  repeated int64 ids = 1 [(w17.field) = { pk: true }];
+}

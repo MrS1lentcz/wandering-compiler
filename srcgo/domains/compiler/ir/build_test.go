@@ -676,6 +676,109 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "index with empty fields list",
+			fixture: "testdata/errors/index_empty_fields.proto",
+			wants: []string{
+				`index_empty_fields.proto:`,
+				`has no fields`,
+				`why:`,
+				`nothing to index on`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "index field entry with empty name",
+			fixture: "testdata/errors/index_field_empty_name.proto",
+			wants: []string{
+				`index_field_empty_name.proto:`,
+				`field entry with empty name`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "index references unknown field",
+			fixture: "testdata/errors/index_field_unknown.proto",
+			wants: []string{
+				`index_field_unknown.proto:`,
+				`references unknown field "ghost_field"`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "index INCLUDE references unknown field",
+			fixture: "testdata/errors/index_include_unknown.proto",
+			wants: []string{
+				`index_include_unknown.proto:`,
+				`INCLUDE references unknown field "ghost_field"`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "column name override to reserved keyword",
+			fixture: "testdata/errors/column_name_reserved.proto",
+			wants: []string{
+				`column_name_reserved.proto:`,
+				`field "note"`,
+				`reserved`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "pk on list carrier rejected",
+			fixture: "testdata/errors/pk_on_list_carrier.proto",
+			wants: []string{
+				`pk_on_list_carrier.proto:`,
+				`pk not supported on LIST carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "unique on map carrier rejected",
+			fixture: "testdata/errors/unique_on_map_carrier.proto",
+			wants: []string{
+				`unique_on_map_carrier.proto:`,
+				`unique not supported on MAP carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "deletion_rule without fk rejected",
+			fixture: "testdata/errors/deletion_rule_without_fk.proto",
+			wants: []string{
+				`deletion_rule_without_fk.proto:`,
+				`deletion_rule set without fk`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "fk malformed reference",
+			fixture: "testdata/errors/fk_malformed.proto",
+			wants: []string{
+				`fk_malformed.proto:`,
+				`fk must be "<table>.<column>"`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "raw_check with empty expr",
+			fixture: "testdata/errors/raw_check_empty_expr.proto",
+			wants: []string{
+				`raw_check_empty_expr.proto:`,
+				`raw_checks[0]`,
+				`empty expr`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {
