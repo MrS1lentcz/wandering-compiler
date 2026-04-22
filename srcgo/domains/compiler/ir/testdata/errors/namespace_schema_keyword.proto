@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ir.namespace_schema_keyword;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Schema name equals a PG reserved keyword. Rejected at
+// resolveNamespace's validateIdentifier check (distinct from
+// isReservedPgSchema which catches system-schema prefixes like pg_*).
+option (w17.db.module) = { schema: "select" };
+
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}

@@ -236,6 +236,47 @@ func TestValidateIdentifier(t *testing.T) {
 	}
 }
 
+// TestCheckSuffix — every Check variant gets a fixed suffix for the
+// derived constraint name. Defensive default ("check") fires on unknown
+// variant (IR shouldn't produce this, but future proto additions are
+// handled gracefully).
+func TestCheckSuffix(t *testing.T) {
+	cases := []struct {
+		name string
+		ck   *irpb.Check
+		want string
+	}{
+		{"length", &irpb.Check{Variant: &irpb.Check_Length{Length: &irpb.LengthCheck{}}}, "len"},
+		{"blank", &irpb.Check{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}}, "blank"},
+		{"range", &irpb.Check{Variant: &irpb.Check_Range{Range: &irpb.RangeCheck{}}}, "range"},
+		{"regex", &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{}}}, "format"},
+		{"choices", &irpb.Check{Variant: &irpb.Check_Choices{Choices: &irpb.ChoicesCheck{}}}, "choices"},
+		{"unknown variant", &irpb.Check{}, "check"},
+	}
+	for _, c := range cases {
+		if got := checkSuffix(c.ck); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestResolveComment — override wins, nil descriptor fallback, and empty
+// override with no descriptor source info.
+func TestResolveComment(t *testing.T) {
+	// Override wins.
+	if got := resolveComment("explicit override", nil); got != "explicit override" {
+		t.Errorf("override lost: %q", got)
+	}
+	// Empty override + nil descriptor → empty string (defensive guard
+	// that the fallback read on ParentFile never panics).
+	if got := resolveComment("", nil); got != "" {
+		t.Errorf("nil descriptor should yield empty, got %q", got)
+	}
+}
+
+// (fkTargetColumnIsUnique has an existing, dedicated test in
+// fk_target_test.go — no duplicate here.)
+
 // TestDescribeKind exercises the three non-scalar branches of
 // describeKind (IsList, IsMap, MessageKind) that are unreachable from
 // Build (protoKindToCarrier accepts list/map before describeKind runs).

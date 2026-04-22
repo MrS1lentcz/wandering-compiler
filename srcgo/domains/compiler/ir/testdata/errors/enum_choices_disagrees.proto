@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package ir.enum_choices_disagrees;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Proto-enum field with explicit choices: pointing to a different enum
+// FQN — ambiguous source of truth. Rejected at resolveEnumColumn.
+enum A {
+  A_UNSPECIFIED = 0;
+  A_ONE         = 1;
+}
+enum B {
+  B_UNSPECIFIED = 0;
+  B_X           = 1;
+}
+
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // `state` is proto-enum A but choices: references B — disagreement.
+  A state = 2 [(w17.field) = { choices: "ir.enum_choices_disagrees.B" }];
+}

@@ -1075,6 +1075,27 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "schema name equals reserved keyword",
+			fixture: "testdata/errors/namespace_schema_keyword.proto",
+			wants: []string{
+				`namespace_schema_keyword.proto:`,
+				`(w17.db.module).schema:`,
+				`reserved keyword`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "enum choices disagrees with proto-enum field",
+			fixture: "testdata/errors/enum_choices_disagrees.proto",
+			wants: []string{
+				`enum_choices_disagrees.proto:`,
+				`disagrees with proto-enum field's own enum`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {
