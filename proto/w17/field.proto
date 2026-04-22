@@ -130,6 +130,12 @@ enum Type {
   MONEY      = 13;
   PERCENTAGE = 14;
   RATIO      = 15;
+  // Small integer (int32 carrier only). Storage: PG SMALLINT
+  // (-32 768 .. 32 767), MySQL SMALLINT, SQLite INTEGER. Use when
+  // the typical range is a known small set (status codes, ordinals,
+  // priority 0-10) — halves the per-row cost vs INTEGER on PG.
+  // D22c.
+  SMALL_INTEGER = 70;
 
   // Arbitrary-precision decimal (carrier: string — lossless wire format).
   // Requires (w17.field).precision; (w17.field).scale is optional (default 0).

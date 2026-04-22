@@ -1469,6 +1469,8 @@ func protoTypeToSem(t w17pb.Type) irpb.SemType {
 		return irpb.SemType_SEM_ID
 	case w17pb.Type_COUNTER:
 		return irpb.SemType_SEM_COUNTER
+	case w17pb.Type_SMALL_INTEGER:
+		return irpb.SemType_SEM_SMALL_INTEGER
 	case w17pb.Type_MONEY:
 		return irpb.SemType_SEM_MONEY
 	case w17pb.Type_PERCENTAGE:
@@ -1549,18 +1551,31 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, TSEARCH, ENUM").
 				WithFix("pick one of the string-valid types, or change the carrier")
 		}
-	case irpb.Carrier_CARRIER_INT32, irpb.Carrier_CARRIER_INT64:
+	case irpb.Carrier_CARRIER_INT32:
+		switch sem {
+		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_ENUM, irpb.SemType_SEM_SMALL_INTEGER:
+			// OK
+		case irpb.SemType_SEM_UNSPECIFIED:
+			return diag.Atf(desc, "field %q: int32 carrier requires a semantic type", name).
+				WithWhy("int32 can carry NUMBER / ID / ENUM / SMALL_INTEGER — each emits a different SQL shape (INTEGER vs indexed FK vs CHECK IN numbers vs SMALLINT)").
+				WithFix("add one of: NUMBER, ID, SMALL_INTEGER, ENUM")
+		default:
+			return diag.Atf(desc, "field %q: type %s is not valid on an int32 carrier", name, displaySemType(sem)).
+				WithWhy("the D2 carrier×type table restricts int32 to NUMBER, ID, ENUM, SMALL_INTEGER — COUNTER requires int64; MONEY/PERCENTAGE/RATIO require double").
+				WithFix("pick an int32-valid type, change the carrier (int64 for COUNTER), or use double for MONEY/PERCENTAGE/RATIO")
+		}
+	case irpb.Carrier_CARRIER_INT64:
 		switch sem {
 		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER, irpb.SemType_SEM_ENUM:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
-			return diag.Atf(desc, "field %q: %s carrier requires a semantic type", name, displayCarrier(carrier)).
-				WithWhy("int32/int64 can carry NUMBER / ID / COUNTER / ENUM — each emits a different SQL shape (PK vs indexed FK vs bounded counter vs CHECK IN numbers)").
+			return diag.Atf(desc, "field %q: int64 carrier requires a semantic type", name).
+				WithWhy("int64 can carry NUMBER / ID / COUNTER / ENUM — each emits a different SQL shape (BIGINT vs indexed FK vs bounded counter vs CHECK IN numbers). SMALL_INTEGER is int32-only — widening would defeat the preset's purpose").
 				WithFix("add one of: NUMBER, ID, COUNTER, ENUM")
 		default:
-			return diag.Atf(desc, "field %q: type %s is not valid on an integer carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts integer carriers to NUMBER, ID, COUNTER, ENUM").
-				WithFix("pick an integer-valid type, or change the carrier (e.g. double for MONEY)")
+			return diag.Atf(desc, "field %q: type %s is not valid on an int64 carrier", name, displaySemType(sem)).
+				WithWhy("the D2 carrier×type table restricts int64 to NUMBER, ID, COUNTER, ENUM — SMALL_INTEGER is int32-only (widening it to int64 loses the SMALLINT sizing benefit); MONEY/PERCENTAGE/RATIO require double").
+				WithFix("pick an int64-valid type, or change the carrier (int32 for SMALL_INTEGER, double for MONEY/PERCENTAGE/RATIO)")
 		}
 	case irpb.Carrier_CARRIER_DOUBLE:
 		switch sem {

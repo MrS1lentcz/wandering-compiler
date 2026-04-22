@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package d22.small_integer;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22c fixture — SMALL_INTEGER preset on int32 carrier. Renders as
+// SMALLINT, halving storage vs INTEGER when the author knows the
+// range fits ±32 768 (status codes, priorities, ordinals).
+// Exercises: default path (SMALLINT storage), repeated scalar
+// elements with explicit SMALL_INTEGER type (SMALLINT[] via
+// element-level dispatch), combined with a numeric range CHECK
+// (still emits even on SMALLINT storage — CHECK is column-shape-
+// agnostic).
+
+message Priority {
+  option (w17.db.table) = { name: "priorities" };
+
+  int64 id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Bare SMALL_INTEGER — no range bound, storage SMALLINT NOT NULL.
+  int32 weight    = 2 [(w17.field) = { type: SMALL_INTEGER }];
+
+  // With bounded range. CHECK emits like any other numeric range.
+  int32 rank      = 3 [(w17.field) = { type: SMALL_INTEGER, gte: 1, lte: 10 }];
+
+  // repeated scalar + SMALL_INTEGER — SMALLINT[] storage via
+  // element-level dispatch in pgArrayOf.
+  repeated int32 ordinals = 4 [(w17.field) = { type: SMALL_INTEGER }];
+}

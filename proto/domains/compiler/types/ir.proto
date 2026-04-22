@@ -318,6 +318,9 @@ enum SemType {
   SEM_MONEY = 13;
   SEM_PERCENTAGE = 14;
   SEM_RATIO = 15;
+  // int32 carrier only. Storage: PG SMALLINT. Use when typical
+  // range is known-small (status codes, ordinals, priority 0-10). (D22c)
+  SEM_SMALL_INTEGER = 70;
 
   // Arbitrary-precision decimal (carrier: string).
   SEM_DECIMAL = 16;

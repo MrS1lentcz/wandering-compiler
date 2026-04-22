@@ -158,6 +158,10 @@ func columnType(tableName string, col *irpb.Column) (string, error) {
 			// int32 + SEM_ENUM: storage stays INTEGER; membership is enforced
 			// by the CHECK IN (numbers) the IR attaches in resolveEnumColumn.
 			return "INTEGER", nil
+		case irpb.SemType_SEM_SMALL_INTEGER:
+			// SMALLINT halves storage vs INTEGER when the author knows the
+			// range fits ±32 768 (status codes, priorities, ordinals). D22c.
+			return "SMALLINT", nil
 		case irpb.SemType_SEM_COUNTER:
 			// COUNTER is defined as int64 in D2; int32 is not valid here but
 			// the IR builder already rejects the combination. Keep the branch
