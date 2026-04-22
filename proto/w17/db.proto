@@ -142,6 +142,26 @@ message Column {
   // + `db_type: TEXT` keeps the char_length <= 6000 CHECK but stores as
   // TEXT instead of VARCHAR(6000). See D14.
   DbType db_type = 5;
+
+  // Generated-column expression — when set, the column is emitted as
+  // `GENERATED ALWAYS AS (<expr>) STORED`. Body is opaque SQL (same
+  // contract as raw_checks / raw_indexes): wc validates nothing inside
+  // the parentheses, the author is responsible for referenced columns
+  // existing and the expression being deterministic.
+  //
+  // Usage:
+  //   string full_name = 3 [
+  //     (w17.field)     = { type: CHAR, max_len: 200 },
+  //     (w17.db.column) = {
+  //       generated_expr: "first_name || ' ' || last_name"
+  //     }
+  //   ];
+  //
+  // Incompatible with (w17.field).default_* (the computed value IS the
+  // value), `pk: true` (PG rejects generated columns as primary keys),
+  // and `fk:` on the same column (generated columns can't be FK
+  // sources in PG). `unique:` and `null:` remain allowed. See D18.
+  string generated_expr = 6;
 }
 
 // DbType — enumerated SQL column types, covering the common cross-dialect

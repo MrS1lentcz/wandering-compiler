@@ -301,8 +301,9 @@ make schemagen
 - [x] `iteration-1-coverage.md` captures Django parity + test coverage
 - [x] D17 (ENUM type, shipped 2026-04-22; open question resolved as
       option b — auto-infer on bare proto-enum fields)
-- [ ] **← YOU ARE HERE.** Start D18 (Generated columns) next.
-- [ ] D19 (Schema-qualified names)
+- [x] D18 (Generated columns, shipped 2026-04-22; STORED-only per
+      PG 18 surface, VIRTUAL parked for multi-dialect iter-2+)
+- [ ] **← YOU ARE HERE.** Start D19 (Schema-qualified names) next.
 - [ ] D20 (Index sort order + NULLS FIRST/LAST)
 - [ ] Open `iteration-2.md` with alter-diff as M1
 

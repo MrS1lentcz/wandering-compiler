@@ -42,6 +42,7 @@ var expectedPgCaps = []string{
 	emit.CapPartialIndex,
 	emit.CapExpressionIndex,
 	emit.CapIdentityColumn,
+	emit.CapGeneratedColumn,
 	emit.CapOnDeleteRestrict,
 	emit.CapOnDeleteSetDefault,
 

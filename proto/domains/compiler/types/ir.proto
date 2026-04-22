@@ -115,6 +115,14 @@ message Column {
   repeated string enum_names = 36;
   repeated int64 enum_numbers = 37;
 
+  // Opaque SQL expression from (w17.db.column).generated_expr (D18).
+  // When non-empty the column emits as
+  // `GENERATED ALWAYS AS (<expr>) STORED` — wc treats the body as
+  // opaque (same contract as RawCheck.expr / RawIndex.body). IR-time
+  // validation in ir.Build enforces the incompatible-field set
+  // (default / pk / fk) before the expression is carried forward.
+  string generated_expr = 38;
+
   repeated Check checks = 40;
 }
 

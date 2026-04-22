@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package d18.generated_stored;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D18 fixture — GENERATED ALWAYS AS (expr) STORED on a string column.
+// Exercises: the generated expression rendering, interaction with
+// VARCHAR sizing + NOT NULL, and the storage-index sugar on the same
+// field. The length CHECK from max_len is subsumed by VARCHAR(N) so
+// no CHECK appears; BlankCheck skips because string-SEM_CHAR on a
+// generated column is still string-storage (the expression's value
+// type).
+
+message User {
+  option (w17.db.table) = { name: "users" };
+
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string first_name = 2 [(w17.field) = { type: CHAR, max_len: 100 }];
+  string last_name  = 3 [(w17.field) = { type: CHAR, max_len: 100 }];
+  string full_name  = 4 [
+    (w17.field)     = { type: CHAR, max_len: 200 },
+    (w17.db.column) = {
+      index: true,
+      generated_expr: "first_name || ' ' || last_name"
+    }
+  ];
+}

@@ -496,6 +496,42 @@ func TestBuildErrors(t *testing.T) {
 				`BOOLEAN`,
 			},
 		},
+		{
+			name:    "generated_expr rejects default_*",
+			fixture: "testdata/errors/generated_with_default.proto",
+			wants: []string{
+				`generated_with_default.proto:`,
+				`generated_expr is incompatible with default_*`,
+				`why:`,
+				`GENERATED ALWAYS AS`,
+				`fix:`,
+				`default_string`,
+			},
+		},
+		{
+			name:    "generated_expr rejects pk",
+			fixture: "testdata/errors/generated_with_pk.proto",
+			wants: []string{
+				`generated_with_pk.proto:`,
+				`generated_expr is incompatible with pk: true`,
+				`why:`,
+				`primary keys`,
+				`fix:`,
+				`non-generated column`,
+			},
+		},
+		{
+			name:    "generated_expr rejects fk",
+			fixture: "testdata/errors/generated_with_fk.proto",
+			wants: []string{
+				`generated_with_fk.proto:`,
+				`generated_expr is incompatible with fk`,
+				`why:`,
+				`referential integrity`,
+				`fix:`,
+				`plain column`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

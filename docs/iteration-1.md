@@ -808,6 +808,99 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D18 — Generated columns: GENERATED ALWAYS AS … STORED (added 2026-04-22)
+
+**Decision.** `(w17.db.column)` gains an opaque `generated_expr: string`
+field that, when set, emits the column as
+`GENERATED ALWAYS AS (<expr>) STORED`. The body is pass-through SQL —
+same contract as `raw_checks.expr` / `raw_indexes.body` — with zero
+interpretation by wc. The authoring surface:
+
+```proto
+string full_name = 3 [
+  (w17.field)     = { type: CHAR, max_len: 200 },
+  (w17.db.column) = {
+    generated_expr: "first_name || ' ' || last_name"
+  }
+];
+// → full_name VARCHAR(200) NOT NULL GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED
+```
+
+**Why STORED, not VIRTUAL.** Iteration-1 targets PostgreSQL, which
+implements SQL:2016 STORED only — VIRTUAL generated columns are not
+available on PG (as of 18). MySQL offers both; SQLite offers VIRTUAL.
+Shipping STORED today keeps the compiler honest about what PG
+actually emits; the MySQL / SQLite emitters (iter-2+) can add a
+`virtual:` sibling option if pilot schemas need the VIRTUAL shape.
+Raw SQL via `(w17.db.table).raw_indexes` covers VIRTUAL-like
+shapes today (expression index = deterministic computed value
+without column storage).
+
+**Invariants enforced at IR time.**
+
+  - `generated_expr` is incompatible with `default_string` /
+    `default_int` / `default_double` / `default_auto` — a
+    GENERATED ALWAYS AS column is computed from its expression and
+    PG rejects any DEFAULT clause alongside it (the two would
+    compete for the initial value).
+  - `generated_expr` is incompatible with `pk: true` — PG rejects
+    STORED generated columns as primary keys. Authors pick a plain
+    column as the PK and derive the generated one from it.
+  - `generated_expr` is incompatible with `fk:` on the same column
+    — a FOREIGN KEY on a computed column makes the referential
+    integrity contract depend on a value the author doesn't own;
+    PG rejects it. Model the FK on a plain column + derive the
+    generated one from it.
+  - `unique` and `null` remain allowed. PG permits UNIQUE on STORED
+    generated columns, and NULL / NOT NULL is independent of how
+    the value is produced.
+  - CHECK synths on the column (blank, length, regex, range,
+    choices, raw) still fire. They apply to the *computed* value —
+    a useful feature for enforcing invariants on derived data. The
+    author is responsible for ensuring the expression can satisfy
+    them (e.g. if a CHECK rejects empty strings, the expression
+    must not evaluate to `''`).
+
+**What the compiler emits.**
+
+  - Column line: `<name> <TYPE> [NULL|NOT NULL] GENERATED ALWAYS AS (<expr>) STORED`
+    — DEFAULT / IDENTITY branches are skipped (IR has already
+    rejected the combinations that would otherwise reach the
+    emitter). Inline PK / FK branches are unreachable for the same
+    reason.
+  - Nothing else changes about migrations: generated columns drop
+    with the table (no separate cleanup), and the expression is
+    captured verbatim inside `CREATE TABLE` rather than as an
+    `ALTER TABLE ADD COLUMN`.
+
+**Escape hatches.**
+
+  - Author wants a VIRTUAL-style value (expression computed on
+    read, not stored): use `(w17.db.table).raw_indexes` for an
+    expression index if the use case is "search by derived value",
+    or defer to the iter-2 MySQL / SQLite emitter surface for
+    VIRTUAL support.
+  - Author wants a DEFAULT that isn't quite an expression (e.g.
+    function call on INSERT only): keep the column plain with
+    `default_auto: NOW` / `default_auto: UUID_V7` / `default_*`.
+    Generated columns mean "ALWAYS", not "ON INSERT".
+  - Author wants dialect-specific generated syntax beyond STORED
+    (e.g. MySQL's `GENERATED ALWAYS AS (…) VIRTUAL`): iter-1 has
+    no VIRTUAL surface; park until multi-dialect emitters land.
+
+**Rationale.** Django ships `GeneratedField` (4.2+) and SQLModel
+leans on SQLAlchemy's `Column(Computed(...))` — both collapse the
+three main dialects' generated-column shapes into one author-facing
+field. wc takes the same shape but keeps the body opaque (SQL
+pass-through) rather than modelling a mini-expression DSL:
+computed columns are rare enough that a typed expression surface
+would be a large abstraction for little payoff, and the raw-SQL
+contract matches how `raw_checks` / `raw_indexes` already handle
+author-supplied expressions.
+
+Capability: `GENERATED_COLUMN` = `{MinVersion: "12.0"}` in the PG
+catalog. PG 11 and earlier have no STORED-generated-column support.
+
 ### D17 — ENUM type: carrier-dispatched storage (added 2026-04-22)
 
 **Decision.** `(w17.field).Type` gains a `ENUM` value that maps, per

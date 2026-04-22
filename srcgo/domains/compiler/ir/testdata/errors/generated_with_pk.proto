@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package d18.generated_with_pk;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D18 error — generated_expr is incompatible with pk: true.
+message Doc {
+  option (w17.db.table) = { name: "docs" };
+
+  int64  owner_id = 1 [(w17.field) = { type: ID }];
+  int64  version  = 2 [(w17.field) = { type: NUMBER }];
+  string slug     = 3 [
+    (w17.field)     = { type: SLUG, max_len: 200, pk: true },
+    (w17.db.column) = {
+      generated_expr: "owner_id::text || '-' || version::text"
+    }
+  ];
+}

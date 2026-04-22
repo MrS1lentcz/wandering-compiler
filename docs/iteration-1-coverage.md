@@ -64,6 +64,7 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | `default` (callable, Python-side) | ⛔ | runtime concern; use `default_auto` for DB defaults |
 | `db_column` | ✅ | `(w17.db.column).name` |
 | `db_index` | ✅ | `(w17.db.column).index` — single-col non-unique storage index |
+| `GeneratedField` (4.2+) | ✅ | `(w17.db.column).generated_expr: "<sql>"` → GENERATED ALWAYS AS (expr) STORED (PG 12+); incompatible with default/pk/fk. See D18 |
 | `db_tablespace` | ⛔ | iter-2+ (PG-specific, rare outside specialized deploys) |
 | `db_comment` (4.2+) | ⛔ | iter-2 — pairs with admin/UI generation |
 | `db_collation` (3.2+) | ⛔ | iter-2+ — belongs on `(w17.pg.field)` or DbType modifier |

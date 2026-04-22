@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) complete; **iter-1 schema-gap close-out in progress (D17 shipped, D18 / D19 / D20 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) complete; **iter-1 schema-gap close-out in progress (D17, D18 shipped; D19, D20 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -895,6 +895,61 @@ in code, not in docs:
   fields: matches D14 zero-config philosophy + proto wire
   semantics. Authors opt out via explicit `type: NUMBER` or
   move to string+ENUM for PG-native storage.
+
+- **D18 generated columns (shipped, 2026-04-22) — schema-gap
+  close-out, second of four before alter-diff.** `(w17.db.column)`
+  gains a `generated_expr: string` opaque-SQL field. When set, the
+  column emits as `GENERATED ALWAYS AS (<expr>) STORED`. Full
+  rationale + invariants + escape hatches live in `iteration-1.md`
+  D18.
+
+  Proto changes: `w17.db.Column` gains `generated_expr = 6`;
+  `ir.Column` gains `generated_expr = 38` (pass-through IR field,
+  treated as opaque like `RawCheck.expr` / `RawIndex.body`).
+
+  IR changes: `buildColumn` reads
+  `lf.Column.GetGeneratedExpr()` alongside the existing
+  `.name` / `.index` plumbing. Validation rejects three
+  combinations with `diag.Error` (`file:` / `why:` / `fix:`): (1)
+  any `(w17.field).default_*` variant on a generated column — PG
+  rejects DEFAULT on `GENERATED ALWAYS AS` columns; (2) `pk: true`
+  — PG rejects STORED generated columns as primary keys; (3) any
+  `(w17.db.column).fk` on the same column — the FK contract can't
+  act on a column the author doesn't own. `unique`, `null`, and
+  CHECK synths (blank / length / regex / range / choices / raw)
+  remain allowed; CHECKs apply to the computed value, a useful
+  feature for enforcing invariants on derived data.
+
+  PG emitter: `renderColumn` adds a third mutually-exclusive
+  value-source branch after IDENTITY / DEFAULT —
+  `GENERATED ALWAYS AS (<expr>) STORED` appended after nullability.
+  IR enforces the combination is exclusive so the else-if chain is
+  sound. No changes to the down path: generated columns drop with
+  the table (same as any other column).
+
+  Capability catalog: `CapGeneratedColumn = "GENERATED_COLUMN"`
+  in `emit/capabilities.go`, `{MinVersion: "12.0"}` in the PG
+  catalog (SQL:2016 feature landed in PostgreSQL 12;
+  STORED-only on PG — VIRTUAL parks for multi-dialect in iter-2).
+
+  One positive fixture lands in `testdata/`: `generated_stored`
+  exercises the full `full_name = first_name || ' ' || last_name`
+  shape on a User with identity PK + CHAR columns + storage-index
+  sugar on the generated column. Three new error fixtures —
+  `generated_with_default.proto`, `generated_with_pk.proto`,
+  `generated_with_fk.proto` — join `TestBuildErrors`, each
+  asserting the corresponding `file:` / `why:` / `fix:`
+  substrings. All 16 grand-tour fixtures (15 previous + 1 D18 new)
+  green on M8 goldens + M9 `make test-apply` against
+  `postgres:18-alpine`.
+
+  **Design note.** VIRTUAL generated columns deliberately parked.
+  PG 18 supports STORED only; MySQL + SQLite offer VIRTUAL.
+  Shipping STORED today keeps the compiler honest about PG's
+  actual surface. The multi-dialect expansion (iter-2+) can add a
+  `virtual:` sibling flag on `(w17.db.column)` for emitters that
+  support it; until then, `raw_indexes` covers the
+  expression-index shape that's the most common VIRTUAL substitute.
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

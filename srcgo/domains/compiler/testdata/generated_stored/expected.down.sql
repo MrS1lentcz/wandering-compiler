@@ -1,0 +1,6 @@
+BEGIN;
+
+DROP INDEX IF EXISTS users_full_name_idx;
+DROP TABLE IF EXISTS users;
+
+COMMIT;

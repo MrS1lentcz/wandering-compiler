@@ -350,6 +350,7 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			col.Name = override
 		}
 		col.StorageIndex = lf.Column.GetIndex()
+		col.GeneratedExpr = lf.Column.GetGeneratedExpr()
 	}
 
 	// The resolved SQL column name (proto name by default, overridden via
@@ -664,6 +665,32 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 					WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column").
 					WithFix("drop the string-only options, or drop the custom_type override — pick one path"))
 			}
+		}
+	}
+
+	// (w17.db.column).generated_expr — GENERATED ALWAYS AS (<expr>) STORED
+	// on PG (D18). The computed value IS the value; any author-supplied
+	// way to provide a value (default_*, proto-level PK, FK reference)
+	// would fight the expression. Reject all three combinations here
+	// rather than at apply time so the failure carries file:line:col and
+	// a fix. Uniqueness and nullability remain allowed — PG lets you put
+	// UNIQUE on a STORED generated column, and NULL/NOT NULL is
+	// independent of how the value is produced.
+	if col.GetGeneratedExpr() != "" {
+		if col.GetDefault() != nil {
+			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with default_*", protoName).
+				WithWhy("a generated column is computed from its expression on every INSERT/UPDATE — PG rejects any DEFAULT clause on GENERATED ALWAYS AS columns because the two would compete for the initial value").
+				WithFix("drop default_string / default_int / default_double / default_auto from (w17.field), or drop generated_expr from (w17.db.column)"))
+		}
+		if col.GetPk() {
+			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with pk: true", protoName).
+				WithWhy("Postgres does not allow STORED generated columns as primary keys — the PK must be a plain column you can write to directly").
+				WithFix("drop pk from (w17.field), or drop generated_expr; pick a non-generated column as the primary key"))
+		}
+		if lf.Column != nil && lf.Column.GetFk() != "" {
+			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with fk", protoName).
+				WithWhy("a FOREIGN KEY on a generated column makes the referential integrity contract depend on a computed value — PG rejects it because the on-delete/on-update machinery can't act on a column the author doesn't own").
+				WithFix(`drop fk from (w17.db.column), or drop generated_expr; model the FK on a plain column and derive the generated one from it`))
 		}
 	}
 

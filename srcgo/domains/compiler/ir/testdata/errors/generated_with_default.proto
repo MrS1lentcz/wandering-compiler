@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package d18.generated_with_default;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D18 error — generated_expr is incompatible with default_*.
+message User {
+  option (w17.db.table) = { name: "users" };
+
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string first_name = 2 [(w17.field) = { type: CHAR, max_len: 100 }];
+  string last_name  = 3 [(w17.field) = { type: CHAR, max_len: 100 }];
+  string full_name  = 4 [
+    (w17.field)     = {
+      type: CHAR,
+      max_len: 200,
+      default_string: "unknown"
+    },
+    (w17.db.column) = {
+      generated_expr: "first_name || ' ' || last_name"
+    }
+  ];
+}
