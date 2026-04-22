@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package d22.extensions_on_non_path;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22d error — extensions list is only meaningful on path presets.
+message Doc {
+  option (w17.db.table) = { name: "docs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = {
+    type: CHAR,
+    max_len: 80,
+    extensions: ["csv", "json"]
+  }];
+}

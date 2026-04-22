@@ -569,6 +569,42 @@ func TestBuildErrors(t *testing.T) {
 				`derived name "user"`,
 			},
 		},
+		{
+			name:    "FILE_PATH without extensions",
+			fixture: "testdata/errors/file_path_no_extensions.proto",
+			wants: []string{
+				`file_path_no_extensions.proto:`,
+				`FILE_PATH requires extensions`,
+				`why:`,
+				`ambiguity`,
+				`fix:`,
+				`extensions: ["*"]`,
+			},
+		},
+		{
+			name:    "extensions on a non-path type",
+			fixture: "testdata/errors/extensions_on_non_path.proto",
+			wants: []string{
+				`extensions_on_non_path.proto:`,
+				`extensions is only valid on path presets`,
+				`why:`,
+				`FILE_PATH / IMAGE_PATH`,
+				`fix:`,
+				`FILE_PATH`,
+			},
+		},
+		{
+			name:    "wildcard extensions must stand alone",
+			fixture: "testdata/errors/wildcard_mixed_with_extensions.proto",
+			wants: []string{
+				`wildcard_mixed_with_extensions.proto:`,
+				`"*" must stand alone`,
+				`why:`,
+				`contradictory intent`,
+				`fix:`,
+				`without the wildcard`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

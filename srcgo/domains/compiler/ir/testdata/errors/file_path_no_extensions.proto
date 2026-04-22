@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package d22.file_path_no_extensions;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22d error — FILE_PATH without extensions is ambiguous; reject.
+message Doc {
+  option (w17.db.table) = { name: "docs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string file = 2 [(w17.field) = { type: FILE_PATH }];
+}

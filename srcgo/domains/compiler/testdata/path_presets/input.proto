@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package d22.path_presets;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22d fixture — path-family presets on string carrier. All three
+// render as TEXT; the regex CHECK distinguishes them:
+//   POSIX_PATH → no format CHECK (directories / executables / pipes).
+//   FILE_PATH  → regex on the extensions list (required).
+//   IMAGE_PATH → regex on the extensions list (default image set
+//                when author leaves extensions empty; override by
+//                setting extensions explicitly).
+//   FILE_PATH with extensions: ["*"] → no format CHECK (author-
+//   documented "any suffix is fine").
+
+message Attachment {
+  option (w17.db.table) = { name: "attachments" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  // Executable / directory / pipe — any suffix, blank CHECK only.
+  string script_path = 2 [(w17.field) = { type: POSIX_PATH }];
+
+  // Concrete list — regex emits (?i)\.(csv|json|xml)$ CHECK.
+  string report_path = 3 [(w17.field) = {
+    type: FILE_PATH,
+    extensions: ["csv", "json", "xml"]
+  }];
+
+  // Wildcard — CHECK disabled, blank only.
+  string anything_path = 4 [(w17.field) = {
+    type: FILE_PATH,
+    extensions: ["*"]
+  }];
+
+  // IMAGE_PATH default extensions.
+  string cover_image = 5 [(w17.field) = { type: IMAGE_PATH }];
+
+  // IMAGE_PATH with author override — raster-only, no svg.
+  string thumbnail = 6 [(w17.field) = {
+    type: IMAGE_PATH,
+    extensions: ["jpg", "jpeg", "png", "webp"]
+  }];
+}

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package d22.wildcard_mixed_with_extensions;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D22d error — "*" wildcard must stand alone; mixing with concrete
+// extensions is contradictory intent.
+message Upload {
+  option (w17.db.table) = { name: "uploads" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string path = 2 [(w17.field) = {
+    type: FILE_PATH,
+    extensions: ["*", "csv"]
+  }];
+}

@@ -605,8 +605,10 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			if col.MaxLen <= 0 {
 				col.MaxLen = 17
 			}
-		case irpb.SemType_SEM_TEXT:
-			// optional upper bound.
+		case irpb.SemType_SEM_TEXT,
+			irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
+			// optional upper bound — paths store as TEXT, same
+			// semantics as bare TEXT for max_len.
 		default:
 			if col.MaxLen != 0 {
 				b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(maxLenSem)).
@@ -860,7 +862,132 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 		}
 	}
 
+	// D22d — path-family presets: resolve allowed_extensions +
+	// synthesise the format regex CHECK. Runs after attachChecks so
+	// the extension regex sorts after any author-supplied pattern
+	// (which we skip setting on path types anyway — paths don't
+	// accept pattern: override; the extensions list IS the
+	// mechanism).
+	if isPathSemType(semType) {
+		if err := b.resolvePathExtensions(col, desc, fieldOpt, semType); err != nil {
+			b.err(err)
+			return nil
+		}
+	} else if fieldOpt != nil && len(fieldOpt.GetExtensions()) > 0 {
+		b.err(diag.Atf(desc, "field %q: extensions is only valid on path presets (got type %s)", protoName, displaySemType(semType)).
+			WithWhy("extensions drives the format CHECK for FILE_PATH / IMAGE_PATH — it has no meaning on other types").
+			WithFix("drop extensions from (w17.field), or change type: to FILE_PATH / IMAGE_PATH"))
+		return nil
+	}
+
 	return col
+}
+
+// isPathSemType reports whether sem is one of the D22d path presets.
+func isPathSemType(sem irpb.SemType) bool {
+	switch sem {
+	case irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
+		return true
+	}
+	return false
+}
+
+// defaultImageExtensions is the IMAGE_PATH fallback when the author
+// leaves (w17.field).extensions empty. Kept narrow — common web /
+// display image formats; author can override by setting extensions
+// explicitly (e.g. photography-only = ["raw", "cr2", "dng"]).
+var defaultImageExtensions = []string{"jpg", "jpeg", "png", "gif", "webp", "avif", "svg"}
+
+// resolvePathExtensions implements D22d. For POSIX_PATH no extensions
+// apply (populating them is an error). For FILE_PATH the author must
+// supply extensions (or ["*"] to disable the CHECK). For IMAGE_PATH
+// the default list fills in when author is silent. In every case
+// the resolved list is stored on col.AllowedExtensions for
+// downstream tooling; a regex CHECK is appended to col.Checks
+// unless the list is ["*"] (explicit "any extension is fine" marker).
+func (b *builder) resolvePathExtensions(col *irpb.Column, desc protoreflect.FieldDescriptor, opt *w17pb.Field, sem irpb.SemType) *diag.Error {
+	protoName := string(desc.Name())
+	var exts []string
+	if opt != nil {
+		exts = opt.GetExtensions()
+	}
+	switch sem {
+	case irpb.SemType_SEM_POSIX_PATH:
+		if len(exts) > 0 {
+			return diag.Atf(desc, "field %q: extensions is not valid on POSIX_PATH", protoName).
+				WithWhy("POSIX_PATH covers directories, executables, pipes — any file-suffix constraint doesn't apply. Use FILE_PATH when an extension list makes sense").
+				WithFix(`change type to FILE_PATH: [(w17.field) = { type: FILE_PATH, extensions: ["csv", "json"] }], or drop the extensions list`)
+		}
+		// No CHECK synth — POSIX_PATH relies on blank + optional
+		// char_length only. Nothing else to do.
+		return nil
+	case irpb.SemType_SEM_FILE_PATH:
+		if len(exts) == 0 {
+			return diag.Atf(desc, "field %q: FILE_PATH requires extensions", protoName).
+				WithWhy("FILE_PATH without an extensions list has the same shape as POSIX_PATH — the compiler rejects the ambiguity rather than silently degrading").
+				WithFix(`add extensions: ["csv", "json", …] for a fixed list, or extensions: ["*"] to document "any extension is allowed" explicitly, or change type: to POSIX_PATH`)
+		}
+	case irpb.SemType_SEM_IMAGE_PATH:
+		if len(exts) == 0 {
+			exts = append([]string(nil), defaultImageExtensions...)
+		}
+	}
+	col.AllowedExtensions = exts
+
+	// Normalise + validate the list. "*" is the "any" marker — must
+	// appear alone if it appears at all; mixing "*" with real
+	// extensions is ambiguous intent.
+	hasWildcard := false
+	for _, e := range exts {
+		if e == "*" {
+			hasWildcard = true
+			continue
+		}
+		if e == "" {
+			return diag.Atf(desc, "field %q: extensions contains an empty entry", protoName).
+				WithWhy("empty extension strings would produce a broken regex alternation").
+				WithFix(`remove the empty "" entry from extensions`)
+		}
+	}
+	if hasWildcard && len(exts) > 1 {
+		return diag.Atf(desc, `field %q: extensions "*" must stand alone (got %v)`, protoName, exts).
+			WithWhy(`"*" marks the path as "any extension is fine" — mixing it with concrete extensions is contradictory intent`).
+			WithFix(`either set extensions: ["*"] to disable the CHECK entirely, or list the concrete extensions without the wildcard`)
+	}
+	if hasWildcard {
+		return nil // no CHECK — author opted out explicitly
+	}
+
+	// Build case-insensitive regex: `\.(jpg|jpeg|png)$` with
+	// case-insensitive flag (?i) for portability. Author-supplied
+	// extensions are lower-cased into the pattern body — PG's POSIX
+	// regex engine respects the (?i) inline flag.
+	lowerExts := make([]string, 0, len(exts))
+	for _, e := range exts {
+		lowerExts = append(lowerExts, regexpQuote(strings.ToLower(e)))
+	}
+	pattern := `(?i)\.(` + strings.Join(lowerExts, "|") + `)$`
+	col.Checks = append(col.Checks, &irpb.Check{Variant: &irpb.Check_Regex{Regex: &irpb.RegexCheck{
+		Pattern: pattern,
+		Source:  irpb.RegexSource_REGEX_FROM_TYPE,
+	}}})
+	return nil
+}
+
+// regexpQuote escapes regex metacharacters in a single extension
+// token so unusual extensions (dots, dashes) render as literal
+// sequences inside the alternation. Common extensions have no
+// metacharacters so this is typically a pass-through.
+func regexpQuote(s string) string {
+	const meta = `\.+*?()[]{}|^$`
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(meta, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // resolveEnumColumn populates SEM_ENUM side-data on a column (enum FQN +
@@ -1463,6 +1590,12 @@ func protoTypeToSem(t w17pb.Type) irpb.SemType {
 		return irpb.SemType_SEM_TSEARCH
 	case w17pb.Type_MAC_ADDRESS:
 		return irpb.SemType_SEM_MAC
+	case w17pb.Type_POSIX_PATH:
+		return irpb.SemType_SEM_POSIX_PATH
+	case w17pb.Type_FILE_PATH:
+		return irpb.SemType_SEM_FILE_PATH
+	case w17pb.Type_IMAGE_PATH:
+		return irpb.SemType_SEM_IMAGE_PATH
 	case w17pb.Type_NUMBER:
 		return irpb.SemType_SEM_NUMBER
 	case w17pb.Type_ID:
@@ -1540,15 +1673,16 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 		switch sem {
 		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_TEXT, irpb.SemType_SEM_UUID, irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL, irpb.SemType_SEM_SLUG, irpb.SemType_SEM_DECIMAL,
 			irpb.SemType_SEM_JSON, irpb.SemType_SEM_IP, irpb.SemType_SEM_TSEARCH, irpb.SemType_SEM_ENUM,
-			irpb.SemType_SEM_MAC:
+			irpb.SemType_SEM_MAC,
+			irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
 			// OK
 		case irpb.SemType_SEM_UNSPECIFIED:
 			return diag.Atf(desc, "field %q: string carrier requires a semantic type", name).
 				WithWhy("string maps to many SQL types (VARCHAR, TEXT, UUID, JSONB, INET, MACADDR, TSVECTOR) with different constraints; the compiler won't guess").
-				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, TSEARCH, ENUM")
+				WithFix("add one of: CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, POSIX_PATH, FILE_PATH, IMAGE_PATH, TSEARCH, ENUM")
 		default:
 			return diag.Atf(desc, "field %q: type %s is not valid on a string carrier", name, displaySemType(sem)).
-				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, TSEARCH, ENUM").
+				WithWhy("the D2 carrier×type table restricts string to CHAR, TEXT, UUID, EMAIL, URL, SLUG, DECIMAL, JSON, IP, MAC_ADDRESS, POSIX_PATH, FILE_PATH, IMAGE_PATH, TSEARCH, ENUM").
 				WithFix("pick one of the string-valid types, or change the carrier")
 		}
 	case irpb.Carrier_CARRIER_INT32:

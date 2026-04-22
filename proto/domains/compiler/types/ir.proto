@@ -165,6 +165,15 @@ message Column {
   string comment = 39;
 
   repeated Check checks = 40;
+
+  // Allowed file extensions on FILE_PATH / IMAGE_PATH (D22d).
+  // IMAGE_PATH fills a default image list when left empty by the
+  // author. The regex CHECK on col.Checks is the authoritative
+  // apply-time enforcement; this field preserves the structured
+  // list for admin-gen, alter-diff extension rename detection, and
+  // --verbose output. Empty on non-path sem types. `["*"]` is kept
+  // verbatim to document "any extension allowed" intent.
+  repeated string allowed_extensions = 41;
 }
 
 // PgOptions mirrors (w17.pg.field). Curated jsonb / inet / tsvector / hstore
@@ -310,6 +319,13 @@ enum SemType {
   // emits on the default path; `db_type: VARCHAR` override activates
   // the regex synthesis (paralleling the UUID preset). (D22b)
   SEM_MAC = 60;
+
+  // Path-family presets — string carrier, TEXT storage, blank CHECK
+  // by default. D22d.
+  SEM_POSIX_PATH = 61; // No extension constraint.
+  SEM_FILE_PATH  = 62; // Regex CHECK on allowed extensions (col.Extensions).
+  SEM_IMAGE_PATH = 63; // FILE_PATH preset with default image extensions
+                       // filled in by ir.Build when col.Extensions is empty.
 
   // Numeric carriers.
   SEM_NUMBER = 10;

@@ -125,7 +125,11 @@ func columnType(tableName string, col *irpb.Column) (string, error) {
 				return "", fmt.Errorf("%s requires max_len (ir invariant)", displaySemType(col.GetType()))
 			}
 			return fmt.Sprintf("VARCHAR(%d)", col.GetMaxLen()), nil
-		case irpb.SemType_SEM_TEXT:
+		case irpb.SemType_SEM_TEXT,
+			irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
+			// Path presets (D22d) — TEXT storage. The regex CHECK on
+			// allowed extensions lands via attachChecks; the column
+			// type itself is identical to TEXT.
 			return "TEXT", nil
 		case irpb.SemType_SEM_UUID:
 			return "UUID", nil

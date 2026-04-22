@@ -91,6 +91,14 @@ message Field {
     AutoDefault default_auto   = 23;
   }
 
+  // Allowed file extensions for FILE_PATH / IMAGE_PATH (D22d).
+  // Case-insensitive, no leading dot ("jpg", not ".jpg"). Use ["*"] to
+  // disable the format CHECK (author documents "this is a path but any
+  // suffix is fine"). Ignored for non-path types. Default when unset
+  // on IMAGE_PATH = ["jpg","jpeg","png","gif","webp","avif","svg"];
+  // FILE_PATH with no extensions is an IR-time error.
+  repeated string extensions = 19;
+
   // Field numbers 3 (fk) and 15 (orphanable) have moved to
   // (w17.db.column) — they're DB-specific rules (like indexes /
   // constraints), not data semantics. See D8 rev 2026-04-21 and D12.
@@ -122,6 +130,19 @@ enum Type {
                     // MySQL/SQLite → VARCHAR(17) + regex CHECK. Author uses
                     // `db_type: VARCHAR` to force string storage on PG; regex
                     // CHECK activates automatically in that path.
+
+  // Path-family presets (carrier: string). All three store as TEXT
+  // on PG and emit a `blank: false` CHECK by default. D22d.
+  POSIX_PATH = 61; // Generic filesystem path — no extension constraint
+                   // (directories, executables, pipes). No regex CHECK
+                   // beyond blank/length.
+  FILE_PATH  = 62; // File path with required `extensions: [...]`. Regex
+                   // CHECK enforces the allowed suffixes (case-insensitive).
+                   // Use `["*"]` to allow any extension (disables the CHECK,
+                   // author documents "this is a file but any ext is OK").
+  IMAGE_PATH = 63; // FILE_PATH preset with a default `extensions:
+                   //   ["jpg","jpeg","png","gif","webp","avif","svg"]`.
+                   // Override the default by setting extensions: explicitly.
 
   // Numeric carriers (carrier: int32 / int64 / double — see D2 table)
   NUMBER     = 10;
