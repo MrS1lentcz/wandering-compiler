@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"strings"
 	"testing"
 
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
@@ -145,6 +146,72 @@ func TestDefaultSemTypeFor(t *testing.T) {
 		if got := defaultSemTypeFor(c); got != want {
 			t.Errorf("defaultSemTypeFor(%v) = %v, want %v", c, got, want)
 		}
+	}
+}
+
+// TestRegexpQuote — pins the escape-set used by path extension regexes
+// (D22d). Each meta-character gets a leading backslash; non-meta ASCII
+// + unicode pass through untouched.
+func TestRegexpQuote(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"abc", "abc"},
+		{".", `\.`},
+		{"a.b", `a\.b`},
+		{"foo+bar", `foo\+bar`},
+		{"a*b", `a\*b`},
+		{"a?", `a\?`},
+		{"(x)", `\(x\)`},
+		{"[y]", `\[y\]`},
+		{"{z}", `\{z\}`},
+		{"a|b", `a\|b`},
+		{"^start$", `\^start\$`},
+		{`a\b`, `a\\b`},
+		{"česky.txt", `česky\.txt`}, // unicode passes through, dot still escaped
+	}
+	for _, c := range cases {
+		if got := regexpQuote(c.in); got != c.want {
+			t.Errorf("regexpQuote(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestValidateIdentifier — every return branch: empty, too-long, reserved
+// keyword (both ASCII-cased and upper-cased), valid.
+func TestValidateIdentifier(t *testing.T) {
+	// The max identifier length is NAMEDATALEN - 1 = 63 bytes. Construct
+	// boundary values.
+	goodMaxLen := strings.Repeat("a", 63)
+	overLen := strings.Repeat("a", 64)
+
+	cases := []struct {
+		name     string
+		in       string
+		wantWhy  string // empty if expected valid
+	}{
+		{"valid snake_case", "my_table", ""},
+		{"valid length = 63", goodMaxLen, ""},
+		{"empty", "", "identifier is empty"},
+		{"length 64", overLen, "63 bytes"},
+		{"reserved lowercase", "select", "reserved keyword"},
+		{"reserved uppercase", "SELECT", "reserved keyword"},
+		{"reserved mixed case", "Order", "reserved keyword"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := validateIdentifier(c.in)
+			if c.wantWhy == "" {
+				if got != "" {
+					t.Errorf("validateIdentifier(%q) = %q, want empty", c.in, got)
+				}
+				return
+			}
+			if !strings.Contains(got, c.wantWhy) {
+				t.Errorf("validateIdentifier(%q) = %q, want containing %q", c.in, got, c.wantWhy)
+			}
+		})
 	}
 }
 

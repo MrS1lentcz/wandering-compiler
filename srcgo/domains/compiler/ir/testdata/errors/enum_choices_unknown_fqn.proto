@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ir.enum_choices_unknown_fqn;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// choices: references an enum FQN that doesn't resolve in the file +
+// transitive imports. Rejected at resolveEnumMembers after findEnum
+// walks the tree and returns nil.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id     = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string status = 2 [(w17.field) = {
+    type: CHAR, max_len: 16,
+    choices: "does.not.exist.Nope"
+  }];
+}

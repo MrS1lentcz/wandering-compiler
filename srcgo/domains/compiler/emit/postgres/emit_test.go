@@ -168,6 +168,55 @@ func TestCompositePKUnknownFieldErrors(t *testing.T) {
 	}
 }
 
+// TestRenderColumnErrorPropagates — renderColumn returns its error
+// unwrapped up through writeCreateTable → emitAddTable → EmitOp. Feed
+// a synthetic column that's invalid at the emit layer (DECIMAL sem
+// without precision; IR normally rejects this, but unit-exercise the
+// defensive error path).
+func TestRenderColumnErrorPropagates(t *testing.T) {
+	table := &irpb.Table{
+		Name: "t",
+		Columns: []*irpb.Column{{
+			Name:      "amount",
+			ProtoName: "amount",
+			Carrier:   irpb.Carrier_CARRIER_STRING,
+			Type:      irpb.SemType_SEM_DECIMAL,
+			// no Precision set — columnType errors out
+		}},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
+	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	if err == nil {
+		t.Fatal("expected err when column has no precision, got nil")
+	}
+	if !strings.Contains(err.Error(), "DECIMAL requires precision") {
+		t.Errorf("err %q missing DECIMAL precision marker", err.Error())
+	}
+}
+
+// TestRenderIndexErrorPropagates — renderIndexes error propagates via
+// writeIndexStatements. Feed a table whose index references a column
+// that resolves to a zero-value (nil in colByProto map).
+func TestRenderIndexErrorPropagates(t *testing.T) {
+	table := &irpb.Table{
+		Name: "t",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		},
+		PrimaryKey: []string{"id"},
+		Indexes: []*irpb.Index{
+			// Reference a field that doesn't exist — renderIndexField
+			// can't resolve the SQL column name.
+			{Name: "t_ghost_idx", Fields: []*irpb.IndexField{{Name: "ghost"}}},
+		},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
+	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	if err == nil {
+		t.Fatal("expected err for unknown index field, got nil")
+	}
+}
+
 // TestSchemaNamespaceEmit — SCHEMA namespace (D19) prepends `schema.`
 // to every identifier reference (CREATE TABLE, DROP TABLE, DROP INDEX,
 // DROP TYPE, CREATE TYPE). Exercises qualifiedTable + qualifiedIdentifier

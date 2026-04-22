@@ -1002,6 +1002,57 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "bare Message carrier rejected",
+			fixture: "testdata/errors/unsupported_carrier_bare_message.proto",
+			wants: []string{
+				`unsupported_carrier_bare_message.proto:`,
+				`field "inner"`,
+				`is not supported in iteration-1`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "uint32 carrier rejected",
+			fixture: "testdata/errors/unsupported_carrier_uint32.proto",
+			wants: []string{
+				`unsupported_carrier_uint32.proto:`,
+				`carrier uint32 is not supported in iteration-1`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "choices enum FQN not resolvable",
+			fixture: "testdata/errors/enum_choices_unknown_fqn.proto",
+			wants: []string{
+				`enum_choices_unknown_fqn.proto:`,
+				`does.not.exist.Nope`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "map value kind unsupported",
+			fixture: "testdata/errors/map_value_unsupported.proto",
+			wants: []string{
+				`map_value_unsupported.proto:`,
+				`unsupported map value kind`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "list element kind unsupported",
+			fixture: "testdata/errors/list_element_unsupported.proto",
+			wants: []string{
+				`list_element_unsupported.proto:`,
+				`unsupported repeated element kind`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

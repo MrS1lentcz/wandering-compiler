@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.unsupported_carrier_uint32;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// uint32 — rejected at protoKindToCarrier. iter-1 accepts int32/int64
+// but not unsigned integers (PG doesn't have them and SQLite treats them
+// as the same INTEGER type but with different encoding).
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  uint32 count = 2;
+}

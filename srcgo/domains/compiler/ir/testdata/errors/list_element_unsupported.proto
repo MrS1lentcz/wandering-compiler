@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.list_element_unsupported;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// repeated uint32 — element kind outside the iter-1 carrier set.
+// Rejected at populateElement's unsupported-repeated-element branch.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id  = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  repeated uint32 counts = 2;
+}
