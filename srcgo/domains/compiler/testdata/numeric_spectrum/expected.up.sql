@@ -8,10 +8,13 @@ CREATE TABLE measurements (
     raw DOUBLE PRECISION NOT NULL,
     price NUMERIC(19, 4) NOT NULL,
     conversion NUMERIC(5, 4) NOT NULL,
+    fallback_rate NUMERIC(5, 4) NOT NULL DEFAULT 0.5,
     exact_amount NUMERIC(18, 6) NOT NULL,
+    tax_rate NUMERIC(6, 4) NOT NULL DEFAULT '0.0000',
     CONSTRAINT measurements_reading_range CHECK (reading > -50 AND reading < 50),
     CONSTRAINT measurements_raw_range CHECK (raw BETWEEN 0 AND 1000000),
     CONSTRAINT measurements_conversion_range CHECK (conversion BETWEEN 0 AND 1),
+    CONSTRAINT measurements_fallback_rate_range CHECK (fallback_rate BETWEEN 0 AND 1),
     CONSTRAINT measurements_exact_amount_range CHECK (exact_amount BETWEEN 0 AND 1000000000)
 );
 
@@ -20,5 +23,10 @@ explicit range CHECKs and DECIMAL with precision/scale. DECIMAL +
 range bounds (gte/lte) is exercised on `exact_amount` — the IR
 builder''s `numericForRange` check accepts CARRIER_STRING +
 SEM_DECIMAL per iteration-1.md D2.';
+COMMENT ON COLUMN measurements.fallback_rate IS 'default_double literal — exercises the third Default oneof branch
+(default_string / default_int / default_double).';
+COMMENT ON COLUMN measurements.tax_rate IS 'default_string on DECIMAL — string-carrier DECIMAL takes the
+literal digit string as its default. Distinct from default_double
+because DECIMAL storage is string-carrier.';
 
 COMMIT;

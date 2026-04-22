@@ -36,7 +36,10 @@ message Inventory {
   string search_idx  = 4 [(w17.field) = { type: TSEARCH }];
   string attributes  = 5 [
     (w17.field)    = { type: TEXT, null: true },
-    (w17.pg.field) = { custom_type: "HSTORE" }
+    // required_extensions: non-empty — exercises the IR passthrough
+    // that the platform will aggregate per-schema into `CREATE
+    // EXTENSION` statements. Metadata only at iter-1; visible in IR.
+    (w17.pg.field) = { custom_type: "HSTORE", required_extensions: ["hstore"] }
   ];
 
   string mac         = 6 [

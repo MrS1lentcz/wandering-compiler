@@ -13,6 +13,11 @@ import "w17/field.proto";
 //   GIN with opclass (gin_trgm_ops) — method != BTREE emits USING gin.
 //   BRIN with storage options (pages_per_range, autosummarize).
 //   HASH — single-col equality-only (validates HASH restrictions pass).
+//   BTREE explicit (method: BTREE) — distinct dispatch from UNSPECIFIED
+//     default so the `USING btree` branch is exercised.
+//   GIST with opclass — secondary GIN-class method (full-text, geom).
+//   SPGIST — space-partitioned tree (ranges, non-overlapping sets).
+//   NULLS_FIRST — counterpart to NULLS_LAST on ascending order.
 
 message Event {
   option (w17.db.table) = {
@@ -25,11 +30,22 @@ message Event {
         ],
         name: "events_timeline_idx"
       },
+      // NULLS_FIRST on ascending — oldest-first scan with NULLs up top.
+      { fields: [
+          { name: "occurred_at", nulls: NULLS_FIRST }
+        ],
+        name: "events_oldest_first_idx"
+      },
       // LIKE-by-prefix on subject text.
       { fields: [
           { name: "subject", opclass: "text_pattern_ops" }
         ],
         name: "events_subject_prefix_idx"
+      },
+      // Explicit BTREE — dispatch is distinct from UNSPECIFIED default.
+      { method: BTREE,
+        fields: [{ name: "subject" }],
+        name: "events_subject_btree"
       },
       // Trigram GIN for fuzzy search.
       { method: GIN,
@@ -37,6 +53,18 @@ message Event {
           { name: "subject", opclass: "gin_trgm_ops" }
         ],
         name: "events_subject_trgm_gin"
+      },
+      // GIST — secondary inverted-index method with opclass.
+      { method: GIST,
+        fields: [
+          { name: "subject", opclass: "gist_trgm_ops" }
+        ],
+        name: "events_subject_gist"
+      },
+      // SP-GiST — space-partitioned tree.
+      { method: SPGIST,
+        fields: [{ name: "subject" }],
+        name: "events_subject_spgist"
       },
       // BRIN over a monotone time column with storage knobs.
       { method: BRIN,

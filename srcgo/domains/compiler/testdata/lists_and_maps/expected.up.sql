@@ -16,7 +16,8 @@ CREATE TABLE containers (
     scores DOUBLE PRECISION[] NOT NULL,
     prices NUMERIC(19, 4)[] NOT NULL,
     signatures BYTEA[] NOT NULL,
-    timeouts INTERVAL[] NOT NULL
+    timeouts INTERVAL[] NOT NULL,
+    items JSONB NOT NULL
 );
 
 COMMENT ON TABLE containers IS 'Grand-tour fixture for iter-1.6: CARRIER_MAP + CARRIER_LIST + AUTO +
@@ -56,5 +57,7 @@ COMMENT ON COLUMN containers.prices IS 'Double array with preset element sem (MO
 Proves fixed-shape numeric presets carry into array-element storage.';
 COMMENT ON COLUMN containers.signatures IS 'Bytes array → BYTEA[].';
 COMMENT ON COLUMN containers.timeouts IS 'Duration array → INTERVAL[].';
+COMMENT ON COLUMN containers.items IS 'repeated Message → JSONB fallback (PG row[] is too fiddly
+cross-dialect; message elements always serialise as JSONB).';
 
 COMMIT;

@@ -20,8 +20,18 @@ message Measurement {
   double raw          = 5 [(w17.field) = { type: NUMBER, gte: 0, lte: 1000000 }];
   double price        = 6 [(w17.field) = { type: MONEY }];
   double conversion   = 7 [(w17.field) = { type: RATIO }];
-  string exact_amount = 8 [(w17.field) = {
+  // default_double literal — exercises the third Default oneof branch
+  // (default_string / default_int / default_double).
+  double fallback_rate = 9 [(w17.field) = { type: RATIO, default_double: 0.5 }];
+  string exact_amount = 10 [(w17.field) = {
     type: DECIMAL, precision: 18, scale: 6,
     gte: 0, lte: 1000000000
+  }];
+  // default_string on DECIMAL — string-carrier DECIMAL takes the
+  // literal digit string as its default. Distinct from default_double
+  // because DECIMAL storage is string-carrier.
+  string tax_rate = 11 [(w17.field) = {
+    type: DECIMAL, precision: 6, scale: 4,
+    default_string: "0.0000"
   }];
 }

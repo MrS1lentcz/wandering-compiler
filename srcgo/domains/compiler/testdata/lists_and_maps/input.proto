@@ -78,4 +78,14 @@ message Container {
 
   // Duration array → INTERVAL[].
   repeated google.protobuf.Duration timeouts = 16;
+
+  // repeated Message → JSONB fallback (PG row[] is too fiddly
+  // cross-dialect; message elements always serialise as JSONB).
+  repeated Nested items = 17;
+}
+
+// Minimal message referenced by the repeated-Message fallback path.
+message Nested {
+  string k = 1;
+  int64  v = 2;
 }

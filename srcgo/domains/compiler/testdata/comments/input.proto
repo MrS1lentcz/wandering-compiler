@@ -26,10 +26,22 @@ message Article {
     (w17.db.column) = { comment: "Visible article title; shouldn't exceed 200 characters." }
   ];
 
-  // Author's byline, e.g. "Jane's commentary".
-  string byline = 3 [(w17.field) = { type: CHAR, max_len: 100 }];
+  // Author's byline, e.g. "Jane's commentary". Also exercises:
+  //   - (w17.db.column).index on a non-FK column (storage-index synth)
+  string byline = 3 [
+    (w17.field)     = { type: CHAR, max_len: 100 },
+    (w17.db.column) = { index: true }
+  ];
 
   int64 view_count = 4 [(w17.field) = { type: COUNTER }];
+
+  // Column rename via (w17.db.column).name — the SQL column is
+  // `email` even though the proto field is `email_address`. Positive
+  // counterpart to the default_name_reserved error fixture.
+  string email_address = 5 [
+    (w17.field)     = { type: EMAIL },
+    (w17.db.column) = { name: "email" }
+  ];
 }
 
 // Full override: the proto leading comment is developer-flavoured,

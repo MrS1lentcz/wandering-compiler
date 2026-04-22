@@ -9,6 +9,11 @@ CREATE TABLE articles (
     email CITEXT NOT NULL,
     text_config JSON NOT NULL DEFAULT '{}',
     counter BIGINT NOT NULL,
+    raw_payload JSONB NOT NULL,
+    external_uuid UUID NOT NULL,
+    custom_rate NUMERIC(12, 4) NOT NULL,
+    priority SMALLINT NOT NULL,
+    client_ip INET NOT NULL,
     CONSTRAINT articles_bio_len CHECK (char_length(bio) <= 6000),
     CONSTRAINT articles_bio_blank CHECK (bio <> ''),
     CONSTRAINT articles_email_blank CHECK (email <> ''),
@@ -39,5 +44,17 @@ COMMENT ON COLUMN articles.bio IS 'Data semantic + storage override: CHAR(6000) 
 COMMENT ON COLUMN articles.email IS 'EMAIL validation (regex + blank), CITEXT storage.';
 COMMENT ON COLUMN articles.text_config IS 'JSON semantic, text-stored JSON (not JSONB).';
 COMMENT ON COLUMN articles.counter IS 'Redundant-but-explicit: BIGINT via db_type even though default is BIGINT.';
+COMMENT ON COLUMN articles.raw_payload IS 'JSONB via explicit db_type on bytes carrier — bytes + JSONB is a
+legitimate iter-1 combination (bytes carry the serialised JSON
+payload; PG stores as JSONB for querying).';
+COMMENT ON COLUMN articles.external_uuid IS 'UUID storage override on string carrier — stays UUID at SQL level
+even though the data semantic is free-form string.';
+COMMENT ON COLUMN articles.custom_rate IS 'NUMERIC via db_type on DECIMAL sem — storage override equals the
+sem default but exercises the NUMERIC-requires-precision branch
+in validateDbType.';
+COMMENT ON COLUMN articles.priority IS 'SMALLINT via db_type (D22c provides SMALL_INTEGER preset; db_type
+is the equivalent storage-level override path).';
+COMMENT ON COLUMN articles.client_ip IS 'INET on string carrier via db_type override — cross-dialect enum
+form; distinct from the TEXT+custom_type path.';
 
 COMMIT;

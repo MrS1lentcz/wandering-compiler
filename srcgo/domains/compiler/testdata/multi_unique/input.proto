@@ -13,7 +13,14 @@ message User {
   option (w17.db.table) = {
     name: "users",
     indexes: [
-      { name: "users_tenant_handle_uidx", fields: [{ name: "tenant_id" }, { name: "handle" }], unique: true }
+      { name: "users_tenant_handle_uidx", fields: [{ name: "tenant_id" }, { name: "handle" }], unique: true },
+      // UNIQUE covering index — `include:` on a unique index is valid
+      // PG (covers additional columns for index-only scans without
+      // joining the uniqueness constraint).
+      { name: "users_tenant_email_cover_uidx",
+        fields: [{ name: "tenant_id" }, { name: "email" }],
+        unique: true,
+        include: ["username"] }
     ]
   };
 

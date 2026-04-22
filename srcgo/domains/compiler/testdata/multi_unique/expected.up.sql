@@ -14,6 +14,7 @@ CREATE TABLE users (
 );
 
 CREATE UNIQUE INDEX users_tenant_handle_uidx ON users (tenant_id, handle);
+CREATE UNIQUE INDEX users_tenant_email_cover_uidx ON users (tenant_id, email) INCLUDE (username);
 CREATE UNIQUE INDEX users_email_uidx ON users (email);
 CREATE UNIQUE INDEX users_username_uidx ON users (username);
 

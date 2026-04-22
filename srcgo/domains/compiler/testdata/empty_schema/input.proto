@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package empty_schema;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Empty-schema fixture — a proto file with a module-level annotation
+// but no messages that carry (w17.db.table). The compiler should emit
+// an empty migration (BEGIN/COMMIT wrapping no statements) and exit
+// zero. Exercises the zero-table edge of plan.Diff + emit.Emit.
+option (w17.db.module) = { prefix: "empty" };
+
+// Non-DB message — no (w17.db.table), so buildTable skips it. The
+// compiler should NOT generate a table for this.
+message ClientConfig {
+  string name = 1;
+  int32  port = 2;
+}

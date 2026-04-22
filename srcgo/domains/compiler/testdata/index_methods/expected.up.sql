@@ -10,8 +10,12 @@ CREATE TABLE events (
 );
 
 CREATE INDEX events_timeline_idx ON events (occurred_at DESC NULLS LAST, id);
+CREATE INDEX events_oldest_first_idx ON events (occurred_at NULLS FIRST);
 CREATE INDEX events_subject_prefix_idx ON events (subject text_pattern_ops);
+CREATE INDEX events_subject_btree ON events (subject);
 CREATE INDEX events_subject_trgm_gin ON events USING gin (subject gin_trgm_ops);
+CREATE INDEX events_subject_gist ON events USING gist (subject gist_trgm_ops);
+CREATE INDEX events_subject_spgist ON events USING spgist (subject);
 CREATE INDEX events_occurred_brin ON events USING brin (occurred_at) WITH (autosummarize=on, pages_per_range=32);
 CREATE INDEX events_external_id_hash ON events USING hash (external_id);
 

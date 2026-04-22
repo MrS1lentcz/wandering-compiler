@@ -55,4 +55,35 @@ message Article {
     (w17.field)     = { type: COUNTER },
     (w17.db.column) = { db_type: BIGINT }
   ];
+
+  // JSONB via explicit db_type on bytes carrier — bytes + JSONB is a
+  // legitimate iter-1 combination (bytes carry the serialised JSON
+  // payload; PG stores as JSONB for querying).
+  bytes  raw_payload = 9 [(w17.db.column) = { db_type: JSONB }];
+
+  // UUID storage override on string carrier — stays UUID at SQL level
+  // even though the data semantic is free-form string.
+  string external_uuid = 10 [
+    (w17.field)     = { type: TEXT },
+    (w17.db.column) = { db_type: UUID }
+  ];
+
+  // NUMERIC via db_type on DECIMAL sem — storage override equals the
+  // sem default but exercises the NUMERIC-requires-precision branch
+  // in validateDbType.
+  string custom_rate = 11 [
+    (w17.field)     = { type: DECIMAL, precision: 12, scale: 4 },
+    (w17.db.column) = { db_type: NUMERIC }
+  ];
+
+  // SMALLINT via db_type (D22c provides SMALL_INTEGER preset; db_type
+  // is the equivalent storage-level override path).
+  int32  priority   = 12 [(w17.db.column) = { db_type: SMALLINT }];
+
+  // INET on string carrier via db_type override — cross-dialect enum
+  // form; distinct from the TEXT+custom_type path.
+  string client_ip  = 13 [
+    (w17.field)     = { type: TEXT },
+    (w17.db.column) = { db_type: INET }
+  ];
 }
