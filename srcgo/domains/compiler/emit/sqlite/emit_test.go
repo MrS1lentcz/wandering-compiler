@@ -50,6 +50,27 @@ func TestEmitOpReturnsNotImplemented(t *testing.T) {
 	}
 }
 
+// TestStubRequirement — the sqlite emitter's capability stub always
+// returns ok=false with a zero Requirement, because iter-1 SQLite emits
+// no SQL and the catalog is intentionally empty. Exercises the
+// emit.DialectCapabilities contract on the stub path.
+func TestStubRequirement(t *testing.T) {
+	e := sqlite.Emitter{}
+	// Any cap string — the stub catalog is empty so lookup must miss.
+	req, ok := e.Requirement("UUID_DEFAULT")
+	if ok {
+		t.Errorf("stub Requirement(UUID_DEFAULT) ok=true, want false — stub catalog must stay empty until real SQLite emission lands")
+	}
+	if req.MinVersion != "" || len(req.Extensions) > 0 {
+		t.Errorf("stub Requirement returned non-zero value %+v, want zero Requirement", req)
+	}
+	// A second, unrelated cap — same behaviour.
+	req, ok = e.Requirement("anything")
+	if ok || req.MinVersion != "" {
+		t.Errorf("stub Requirement(anything) = %+v ok=%v, want zero+false", req, ok)
+	}
+}
+
 // The plan-level orchestrator surfaces the stub error wrapped with the
 // dialect name and op index — checks that emit.Emit composes cleanly with
 // a failing emitter (no silent swallowing, no partial output).

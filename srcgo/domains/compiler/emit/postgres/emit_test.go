@@ -140,6 +140,68 @@ func TestUnknownOpVariantErrors(t *testing.T) {
 	}
 }
 
+// TestAddTableEmptyNameErrors — emitAddTable refuses a table with no
+// name. Defensive branch against an ir.Build invariant violation.
+func TestAddTableEmptyNameErrors(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: &irpb.Table{}}}}
+	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty table name accepted, want error")
+	}
+}
+
+// TestCompositePKUnknownFieldErrors — emitAddTable refuses a PK entry
+// that references a column not in Columns. Defensive against a broken
+// IR where tbl.PrimaryKey and tbl.Columns disagree.
+func TestCompositePKUnknownFieldErrors(t *testing.T) {
+	table := &irpb.Table{
+		Name:       "t",
+		Columns:    []*irpb.Column{{Name: "a", ProtoName: "a", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true}},
+		PrimaryKey: []string{"a", "ghost_column"},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
+	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	if err == nil {
+		t.Fatal("composite PK with unknown field accepted, want error")
+	}
+	if !strings.Contains(err.Error(), "ghost_column") {
+		t.Errorf("error doesn't name the offending field: %v", err)
+	}
+}
+
+// TestSchemaNamespaceEmit — SCHEMA namespace (D19) prepends `schema.`
+// to every identifier reference (CREATE TABLE, DROP TABLE, DROP INDEX,
+// DROP TYPE, CREATE TYPE). Exercises qualifiedTable + qualifiedIdentifier
+// SCHEMA branches; fixtures exercise PREFIX and NONE, this catches the
+// SCHEMA path without a full golden.
+func TestSchemaNamespaceEmit(t *testing.T) {
+	table := &irpb.Table{
+		Name:          "reports",
+		NamespaceMode: irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		Namespace:     "reporting",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		},
+		PrimaryKey: []string{"id"},
+		Indexes: []*irpb.Index{
+			{Name: "reports_name_idx", Fields: []*irpb.IndexField{{Name: "id"}}},
+		},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
+	up, down, err := (postgres.Emitter{}).EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if !strings.Contains(up, "CREATE TABLE reporting.reports") {
+		t.Errorf("SCHEMA up missing qualified table:\n%s", up)
+	}
+	if !strings.Contains(down, "DROP TABLE IF EXISTS reporting.reports") {
+		t.Errorf("SCHEMA down missing qualified DROP TABLE:\n%s", down)
+	}
+	if !strings.Contains(down, "DROP INDEX IF EXISTS reporting.reports_name_idx") {
+		t.Errorf("SCHEMA down missing qualified DROP INDEX:\n%s", down)
+	}
+}
+
 // ---- helpers ----
 
 func runPipeline(t *testing.T, protoPath string) (up, down string) {
