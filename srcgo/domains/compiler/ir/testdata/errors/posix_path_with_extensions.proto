@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package ir.posix_path_with_extensions;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// POSIX_PATH rejects extensions — POSIX_PATH is the "any path" preset
+// (directories, pipes, executables); file-suffix constraints belong
+// on FILE_PATH.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string path = 2 [(w17.field) = { type: POSIX_PATH, extensions: ["sh"] }];
+}

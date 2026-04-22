@@ -1106,6 +1106,46 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "oneof field rejected",
+			fixture: "testdata/errors/unsupported_oneof.proto",
+			wants: []string{
+				`unsupported_oneof.proto:`,
+				`is not supported in iteration-1`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "list element sem type mismatches element carrier",
+			fixture: "testdata/errors/list_element_sem_mismatch.proto",
+			wants: []string{
+				`list_element_sem_mismatch.proto:`,
+				`list carrier validates type against the element carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "extensions contains empty entry",
+			fixture: "testdata/errors/extensions_empty_entry.proto",
+			wants: []string{
+				`extensions_empty_entry.proto:`,
+				`extensions contains an empty entry`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "POSIX_PATH rejects extensions",
+			fixture: "testdata/errors/posix_path_with_extensions.proto",
+			wants: []string{
+				`posix_path_with_extensions.proto:`,
+				`extensions is not valid on POSIX_PATH`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package ir.unsupported_oneof;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Oneof fields — rejected at protoKindToCarrier's ContainingOneof check.
+// Proto oneofs mean "exactly one of these is set" at serialisation time
+// but don't map cleanly to SQL columns (you'd need multiple nullable
+// columns + a CHECK that exactly one is non-null, or a JSONB blob).
+// Parked to a later iteration.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  oneof value {
+    string s = 2;
+    int64  i = 3;
+  }
+}

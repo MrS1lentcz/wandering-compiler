@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package ir.extensions_empty_entry;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// FILE_PATH.extensions contains an empty "" entry — would produce a
+// broken regex alternation. Rejected at resolvePathExtensions.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string path = 2 [(w17.field) = { type: FILE_PATH, extensions: ["csv", "", "json"] }];
+}
