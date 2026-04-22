@@ -548,11 +548,12 @@ in code, not in docs:
   `ir/testdata/happy.proto` — generated SQL matches the postgres
   emitter's own pipeline test (M4) byte-for-byte, filenames are
   `YYYYMMDDTHHMMSSZ.{up,down}.sql` per D5 rev2. Pilot-facing copy
-  lives at `srcgo/domains/compiler/examples/iteration-1/happy.proto`
-  — domain-local, not a repo-root `examples/`, because the compiler
-  is a domain and keeping examples next to the code they exercise is
-  the only layout that stays correct when later components add Go
-  example functions or runnable demos. Duplicated rather than
+  lives at `srcgo/domains/compiler/cmd/cli/testdata/happy.proto` —
+  colocated with the CLI test package per Go's testdata convention.
+  (Previously under `examples/iteration-1/`; moved 2026-04-22 during
+  conventions compliance sweep because `examples/` is not a standard
+  domain subdirectory per `conventions-global/go.md`.) Duplicated
+  rather than
   symlinked — `testdata/` is the test fixture, `examples/` is the
   user's entry point; the two rot at different speeds. The
   generator's `out/` directory lands next to whatever proto the user
@@ -836,7 +837,7 @@ in code, not in docs:
 
   Every fixture that used `fk` on `(w17.field)` migrated:
   `happy.proto`, `vocab_fixture.proto`, `fks_parent_child`, `m2m_join`,
-  `examples/iteration-1/happy.proto`, two existing FK-error fixtures.
+  `cmd/cli/testdata/happy.proto`, two existing FK-error fixtures.
 
   All 13 grand-tour fixtures (3 original + 7 M10 + 1 D11 + 2 D12
   new) green on M8 goldens + M9 `make test-apply` against

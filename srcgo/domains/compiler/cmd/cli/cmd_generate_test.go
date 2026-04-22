@@ -19,7 +19,7 @@ func TestGenerateCmd_RunHappy(t *testing.T) {
 	cmd := &GenerateCmd{
 		Iteration1: true,
 		Imports:    []string{"../../../../../proto"},
-		Protos:     []string{"../../examples/iteration-1/happy.proto"},
+		Protos:     []string{"testdata/happy.proto"},
 	}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -97,7 +97,7 @@ func TestGenerateCmd_ExplicitOutOverridesDefault(t *testing.T) {
 	cmd := &GenerateCmd{
 		Iteration1: true,
 		Imports:    []string{"../../../../../proto"},
-		Protos:     []string{"../../examples/iteration-1/happy.proto"},
+		Protos:     []string{"testdata/happy.proto"},
 		Out:        explicitDir,
 	}
 	if err := cmd.Run(); err != nil {

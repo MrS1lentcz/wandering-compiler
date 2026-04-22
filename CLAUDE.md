@@ -32,4 +32,29 @@ File **does not exist** → project is in the **skeleton** stage [→ D2.5]. No 
 
 ## Known Issues
 
-None — project is in the skeleton stage, no code has been written. The phased roadmap in `docs/tech-spec.md` [→ D1] is the implementation backlog, not a list of deviations; nothing belongs here yet.
+Skeleton stage is now **populated with iter-1 code**. Tracked deviations
+from `docs/conventions-global/`:
+
+- **Core functions over 50 LOC** (`quality.md §Code Structure`) — 18
+  functions above the soft cap remain, each registered in
+  [`docs/core-functions.md`](docs/core-functions.md) with invariant +
+  rationale. Convention permits >50 LOC as core functions *provided*
+  they carry special documentation + 100% coverage. The documentation
+  half is done; the 100% coverage half is Phase B of the iter-1
+  close-out sweep (see `docs/iteration-1-coverage.md`).
+- **Makefile surface** (`tooling.md §Core Targets`) — standard targets
+  `configure / install / up / audit / seed / nuke / neoc / migrate / e2e
+  / loadtest` are missing. Current Makefile carries only `build /
+  schemagen / test / test-apply`. Acceptable at skeleton; must land
+  before `poc` transition.
+- **Shared lib tier absent** (`go.md §srcgo Structure`) — `srcgo/lib/`
+  and `srcgo/x/` don't exist yet. `naming/`, `writer/`, `diag/` look
+  domain-general and are candidates to lift when a second consumer
+  appears (platform + deploy client per
+  `project_three_component_platform.md` memory). Deferred to iter-2+.
+
+Not applicable at skeleton stage (no handlers yet): grpc.md three-layer
+model, eventbus.md two-file skeleton, protobridge, ent/schema/,
+locking/acceptance-criteria.yaml, `PROJECT_STAGE` precommit hooks, auth
+resilience rules. These become active when the first real service
+domain lands.
