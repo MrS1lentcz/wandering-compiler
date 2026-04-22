@@ -93,6 +93,9 @@ func renderColumn(t *irpb.Table, col *irpb.Column, colByProto map[string]*irpb.C
 // string-carrier SEM_ENUM columns. Callers that synthesise a column
 // without a table (pgArrayOf element dispatch) may pass "" — element-
 // level SEM_ENUM on LIST/MAP is rejected at IR time.
+// columnType renders the PG column-type keyword for one IR column.
+// Dispatches the two override paths first (pg.custom_type, db_type), then
+// per-carrier helpers for the curated (carrier × sem) combinations.
 func columnType(tableName string, col *irpb.Column) (string, error) {
 	if pg := col.GetPg(); pg != nil {
 		if raw := pg.GetCustomType(); raw != "" {
@@ -102,132 +105,164 @@ func columnType(tableName string, col *irpb.Column) (string, error) {
 	if col.GetDbType() != irpb.DbType_DB_TYPE_UNSPECIFIED {
 		return pgColumnFromDbType(col)
 	}
-
 	switch col.GetCarrier() {
 	case irpb.Carrier_CARRIER_BOOL:
 		return "BOOLEAN", nil
-
 	case irpb.Carrier_CARRIER_BYTES:
-		// bytes-carrying-JSON stays bytes on the wire but stored as JSONB.
-		if col.GetType() == irpb.SemType_SEM_JSON {
-			return "JSONB", nil
-		}
-		return "BYTEA", nil
-
+		return columnTypeBytes(col), nil
 	case irpb.Carrier_CARRIER_STRING:
-		switch col.GetType() {
-		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG,
-			irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL:
-			// All four render as VARCHAR(N). CHAR / SLUG require max_len
-			// from the author; EMAIL / URL have preset defaults applied
-			// at ir.Build.
-			if col.GetMaxLen() <= 0 {
-				return "", fmt.Errorf("%s requires max_len (ir invariant)", displaySemType(col.GetType()))
-			}
-			return fmt.Sprintf("VARCHAR(%d)", col.GetMaxLen()), nil
-		case irpb.SemType_SEM_TEXT,
-			irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
-			// Path presets (D22d) — TEXT storage. The regex CHECK on
-			// allowed extensions lands via attachChecks; the column
-			// type itself is identical to TEXT.
-			return "TEXT", nil
-		case irpb.SemType_SEM_UUID:
-			return "UUID", nil
-		case irpb.SemType_SEM_JSON:
-			return "JSONB", nil
-		case irpb.SemType_SEM_IP:
-			return "INET", nil
-		case irpb.SemType_SEM_MAC:
-			return "MACADDR", nil
-		case irpb.SemType_SEM_TSEARCH:
-			return "TSVECTOR", nil
-		case irpb.SemType_SEM_ENUM:
-			if tableName == "" {
-				return "", fmt.Errorf("string+SEM_ENUM requires table context for CREATE TYPE name derivation")
-			}
-			return pgEnumTypeName(tableName, col.GetName()), nil
-		case irpb.SemType_SEM_DECIMAL:
-			if col.GetPrecision() <= 0 {
-				return "", fmt.Errorf("DECIMAL requires precision (ir invariant)")
-			}
-			if col.Scale != nil {
-				return fmt.Sprintf("NUMERIC(%d, %d)", col.GetPrecision(), *col.Scale), nil
-			}
-			return fmt.Sprintf("NUMERIC(%d)", col.GetPrecision()), nil
-		}
-
+		return columnTypeString(tableName, col)
 	case irpb.Carrier_CARRIER_INT32:
-		switch col.GetType() {
-		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_ENUM:
-			// int32 + SEM_ENUM: storage stays INTEGER; membership is enforced
-			// by the CHECK IN (numbers) the IR attaches in resolveEnumColumn.
-			return "INTEGER", nil
-		case irpb.SemType_SEM_SMALL_INTEGER:
-			// SMALLINT halves storage vs INTEGER when the author knows the
-			// range fits ±32 768 (status codes, priorities, ordinals). D22c.
-			return "SMALLINT", nil
-		case irpb.SemType_SEM_COUNTER:
-			// COUNTER is defined as int64 in D2; int32 is not valid here but
-			// the IR builder already rejects the combination. Keep the branch
-			// defensive so a future edit doesn't silently produce INTEGER.
-			return "", fmt.Errorf("COUNTER requires int64 carrier (ir invariant)")
-		}
-
+		return columnTypeInt32(col)
 	case irpb.Carrier_CARRIER_INT64:
-		switch col.GetType() {
-		case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER, irpb.SemType_SEM_ENUM:
-			// int64 + SEM_ENUM: storage stays BIGINT; CHECK IN (numbers)
-			// enforces membership (see resolveEnumColumn).
-			return "BIGINT", nil
-		}
-
+		return columnTypeInt64(col)
 	case irpb.Carrier_CARRIER_DOUBLE:
-		switch col.GetType() {
-		case irpb.SemType_SEM_NUMBER:
-			return "DOUBLE PRECISION", nil
-		case irpb.SemType_SEM_MONEY:
-			return "NUMERIC(19, 4)", nil
-		case irpb.SemType_SEM_PERCENTAGE:
-			return "NUMERIC(5, 2)", nil
-		case irpb.SemType_SEM_RATIO:
-			return "NUMERIC(5, 4)", nil
-		}
-
+		return columnTypeDouble(col)
 	case irpb.Carrier_CARRIER_TIMESTAMP:
-		switch col.GetType() {
-		case irpb.SemType_SEM_DATE:
-			return "DATE", nil
-		case irpb.SemType_SEM_TIME:
-			return "TIME", nil
-		case irpb.SemType_SEM_DATETIME:
-			return "TIMESTAMPTZ", nil
-		}
-
+		return columnTypeTimestamp(col)
 	case irpb.Carrier_CARRIER_DURATION:
 		return "INTERVAL", nil
-
 	case irpb.Carrier_CARRIER_MAP:
-		// map<K, V> dispatch:
-		//   value is string scalar   → HSTORE (iter-1.6 default, requires hstore extension)
-		//   everything else          → JSONB
-		if !col.GetElementIsMessage() && col.GetElementCarrier() == irpb.Carrier_CARRIER_STRING {
-			return "HSTORE", nil
-		}
-		return "JSONB", nil
-
+		return columnTypeMap(col), nil
 	case irpb.Carrier_CARRIER_LIST:
-		// repeated X dispatch:
-		//   message element          → JSONB
-		//   scalar element, AUTO     → <element_pg_type>[] (element default sem)
-		//   scalar element, sem set  → <element_pg_type>[] (element's refined sem)
-		if col.GetElementIsMessage() {
-			return "JSONB", nil
-		}
-		return pgArrayOf(col)
+		return columnTypeList(col)
 	}
-
 	return "", fmt.Errorf("no PG type mapping for carrier=%s type=%s (ir invariant violated)",
 		displayCarrier(col.GetCarrier()), displaySemType(col.GetType()))
+}
+
+// columnTypeBytes maps the bytes carrier to BYTEA, except when the author
+// has opted into JSONB storage via SEM_JSON (the value still wires as
+// bytes but is stored as a JSON blob).
+func columnTypeBytes(col *irpb.Column) string {
+	if col.GetType() == irpb.SemType_SEM_JSON {
+		return "JSONB"
+	}
+	return "BYTEA"
+}
+
+// columnTypeString dispatches the string-carrier sem variants. Covers
+// VARCHAR(N) for length-bounded presets, fixed SQL types for UUID / JSON /
+// IP / MAC / TSEARCH, the PG ENUM derived type for SEM_ENUM (requires
+// table context), and NUMERIC(p, s) for DECIMAL.
+func columnTypeString(tableName string, col *irpb.Column) (string, error) {
+	switch col.GetType() {
+	case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG,
+		irpb.SemType_SEM_EMAIL, irpb.SemType_SEM_URL:
+		// All four render as VARCHAR(N). CHAR / SLUG require max_len
+		// from the author; EMAIL / URL have preset defaults applied
+		// at ir.Build.
+		if col.GetMaxLen() <= 0 {
+			return "", fmt.Errorf("%s requires max_len (ir invariant)", displaySemType(col.GetType()))
+		}
+		return fmt.Sprintf("VARCHAR(%d)", col.GetMaxLen()), nil
+	case irpb.SemType_SEM_TEXT,
+		irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
+		// Path presets (D22d) — TEXT storage. The regex CHECK on
+		// allowed extensions lands via attachChecks; the column
+		// type itself is identical to TEXT.
+		return "TEXT", nil
+	case irpb.SemType_SEM_UUID:
+		return "UUID", nil
+	case irpb.SemType_SEM_JSON:
+		return "JSONB", nil
+	case irpb.SemType_SEM_IP:
+		return "INET", nil
+	case irpb.SemType_SEM_MAC:
+		return "MACADDR", nil
+	case irpb.SemType_SEM_TSEARCH:
+		return "TSVECTOR", nil
+	case irpb.SemType_SEM_ENUM:
+		if tableName == "" {
+			return "", fmt.Errorf("string+SEM_ENUM requires table context for CREATE TYPE name derivation")
+		}
+		return pgEnumTypeName(tableName, col.GetName()), nil
+	case irpb.SemType_SEM_DECIMAL:
+		if col.GetPrecision() <= 0 {
+			return "", fmt.Errorf("DECIMAL requires precision (ir invariant)")
+		}
+		if col.Scale != nil {
+			return fmt.Sprintf("NUMERIC(%d, %d)", col.GetPrecision(), *col.Scale), nil
+		}
+		return fmt.Sprintf("NUMERIC(%d)", col.GetPrecision()), nil
+	}
+	return "", fmt.Errorf("no PG type mapping for carrier=STRING type=%s (ir invariant violated)", displaySemType(col.GetType()))
+}
+
+// columnTypeInt32 dispatches the int32 carrier: NUMBER / ID / ENUM stay
+// INTEGER, SMALL_INTEGER drops to SMALLINT (D22c). COUNTER is rejected —
+// IR already refuses this combination but the defensive branch keeps
+// future edits from silently producing INTEGER.
+func columnTypeInt32(col *irpb.Column) (string, error) {
+	switch col.GetType() {
+	case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_ENUM:
+		return "INTEGER", nil
+	case irpb.SemType_SEM_SMALL_INTEGER:
+		return "SMALLINT", nil
+	case irpb.SemType_SEM_COUNTER:
+		return "", fmt.Errorf("COUNTER requires int64 carrier (ir invariant)")
+	}
+	return "", fmt.Errorf("no PG type mapping for carrier=INT32 type=%s (ir invariant violated)", displaySemType(col.GetType()))
+}
+
+// columnTypeInt64 renders BIGINT for every supported int64 sem variant.
+// SEM_ENUM storage stays BIGINT; CHECK IN (numbers) enforces membership.
+func columnTypeInt64(col *irpb.Column) (string, error) {
+	switch col.GetType() {
+	case irpb.SemType_SEM_NUMBER, irpb.SemType_SEM_ID, irpb.SemType_SEM_COUNTER, irpb.SemType_SEM_ENUM:
+		return "BIGINT", nil
+	}
+	return "", fmt.Errorf("no PG type mapping for carrier=INT64 type=%s (ir invariant violated)", displaySemType(col.GetType()))
+}
+
+// columnTypeDouble renders NUMBER / MONEY / PERCENTAGE / RATIO — each a
+// fixed-shape NUMERIC preset except bare NUMBER which stays DOUBLE
+// PRECISION to match proto `double` wire semantics.
+func columnTypeDouble(col *irpb.Column) (string, error) {
+	switch col.GetType() {
+	case irpb.SemType_SEM_NUMBER:
+		return "DOUBLE PRECISION", nil
+	case irpb.SemType_SEM_MONEY:
+		return "NUMERIC(19, 4)", nil
+	case irpb.SemType_SEM_PERCENTAGE:
+		return "NUMERIC(5, 2)", nil
+	case irpb.SemType_SEM_RATIO:
+		return "NUMERIC(5, 4)", nil
+	}
+	return "", fmt.Errorf("no PG type mapping for carrier=DOUBLE type=%s (ir invariant violated)", displaySemType(col.GetType()))
+}
+
+// columnTypeTimestamp dispatches Timestamp into DATE / TIME / TIMESTAMPTZ
+// per sem. The D14 default for bare Timestamp is DATETIME → TIMESTAMPTZ.
+func columnTypeTimestamp(col *irpb.Column) (string, error) {
+	switch col.GetType() {
+	case irpb.SemType_SEM_DATE:
+		return "DATE", nil
+	case irpb.SemType_SEM_TIME:
+		return "TIME", nil
+	case irpb.SemType_SEM_DATETIME:
+		return "TIMESTAMPTZ", nil
+	}
+	return "", fmt.Errorf("no PG type mapping for carrier=TIMESTAMP type=%s (ir invariant violated)", displaySemType(col.GetType()))
+}
+
+// columnTypeMap picks HSTORE when the value is a string scalar (iter-1.6
+// default, requires hstore extension) and JSONB otherwise.
+func columnTypeMap(col *irpb.Column) string {
+	if !col.GetElementIsMessage() && col.GetElementCarrier() == irpb.Carrier_CARRIER_STRING {
+		return "HSTORE"
+	}
+	return "JSONB"
+}
+
+// columnTypeList dispatches `repeated X`: message elements serialise to
+// JSONB; scalar elements render as `<element_pg_type>[]` with the
+// element's refined or default sem driving the inner type.
+func columnTypeList(col *irpb.Column) (string, error) {
+	if col.GetElementIsMessage() {
+		return "JSONB", nil
+	}
+	return pgArrayOf(col)
 }
 
 // pgArrayOf renders a native PG array of the column's element carrier.

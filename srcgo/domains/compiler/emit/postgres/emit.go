@@ -37,87 +37,120 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 	}
 }
 
-// emitAddTable renders CREATE TABLE + separate CREATE INDEX statements (up)
-// and DROP INDEX + DROP TABLE (down). Column and constraint layout follows
-// the reference in iteration-1-models.md.
+// emitAddTable renders CREATE TABLE + separate CREATE INDEX statements
+// (up) and DROP INDEX + DROP TABLE (down). Orchestrates the five
+// emit stages in order: ENUM types prelude (D17), CREATE TABLE body,
+// CREATE INDEX tail, COMMENT ON tail (D22), then down-migration.
+// Column and constraint layout follows the reference in
+// iteration-1-models.md.
 func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error) {
 	if t.GetName() == "" {
 		return "", "", fmt.Errorf("postgres: AddTable with empty name (builder invariant violated)")
 	}
-
-	// protoName → Column for index / FK name resolution.
 	colByProto := map[string]*irpb.Column{}
 	for _, c := range t.GetColumns() {
 		colByProto[c.GetProtoName()] = c
 	}
-
 	qualTable := qualifiedTable(t)
+	enumTypes := collectPgEnumTypes(t)
 
 	var upB strings.Builder
-	// D17 — prepend CREATE TYPE <table>_<col> AS ENUM (names…) for every
-	// string-carrier SEM_ENUM column before CREATE TABLE. Declaration
-	// order preserved so goldens stay deterministic. Under SCHEMA
-	// namespace (D19) the type lives in the same schema as the table;
-	// under PREFIX mode the type name was already prefixed in IR.
-	enumTypes := collectPgEnumTypes(t)
-	for _, et := range enumTypes {
-		fmt.Fprintf(&upB, "CREATE TYPE %s AS ENUM (%s);\n\n", qualifiedIdentifier(t, et.name), strings.Join(et.quotedValues, ", "))
+	writeEnumTypePrelude(&upB, t, enumTypes)
+	if err := writeCreateTable(&upB, t, colByProto, qualTable); err != nil {
+		return "", "", err
 	}
-	fmt.Fprintf(&upB, "CREATE TABLE %s (\n", qualTable)
+	idxNames, err := writeIndexStatements(&upB, t, colByProto, qualTable)
+	if err != nil {
+		return "", "", err
+	}
+	writeCommentStatements(&upB, t, qualTable)
+	return upB.String(), renderTableDown(t, qualTable, idxNames, enumTypes), nil
+}
 
+// writeEnumTypePrelude (D17) prepends `CREATE TYPE <table>_<col> AS ENUM
+// (names…)` for every string-carrier SEM_ENUM column before CREATE TABLE.
+// Declaration order preserved so goldens stay deterministic. Under SCHEMA
+// namespace (D19) the type lives in the same schema as the table; under
+// PREFIX mode the type name was already prefixed in IR.
+func writeEnumTypePrelude(b *strings.Builder, t *irpb.Table, enumTypes []pgEnumType) {
+	for _, et := range enumTypes {
+		fmt.Fprintf(b, "CREATE TYPE %s AS ENUM (%s);\n\n", qualifiedIdentifier(t, et.name), strings.Join(et.quotedValues, ", "))
+	}
+}
+
+// writeCreateTable emits `CREATE TABLE <qual_name> (…);` with column
+// lines, composite PK, derived CHECKs, and raw CHECK constraints in the
+// established order. Returns an error when any column / check renderer
+// refuses the IR as invalid (should be caught at IR build time; this is
+// a defense-in-depth boundary).
+func writeCreateTable(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string) error {
+	fmt.Fprintf(b, "CREATE TABLE %s (\n", qualTable)
 	lines := make([]string, 0, len(t.GetColumns()))
-	// One line per column.
 	for _, col := range t.GetColumns() {
-		line, colErr := renderColumn(t, col, colByProto)
-		if colErr != nil {
-			return "", "", colErr
+		line, err := renderColumn(t, col, colByProto)
+		if err != nil {
+			return err
 		}
 		lines = append(lines, line)
 	}
-
-	// Composite primary key: only emit as a table-level PRIMARY KEY when more
-	// than one PK column exists. Single-column PK is inlined on the column
-	// line (see renderColumn).
+	// Composite primary key: only emit as a table-level PRIMARY KEY
+	// when more than one PK column exists. Single-column PK is inlined
+	// on the column line (see renderColumn).
 	if len(t.GetPrimaryKey()) > 1 {
-		sqlNames := make([]string, 0, len(t.GetPrimaryKey()))
-		for _, p := range t.GetPrimaryKey() {
-			c := colByProto[p]
-			if c == nil {
-				return "", "", fmt.Errorf("postgres: table %s: PK references unknown proto field %q", t.GetName(), p)
-			}
-			sqlNames = append(sqlNames, c.GetName())
+		pkLine, err := renderCompositePrimaryKey(t, colByProto)
+		if err != nil {
+			return err
 		}
-		lines = append(lines, fmt.Sprintf("    PRIMARY KEY (%s)", strings.Join(sqlNames, ", ")))
+		lines = append(lines, pkLine)
 	}
-
-	// Table-level CHECK constraints — collected after columns for readability
-	// and parity with the reference SQL in iteration-1-models.md.
+	// Table-level CHECK constraints — collected after columns for
+	// readability and parity with the reference SQL in
+	// iteration-1-models.md.
 	for _, col := range t.GetColumns() {
 		for _, ck := range col.GetChecks() {
-			line, ckErr := renderCheck(t.GetName(), col, ck)
-			if ckErr != nil {
-				return "", "", ckErr
+			line, err := renderCheck(t.GetName(), col, ck)
+			if err != nil {
+				return err
 			}
 			if line != "" {
 				lines = append(lines, "    "+line)
 			}
 		}
 	}
-	// Raw CHECK constraints (`(w17.db.table).raw_checks`) — author-supplied
-	// SQL expression rendered verbatim inside `CONSTRAINT <name> CHECK (…)`.
-	// Declaration order is preserved.
+	// Raw CHECK constraints (`(w17.db.table).raw_checks`) — author-
+	// supplied SQL expression rendered verbatim inside `CONSTRAINT
+	// <name> CHECK (…)`. Declaration order is preserved.
 	for _, rc := range t.GetRawChecks() {
 		lines = append(lines, fmt.Sprintf("    CONSTRAINT %s CHECK (%s)", rc.GetName(), rc.GetExpr()))
 	}
+	b.WriteString(strings.Join(lines, ",\n"))
+	b.WriteString("\n);")
+	return nil
+}
 
-	upB.WriteString(strings.Join(lines, ",\n"))
-	upB.WriteString("\n);")
+// renderCompositePrimaryKey resolves the SQL column names for a
+// multi-column PK and returns the `PRIMARY KEY (...)` line. Errors when a
+// PK proto name doesn't resolve to a column — an IR invariant violation
+// caught defensively here.
+func renderCompositePrimaryKey(t *irpb.Table, colByProto map[string]*irpb.Column) (string, error) {
+	sqlNames := make([]string, 0, len(t.GetPrimaryKey()))
+	for _, p := range t.GetPrimaryKey() {
+		c := colByProto[p]
+		if c == nil {
+			return "", fmt.Errorf("postgres: table %s: PK references unknown proto field %q", t.GetName(), p)
+		}
+		sqlNames = append(sqlNames, c.GetName())
+	}
+	return fmt.Sprintf("    PRIMARY KEY (%s)", strings.Join(sqlNames, ", ")), nil
+}
 
-	// Separate CREATE INDEX statements — structured indexes first, then
-	// raw-body indexes. Down-migration reverses this combined order.
-	idxStmts, idxNames, idxErr := renderIndexes(t, colByProto)
-	if idxErr != nil {
-		return "", "", idxErr
+// writeIndexStatements appends the structured + raw CREATE INDEX
+// statements after CREATE TABLE. Returns the index names in emission
+// order so the down-migration can drop them in reverse.
+func writeIndexStatements(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string) ([]string, error) {
+	idxStmts, idxNames, err := renderIndexes(t, colByProto)
+	if err != nil {
+		return nil, err
 	}
 	for _, ri := range t.GetRawIndexes() {
 		kw := "CREATE INDEX"
@@ -132,29 +165,35 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		idxNames = append(idxNames, ri.GetName())
 	}
 	if len(idxStmts) > 0 {
-		upB.WriteString("\n\n")
-		upB.WriteString(strings.Join(idxStmts, "\n"))
+		b.WriteString("\n\n")
+		b.WriteString(strings.Join(idxStmts, "\n"))
 	}
+	return idxNames, nil
+}
 
-	// D22 — COMMENT ON TABLE / COLUMN for every element with a
-	// resolved comment. Emitted after CREATE TABLE + indexes so the
-	// pg_class / pg_attribute rows exist. Deterministic order: table
-	// first, then columns in declaration order. Down: no explicit
-	// reset needed — DROP TABLE removes entries in pg_description
-	// transitively.
+// writeCommentStatements (D22) appends `COMMENT ON TABLE / COLUMN`
+// statements for every element with a resolved comment. Emitted after
+// CREATE TABLE + indexes so the pg_class / pg_attribute rows exist.
+// Deterministic order: table first, then columns in declaration order.
+// Down: no explicit reset needed — DROP TABLE removes entries in
+// pg_description transitively.
+func writeCommentStatements(b *strings.Builder, t *irpb.Table, qualTable string) {
 	commentStmts := collectCommentStmts(t, qualTable)
 	if len(commentStmts) > 0 {
-		upB.WriteString("\n\n")
-		upB.WriteString(strings.Join(commentStmts, "\n"))
+		b.WriteString("\n\n")
+		b.WriteString(strings.Join(commentStmts, "\n"))
 	}
+}
 
-	// Down: drop indexes (reverse), then drop table, then drop ENUM types
-	// (reverse declaration order). Indexes live inside / alongside the
-	// table so they go first; the ENUM types are standalone pg_type
-	// objects referenced by the table columns, so they drop after the
-	// table that uses them. DROP INDEX / DROP TYPE carry the schema
-	// qualifier under SCHEMA namespace (robustness against search_path);
-	// PREFIX mode had the prefix baked into the identifier at IR time.
+// renderTableDown emits the down-migration: drop indexes (reverse),
+// drop table, then drop ENUM types (reverse declaration order). Indexes
+// live inside / alongside the table so they go first; the ENUM types
+// are standalone pg_type objects referenced by table columns, so they
+// drop after the table that uses them. DROP INDEX / DROP TYPE carry the
+// schema qualifier under SCHEMA namespace (robustness against
+// search_path); PREFIX mode had the prefix baked into the identifier at
+// IR time.
+func renderTableDown(t *irpb.Table, qualTable string, idxNames []string, enumTypes []pgEnumType) string {
 	var downB strings.Builder
 	for i := len(idxNames) - 1; i >= 0; i-- {
 		fmt.Fprintf(&downB, "DROP INDEX IF EXISTS %s;\n", qualifiedIdentifier(t, idxNames[i]))
@@ -163,8 +202,7 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 	for i := len(enumTypes) - 1; i >= 0; i-- {
 		fmt.Fprintf(&downB, "\nDROP TYPE IF EXISTS %s;", qualifiedIdentifier(t, enumTypes[i].name))
 	}
-
-	return upB.String(), downB.String(), nil
+	return downB.String()
 }
 
 // qualifiedTable renders the table-identifier form used inside CREATE

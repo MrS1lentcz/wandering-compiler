@@ -146,7 +146,33 @@ type builder struct {
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
 
+// buildTable lowers one loader message into an *irpb.Table. The function
+// is an orchestration: each helper below handles one validation / lowering
+// stage. Returns nil when a fatal error (name validation failure) is
+// recorded; non-fatal errors are aggregated via b.err and the pipeline
+// continues so one compile run surfaces every problem.
 func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
+	tbl, ok := b.newTableFrame(msg)
+	if !ok {
+		return nil
+	}
+	b.addTableColumns(tbl, msg)
+	b.addTableForeignKeys(tbl, msg)
+	b.addTableIndexes(tbl, msg)
+	b.synthesiseSingleColumnIndexes(tbl)
+	b.copyRawConstraints(tbl, msg)
+	b.validateIndexNames(tbl, msg)
+	b.validateCheckNames(tbl, msg)
+	b.validateEnumTypeNames(tbl, msg)
+	return tbl
+}
+
+// newTableFrame derives the effective table name (per D21 + D19), validates
+// it against NAMEDATALEN + reserved-keyword rules, and produces a Table
+// shell ready for column / FK / index population. Returns (nil, false) on
+// a name-validation failure so the caller bails before the rest of the
+// pipeline sees a half-built table.
+func (b *builder) newTableFrame(msg *loader.LoadedMessage) (*irpb.Table, bool) {
 	// D21 — derive the table name from the proto message's local name
 	// (camelCase → snake_case) when (w17.db.table).name is unset. No
 	// pluralisation, no package-derived prefix (namespace is D19's
@@ -176,11 +202,11 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		b.err(diag.Atf(msg.Desc, "message %q: %s", msg.Desc.Name(), why).
 			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
 			WithFix(fix))
-		return nil
+		return nil, false
 	}
-	tbl := &irpb.Table{
-		// Name is the effective SQL name that will land in PG. In PREFIX
-		// mode the prefix is baked in here so every downstream
+	return &irpb.Table{
+		// Name is the effective SQL name that will land in PG. In
+		// PREFIX mode the prefix is baked in here so every downstream
 		// consumer (derived index / check / type names, emit-time FK
 		// references, raw_index / raw_check name collision namespace)
 		// sees one canonical identifier. SCHEMA / NONE modes leave
@@ -194,22 +220,32 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		// override wins, else proto message's leading comment, else
 		// empty. Emitter emits COMMENT ON TABLE iff non-empty.
 		Comment: resolveComment(msg.Table.GetComment(), msg.Desc),
-	}
+	}, true
+}
 
+// addTableColumns runs buildColumn for each proto field on the message and
+// appends the successes to the Table (nil returns signal a per-column
+// fatal error that's already recorded on b.errs).
+func (b *builder) addTableColumns(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	for _, f := range msg.Fields {
 		col := b.buildColumn(f)
-		if col != nil {
-			tbl.Columns = append(tbl.Columns, col)
-			if col.GetPk() {
-				tbl.PrimaryKey = append(tbl.PrimaryKey, col.GetProtoName())
-			}
+		if col == nil {
+			continue
+		}
+		tbl.Columns = append(tbl.Columns, col)
+		if col.GetPk() {
+			tbl.PrimaryKey = append(tbl.PrimaryKey, col.GetProtoName())
 		}
 	}
+}
 
-	// Parse FK references from (w17.db.column). Target resolution runs
-	// later in resolveFKs. deletion_rule wins over the null-based
-	// inference; if unspecified, nullable columns infer ORPHAN (SET NULL)
-	// and non-nullable columns infer CASCADE.
+// addTableForeignKeys parses fk: references from each column's
+// (w17.db.column) annotation. Target resolution runs later in resolveFKs;
+// this pass only extracts the (column, target_table, target_column,
+// on_delete) tuple. deletion_rule wins over the null-based inference; when
+// unspecified, nullable columns infer ORPHAN (SET NULL) and non-nullable
+// columns infer CASCADE.
+func (b *builder) addTableForeignKeys(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	for _, col := range tbl.Columns {
 		f := findLoadedField(msg, col.GetProtoName())
 		if f == nil || f.Column == nil || f.Column.GetFk() == "" {
@@ -239,34 +275,16 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			OnDelete:     action,
 		})
 	}
+}
 
-	// Table-level indexes.
+// addTableIndexes lowers every (w17.db.table).indexes[] entry into IR.
+// Validates field references + D23 method/options compatibility before
+// converting. Author-supplied names get the module prefix so they share
+// the same post-prefix namespace as derived names.
+func (b *builder) addTableIndexes(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	for i, idx := range msg.Table.GetIndexes() {
-		if len(idx.GetFields()) == 0 {
-			b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has no fields", msg.Desc.Name(), i).
-				WithWhy("an index with zero fields has nothing to index on").
-				WithFix("supply at least one entry in the `fields:` list (minimum: `[{ name: \"<proto_field>\" }]`)"))
+		if !b.validateIndexFieldRefs(msg, idx, i) {
 			continue
-		}
-		for _, f := range idx.GetFields() {
-			if f.GetName() == "" {
-				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has a field entry with empty name", msg.Desc.Name(), i).
-					WithWhy("every index field must reference a declared proto field on the same message").
-					WithFix("fill `name:` with the proto field name this index entry covers"))
-				continue
-			}
-			if findLoadedField(msg, f.GetName()) == nil {
-				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] references unknown field %q", msg.Desc.Name(), i, f.GetName()).
-					WithWhy("every index field must refer to a declared proto field on the same message").
-					WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from this index's `fields:` list", f.GetName())))
-			}
-		}
-		for _, fname := range idx.GetInclude() {
-			if findLoadedField(msg, fname) == nil {
-				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] INCLUDE references unknown field %q", msg.Desc.Name(), i, fname).
-					WithWhy("every INCLUDE field must refer to a declared proto field on the same message").
-					WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from `include:`", fname)))
-			}
 		}
 		// D23 — validate method × options compatibility before lowering
 		// into IR; the message anchors at the index's position on the
@@ -278,9 +296,6 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			continue
 		}
 		tbl.Indexes = append(tbl.Indexes, &irpb.Index{
-			// Author-supplied name gets the module prefix so it shares
-			// the same post-prefix identifier namespace as derived
-			// names. In SCHEMA / NONE modes applyPrefix is identity.
 			Name:    applyPrefix(b.prefix, idx.GetName()),
 			Fields:  convertIndexFields(idx.GetFields()),
 			Unique:  idx.GetUnique(),
@@ -289,10 +304,49 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			Storage: copyStringMap(idx.GetStorage()),
 		})
 	}
+}
 
-	// Synthesise UNIQUE INDEXes for (w17.field).unique columns. PK columns
-	// are skipped — every SQL dialect auto-indexes the PRIMARY KEY, and a
-	// duplicate unique index would clutter the migration and pg_indexes.
+// validateIndexFieldRefs checks that every field referenced by an index
+// (both structured `fields:` and `include:`) exists on the message. Returns
+// false only when the index has zero fields at all — that's the one fatal
+// error; per-entry problems are recorded and the loop continues so later
+// problems still surface in the same compile run.
+func (b *builder) validateIndexFieldRefs(msg *loader.LoadedMessage, idx *dbpb.Index, i int) bool {
+	if len(idx.GetFields()) == 0 {
+		b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has no fields", msg.Desc.Name(), i).
+			WithWhy("an index with zero fields has nothing to index on").
+			WithFix("supply at least one entry in the `fields:` list (minimum: `[{ name: \"<proto_field>\" }]`)"))
+		return false
+	}
+	for _, f := range idx.GetFields() {
+		if f.GetName() == "" {
+			b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has a field entry with empty name", msg.Desc.Name(), i).
+				WithWhy("every index field must reference a declared proto field on the same message").
+				WithFix("fill `name:` with the proto field name this index entry covers"))
+			continue
+		}
+		if findLoadedField(msg, f.GetName()) == nil {
+			b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] references unknown field %q", msg.Desc.Name(), i, f.GetName()).
+				WithWhy("every index field must refer to a declared proto field on the same message").
+				WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from this index's `fields:` list", f.GetName())))
+		}
+	}
+	for _, fname := range idx.GetInclude() {
+		if findLoadedField(msg, fname) == nil {
+			b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] INCLUDE references unknown field %q", msg.Desc.Name(), i, fname).
+				WithWhy("every INCLUDE field must refer to a declared proto field on the same message").
+				WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from `include:`", fname)))
+		}
+	}
+	return true
+}
+
+// synthesiseSingleColumnIndexes adds the implicit indexes driven by
+// (w17.field).unique and (w17.db.column).index on columns that don't
+// already have a matching index. PK columns are skipped — every SQL
+// dialect auto-indexes the PRIMARY KEY and a duplicate would just
+// clutter the migration and pg_indexes.
+func (b *builder) synthesiseSingleColumnIndexes(tbl *irpb.Table) {
 	for _, col := range tbl.Columns {
 		if !col.GetUnique() || col.GetPk() {
 			continue
@@ -305,7 +359,6 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			Unique: true,
 		})
 	}
-	// Synthesise plain storage indexes for (w17.db.column).index columns.
 	for _, col := range tbl.Columns {
 		if !col.GetStorageIndex() {
 			continue
@@ -317,16 +370,19 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			Fields: []*irpb.IndexField{{Name: col.GetProtoName()}},
 		})
 	}
+}
 
-	// Copy escape-hatch raw CHECK / INDEX bodies from (w17.db.table) into
-	// IR. Raw bodies are opaque to the compiler (SQL pass-through), but
-	// their identifier names go through the same length/reserved/collision
-	// validation as every other emitted identifier.
+// copyRawConstraints copies escape-hatch raw_checks / raw_indexes bodies
+// from (w17.db.table) into IR. Bodies are opaque (SQL pass-through);
+// identifier names flow through the same NAMEDATALEN + collision
+// validation as every other emitted name in validateIndexNames /
+// validateCheckNames downstream.
+func (b *builder) copyRawConstraints(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	for _, rc := range msg.Table.GetRawChecks() {
-		// Author-supplied raw_check / raw_index names get the module
-		// prefix so they share the same post-prefix identifier
-		// namespace as derived names. In SCHEMA / NONE modes
-		// applyPrefix is identity.
+		// D19 — author-supplied raw_check / raw_index names get the
+		// module prefix so they share the post-prefix identifier
+		// namespace as derived names. SCHEMA / NONE modes leave
+		// applyPrefix as identity.
 		tbl.RawChecks = append(tbl.RawChecks, &irpb.RawCheck{
 			Name: applyPrefix(b.prefix, rc.GetName()),
 			Expr: rc.GetExpr(),
@@ -339,34 +395,20 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			Body:   ri.GetBody(),
 		})
 	}
+}
 
-	// Finalise index names up front: derivation lives in IR (not in the
-	// emitter) so collision detection and identifier-length validation
-	// are possible at IR time. For explicit indexes the author name wins;
-	// for synths the <table>_<cols>_<{u,}idx> shape is computed here.
-	// Raw indexes carry an author-supplied name and join the same
-	// collision namespace. Validate every name (length + reserved) and
-	// reject duplicates across all three sources.
+// validateIndexNames finalises every index name (derives the synth ones)
+// and rejects NAMEDATALEN / reserved-keyword / collision problems across
+// structured + raw indexes sharing one per-schema namespace. Collision
+// detection needs all three sources (author-named indexes, single-column
+// synths, raw indexes) already populated — runs after addTableIndexes +
+// synthesiseSingleColumnIndexes + copyRawConstraints.
+func (b *builder) validateIndexNames(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	colSQLNameByProto := map[string]string{}
 	for _, c := range tbl.Columns {
 		colSQLNameByProto[c.GetProtoName()] = c.GetName()
 	}
-	idxNameSeen := map[string]string{} // name → origin (for diag)
-	recordIdx := func(name, origin string, dupFix string) {
-		if why := validateIdentifier(name); why != "" {
-			b.err(diag.Atf(msg.Desc, "message %q: %s name %s", msg.Desc.Name(), origin, why).
-				WithWhy("index names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords; derived names inherit the table/column lengths, so a long table × multi-col index is a common offender").
-				WithFix(`shorten the table / column names, or pass an explicit shorter name via (w17.db.table).indexes[].name (or .raw_indexes[].name)`))
-			return
-		}
-		if prev, dup := idxNameSeen[name]; dup {
-			b.err(diag.Atf(msg.Desc, "message %q: %s name %q collides with %s", msg.Desc.Name(), origin, name, prev).
-				WithWhy("two CREATE INDEX statements with the same name fail at apply — Postgres has per-schema unique index names. Explicit `(w17.db.table).indexes[].name`, synth'd UNIQUE from `(w17.field).unique`, storage-index from `(w17.db.column).index`, and `(w17.db.table).raw_indexes[].name` all share one namespace").
-				WithFix(dupFix))
-			return
-		}
-		idxNameSeen[name] = origin
-	}
+	seen := map[string]string{}
 	for i, idx := range tbl.Indexes {
 		if idx.Name == "" {
 			sqlCols := make([]string, 0, len(idx.GetFields()))
@@ -375,32 +417,63 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			}
 			idx.Name = derivedIndexName(tbl.GetName(), sqlCols, idx.GetUnique())
 		}
-		recordIdx(idx.Name, fmt.Sprintf("index[%d]", i),
+		b.recordIndexName(msg, seen, idx.Name, fmt.Sprintf("index[%d]", i),
 			"either rename the explicit index to something unique, or drop the redundant synth (remove `unique: true` / `(w17.db.column).index` on the field the explicit index already covers)")
 	}
 	for i, ri := range tbl.RawIndexes {
-		if ri.GetName() == "" {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d].name is empty", msg.Desc.Name(), i).
-				WithWhy("raw indexes carry no field list to derive a name from — the compiler can't invent one").
-				WithFix(`set (w17.db.table).raw_indexes[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<cols>_<method>)`))
+		if !b.validateRawIndexShape(msg, ri, i) {
 			continue
 		}
-		if ri.GetBody() == "" {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d] %q has empty body", msg.Desc.Name(), i, ri.GetName()).
-				WithWhy("an empty body would emit `CREATE INDEX … ON <table>` with nothing after — PG rejects at apply").
-				WithFix(`supply the body after ON <table>, e.g. "USING gin (search_tsv)" or "(lower(email)) WHERE deleted_at IS NULL"`))
-			continue
-		}
-		recordIdx(ri.GetName(), fmt.Sprintf("raw_indexes[%d]", i),
+		b.recordIndexName(msg, seen, ri.GetName(), fmt.Sprintf("raw_indexes[%d]", i),
 			"rename the raw index to avoid collision with an existing derived / explicit index name")
 	}
+}
 
-	// Validate CHECK constraint names.
-	// Derived: `<table>_<col>_<variant>` — variant suffixes are fixed and
-	// non-reserved; only length-check. Cross-column / cross-variant
-	// collisions are impossible (attachChecks emits at most one of each
-	// variant per column) but raw-check names share the namespace.
-	ckNameSeen := map[string]string{}
+// recordIndexName validates an index identifier against NAMEDATALEN +
+// reserved-keyword rules and records it in the per-table seen map.
+// Diagnostics fire on length/reserved violations and on duplicates.
+func (b *builder) recordIndexName(msg *loader.LoadedMessage, seen map[string]string, name, origin, dupFix string) {
+	if why := validateIdentifier(name); why != "" {
+		b.err(diag.Atf(msg.Desc, "message %q: %s name %s", msg.Desc.Name(), origin, why).
+			WithWhy("index names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords; derived names inherit the table/column lengths, so a long table × multi-col index is a common offender").
+			WithFix(`shorten the table / column names, or pass an explicit shorter name via (w17.db.table).indexes[].name (or .raw_indexes[].name)`))
+		return
+	}
+	if prev, dup := seen[name]; dup {
+		b.err(diag.Atf(msg.Desc, "message %q: %s name %q collides with %s", msg.Desc.Name(), origin, name, prev).
+			WithWhy("two CREATE INDEX statements with the same name fail at apply — Postgres has per-schema unique index names. Explicit `(w17.db.table).indexes[].name`, synth'd UNIQUE from `(w17.field).unique`, storage-index from `(w17.db.column).index`, and `(w17.db.table).raw_indexes[].name` all share one namespace").
+			WithFix(dupFix))
+		return
+	}
+	seen[name] = origin
+}
+
+// validateRawIndexShape guards the empty-name / empty-body cases that make
+// a raw_index un-emittable. Returns false when the entry is malformed;
+// the caller then skips the collision check for that entry.
+func (b *builder) validateRawIndexShape(msg *loader.LoadedMessage, ri *irpb.RawIndex, i int) bool {
+	if ri.GetName() == "" {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d].name is empty", msg.Desc.Name(), i).
+			WithWhy("raw indexes carry no field list to derive a name from — the compiler can't invent one").
+			WithFix(`set (w17.db.table).raw_indexes[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<cols>_<method>)`))
+		return false
+	}
+	if ri.GetBody() == "" {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_indexes[%d] %q has empty body", msg.Desc.Name(), i, ri.GetName()).
+			WithWhy("an empty body would emit `CREATE INDEX … ON <table>` with nothing after — PG rejects at apply").
+			WithFix(`supply the body after ON <table>, e.g. "USING gin (search_tsv)" or "(lower(email)) WHERE deleted_at IS NULL"`))
+		return false
+	}
+	return true
+}
+
+// validateCheckNames validates per-column derived CHECK names and every
+// raw_check, rejecting collisions across the shared per-table namespace.
+// Derived names follow `<table>_<col>_<variant>`; variants are fixed and
+// unique per column so cross-column / cross-variant collisions are
+// impossible — only length/reserved + raw-check collisions can happen.
+func (b *builder) validateCheckNames(tbl *irpb.Table, msg *loader.LoadedMessage) {
+	seen := map[string]string{}
 	for _, c := range tbl.Columns {
 		for j, ck := range c.GetChecks() {
 			name := derivedCheckName(tbl.GetName(), c.GetName(), ck)
@@ -410,41 +483,50 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 					WithFix("shorten the table / column name to make room for the variant suffix (blank/len/range/format/choices)"))
 				continue
 			}
-			ckNameSeen[name] = fmt.Sprintf("column %q check[%d]", c.GetProtoName(), j)
+			seen[name] = fmt.Sprintf("column %q check[%d]", c.GetProtoName(), j)
 		}
 	}
 	for i, rc := range tbl.RawChecks {
-		if rc.GetName() == "" {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d].name is empty", msg.Desc.Name(), i).
-				WithWhy("the compiler can't invent a constraint name for an opaque expression").
-				WithFix(`set (w17.db.table).raw_checks[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<what>)`))
-			continue
-		}
-		if rc.GetExpr() == "" {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] %q has empty expr", msg.Desc.Name(), i, rc.GetName()).
-				WithWhy("an empty expr would emit `CHECK ()` — PG rejects at apply").
-				WithFix(`supply the SQL expression that goes inside CHECK(...), e.g. "start_date <= end_date"`))
-			continue
-		}
-		if why := validateIdentifier(rc.GetName()); why != "" {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %s", msg.Desc.Name(), i, why).
-				WithWhy("CHECK constraint names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords").
-				WithFix("shorten or rename the raw check"))
-			continue
-		}
-		if prev, dup := ckNameSeen[rc.GetName()]; dup {
-			b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %q collides with %s", msg.Desc.Name(), i, rc.GetName(), prev).
-				WithWhy("CHECK names are unique per table in pg_constraint; raw-check names share the namespace with derived <table>_<column>_<variant> names").
-				WithFix("rename the raw check, or remove the per-field option that synthesised the colliding derived name"))
-			continue
-		}
-		ckNameSeen[rc.GetName()] = fmt.Sprintf("raw_checks[%d]", i)
+		b.registerRawCheck(msg, rc, i, seen)
 	}
+}
 
-	// D17 — validate PG ENUM type identifier (<table>_<col>) for every
-	// string-carrier SEM_ENUM column so length / reserved-keyword
-	// failures surface at IR time instead of apply. Mirrors the CHECK
-	// constraint name validation above.
+// registerRawCheck validates one raw_check entry (empty name, empty expr,
+// identifier rules, cross-source collision) and records it in the shared
+// seen map.
+func (b *builder) registerRawCheck(msg *loader.LoadedMessage, rc *irpb.RawCheck, i int, seen map[string]string) {
+	if rc.GetName() == "" {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d].name is empty", msg.Desc.Name(), i).
+			WithWhy("the compiler can't invent a constraint name for an opaque expression").
+			WithFix(`set (w17.db.table).raw_checks[` + fmt.Sprintf("%d", i) + `].name to a descriptive identifier (convention: <table>_<what>)`))
+		return
+	}
+	if rc.GetExpr() == "" {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] %q has empty expr", msg.Desc.Name(), i, rc.GetName()).
+			WithWhy("an empty expr would emit `CHECK ()` — PG rejects at apply").
+			WithFix(`supply the SQL expression that goes inside CHECK(...), e.g. "start_date <= end_date"`))
+		return
+	}
+	if why := validateIdentifier(rc.GetName()); why != "" {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %s", msg.Desc.Name(), i, why).
+			WithWhy("CHECK constraint names must fit Postgres NAMEDATALEN (63 bytes) and avoid reserved keywords").
+			WithFix("shorten or rename the raw check"))
+		return
+	}
+	if prev, dup := seen[rc.GetName()]; dup {
+		b.err(diag.Atf(msg.Desc, "message %q: raw_checks[%d] name %q collides with %s", msg.Desc.Name(), i, rc.GetName(), prev).
+			WithWhy("CHECK names are unique per table in pg_constraint; raw-check names share the namespace with derived <table>_<column>_<variant> names").
+			WithFix("rename the raw check, or remove the per-field option that synthesised the colliding derived name"))
+		return
+	}
+	seen[rc.GetName()] = fmt.Sprintf("raw_checks[%d]", i)
+}
+
+// validateEnumTypeNames (D17) checks the derived PG ENUM type identifier
+// (<table>_<col>) for every string-carrier SEM_ENUM column. Surfaces
+// NAMEDATALEN / reserved-keyword failures at IR time instead of at CREATE
+// TYPE apply time, anchored on the owning proto field.
+func (b *builder) validateEnumTypeNames(tbl *irpb.Table, msg *loader.LoadedMessage) {
 	for _, c := range tbl.Columns {
 		if c.GetType() != irpb.SemType_SEM_ENUM || c.GetCarrier() != irpb.Carrier_CARRIER_STRING {
 			continue
@@ -456,76 +538,122 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 				WithFix("shorten the table or column name, or override the column via (w17.db.column) = { name: \"alt\" }"))
 		}
 	}
-
-	return tbl
 }
 
+// buildColumn lowers one loader field into an *irpb.Column. The function
+// is an orchestration: each helper below runs one validation / lowering
+// stage against the shared Column frame. Returns nil on a fatal error
+// (unsupported carrier, bad identifier, invalid carrier/sem combo, bad
+// element type, enum/path resolution failure); non-fatal errors are
+// aggregated via b.err and the pipeline continues.
+//
+// Stage ordering is load-bearing: storage overrides run before name
+// validation so the override is what gets checked; element population
+// runs before sem resolution so LIST element carriers are visible;
+// pg.field + db_type validators run before attachChecks so synths can
+// react to storage overrides; enum + path resolution runs last so the
+// ENUM/extension constraints sort after any author-supplied CHECKs.
 func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
+	col, carrier, ok := b.initColumnFrame(lf)
+	if !ok {
+		return nil
+	}
+	b.applyStorageOverrides(col, lf)
+	if !b.validateColumnName(col, lf) {
+		return nil
+	}
+	if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
+		if err := b.populateElement(col, lf.Desc, carrier); err != nil {
+			b.err(err)
+			return nil
+		}
+	}
+	semType, ok := b.resolveColumnSemType(col, lf, carrier)
+	if !ok {
+		return nil
+	}
+	col.Type = semType
+	b.applyBasicFlags(col, lf.Field)
+	b.validateDeletionRuleWithoutFk(lf)
+	b.applyMaxLen(col, carrier, semType, lf)
+	b.applyDecimalPrecision(col, semType, lf)
+	b.applyDefault(col, lf, carrier, semType)
+	b.validateCollectionPkUnique(carrier, lf)
+	b.validateStringNumericOptions(carrier, semType, lf)
+	b.applyPgOverrides(col, lf)
+	b.validateDbType(col, carrier, lf)
+	b.validatePgCustomType(col, carrier, semType, lf)
+	b.validateGeneratedExpr(col, lf)
+	if lf.Field != nil && carrier != irpb.Carrier_CARRIER_MAP && carrier != irpb.Carrier_CARRIER_LIST {
+		b.attachChecks(col, lf.Field, carrier, semType, lf.Desc)
+	}
+	return b.resolveAuxiliarySemTypes(col, lf, carrier, semType)
+}
+
+// initColumnFrame detects the carrier, validates that iter-1 supports it,
+// and produces a Column shell with (Name, ProtoName, Location, Carrier)
+// populated. Returns (nil, _, false) on an unsupported carrier.
+func (b *builder) initColumnFrame(lf *loader.LoadedField) (*irpb.Column, irpb.Carrier, bool) {
 	desc := lf.Desc
 	protoName := string(desc.Name())
-
 	carrier, carrierOK := protoKindToCarrier(desc)
 	if !carrierOK {
 		b.err(diag.Atf(desc, "field %q: carrier %s is not supported in iteration-1", protoName, describeKind(desc)).
 			WithWhy("iteration-1 accepts string, int32, int64, bool, double, google.protobuf.Timestamp and google.protobuf.Duration as DB-column carriers; other kinds (bytes, repeated, oneof, nested messages) are parked for later iterations").
 			WithFix("change the field's proto type to one of the supported carriers, or drop the (w17.field) annotation if the field isn't a DB column"))
-		return nil
+		return nil, carrier, false
 	}
-
-	col := &irpb.Column{
+	return &irpb.Column{
 		Name:      protoName,
 		ProtoName: protoName,
 		Location:  sourceLocation(desc),
 		Carrier:   carrier,
-	}
+	}, carrier, true
+}
 
-	// Pull data-level options from (w17.field), if present. (w17.field) is
-	// optional on every carrier — D14 per-carrier defaults kick in when
-	// the type is unset (e.g. int32 → NUMBER, string → TEXT, Timestamp →
-	// DATETIME). Authors reach for (w17.field) only when the default
-	// doesn't fit.
-	fieldOpt := lf.Field
-
-	// Storage-level options from (w17.db.column).
+// applyStorageOverrides pulls (w17.db.column) storage overrides — name,
+// storage index, generated_expr, comment — onto the Column. Comment
+// resolution (D22) falls back to the proto field's leading doc-string
+// when (w17.db.column).comment is empty.
+func (b *builder) applyStorageOverrides(col *irpb.Column, lf *loader.LoadedField) {
+	var commentOverride string
 	if lf.Column != nil {
 		if override := lf.Column.GetName(); override != "" {
 			col.Name = override
 		}
 		col.StorageIndex = lf.Column.GetIndex()
 		col.GeneratedExpr = lf.Column.GetGeneratedExpr()
+		commentOverride = lf.Column.GetComment()
 	}
-	// D22 — resolved comment: explicit (w17.db.column).comment
-	// override wins, else proto field's leading comment, else empty.
-	var columnCommentOverride string
-	if lf.Column != nil {
-		columnCommentOverride = lf.Column.GetComment()
-	}
-	col.Comment = resolveComment(columnCommentOverride, desc)
+	col.Comment = resolveComment(commentOverride, lf.Desc)
+}
 
-	// The resolved SQL column name (proto name by default, overridden via
-	// (w17.db.column).name) must survive Postgres's NAMEDATALEN cap and
-	// avoid reserved keywords. Checked here rather than after the column
-	// is appended so the diag anchors on the owning proto field.
-	if why := validateIdentifier(col.Name); why != "" {
-		b.err(diag.Atf(desc, "field %q: %s", protoName, why).
-			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
-			WithFix(`rename the column — either use a shorter proto field name, or override via (w17.db.column) = { name: "alt_name" }`))
-		return nil
+// validateColumnName checks the resolved SQL column name (proto name by
+// default, overridden via (w17.db.column).name) against Postgres
+// NAMEDATALEN + reserved-keyword rules. Returns false on failure so the
+// caller bails before the column joins the table.
+func (b *builder) validateColumnName(col *irpb.Column, lf *loader.LoadedField) bool {
+	why := validateIdentifier(col.Name)
+	if why == "" {
+		return true
 	}
+	b.err(diag.Atf(lf.Desc, "field %q: %s", col.GetProtoName(), why).
+		WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
+		WithFix(`rename the column — either use a shorter proto field name, or override via (w17.db.column) = { name: "alt_name" }`))
+	return false
+}
 
-	// Populate element info for collection carriers (map / list) BEFORE
-	// sem-type resolution — LIST sem validation needs the element carrier.
-	if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
-		if err := b.populateElement(col, desc, carrier); err != nil {
-			b.err(err)
-			return nil
-		}
-	}
-
-	// Carrier → SemType validation (D2 table + D14 per-carrier defaults).
+// resolveColumnSemType runs the D2 / D14 / D17 resolution pipeline:
+// explicit field.Type > auto-infer on bare proto-enum field > per-carrier
+// default. Validates carrier × sem compatibility and, for LIST carriers,
+// the element carrier against the sem type. Returns (_, false) on a fatal
+// error.
+func (b *builder) resolveColumnSemType(col *irpb.Column, lf *loader.LoadedField, carrier irpb.Carrier) (irpb.SemType, bool) {
+	desc := lf.Desc
+	protoName := col.GetProtoName()
 	semType := irpb.SemType_SEM_UNSPECIFIED
-	if fieldOpt != nil {
-		semType = protoTypeToSem(fieldOpt.GetType())
+	if lf.Field != nil {
+		semType = protoTypeToSem(lf.Field.GetType())
 	}
 	// D17: a bare scalar proto-enum field (e.g. `Status state = 1;`) auto-
 	// infers SEM_ENUM on its int32 wire-type carrier. Matches the D14
@@ -541,7 +669,7 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	}
 	if err := validateCarrierSemType(desc, carrier, semType); err != nil {
 		b.err(err)
-		return nil
+		return semType, false
 	}
 	// For LIST carrier: the sem type must be valid on the element's
 	// scalar carrier (repeated string + type: URL → element carrier
@@ -552,98 +680,119 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 			b.err(diag.Atf(desc, "field %q: repeated Message field cannot carry an element sem type (got %s) — storage is always JSON for message elements", protoName, displaySemType(semType)).
 				WithWhy("per-element sem types (URL, EMAIL, …) only apply to scalar elements where the DB can store an element-typed array; proto messages serialise as JSON blobs").
 				WithFix("drop type: from (w17.field), or type: AUTO to mark intent explicitly"))
-			return nil
+			return semType, false
 		}
 		if err := validateCarrierSemType(desc, col.GetElementCarrier(), semType); err != nil {
 			b.err(err.WithWhy("list carrier validates type against the element carrier (e.g. repeated string + type: URL checks URL on string carrier)"))
-			return nil
+			return semType, false
 		}
 	}
-	col.Type = semType
+	return semType, true
+}
 
-	// Nullability, PK, uniqueness, immutability.
-	if fieldOpt != nil {
-		col.Nullable = fieldOpt.GetNull()
-		col.Pk = fieldOpt.GetPk()
-		col.Unique = fieldOpt.GetUnique() || col.Pk // PK implies UNIQUE (D2 note).
-		col.Immutable = fieldOpt.GetImmutable()
+// applyBasicFlags pulls null / pk / unique / immutable from (w17.field)
+// onto the Column. PK implies UNIQUE per D2 so the synth layer can treat
+// a PK column as already-unique and skip the duplicate UNIQUE INDEX.
+func (b *builder) applyBasicFlags(col *irpb.Column, fieldOpt *w17pb.Field) {
+	if fieldOpt == nil {
+		return
 	}
+	col.Nullable = fieldOpt.GetNull()
+	col.Pk = fieldOpt.GetPk()
+	col.Unique = fieldOpt.GetUnique() || col.Pk
+	col.Immutable = fieldOpt.GetImmutable()
+}
 
-	// deletion_rule validity — must accompany fk on the same column.
-	// Catches `(w17.db.column) = { deletion_rule: BLOCK }` without `fk:` —
-	// the rule has no referenced parent to act on.
-	if lf.Column != nil && lf.Column.GetDeletionRule() != dbpb.DeletionRule_DELETION_RULE_UNSPECIFIED && lf.Column.GetFk() == "" {
-		b.err(diag.Atf(desc, "field %q: deletion_rule set without fk", protoName).
-			WithWhy("deletion_rule declares what happens to this row when its *parent* row is deleted — meaningless without an fk pointing at a parent").
-			WithFix(`either add fk: "<table>.<column>" on (w17.db.column), or remove deletion_rule`))
+// validateDeletionRuleWithoutFk catches `(w17.db.column) = { deletion_rule:
+// BLOCK }` without fk: — the rule has no referenced parent to act on.
+func (b *builder) validateDeletionRuleWithoutFk(lf *loader.LoadedField) {
+	if lf.Column == nil || lf.Column.GetDeletionRule() == dbpb.DeletionRule_DELETION_RULE_UNSPECIFIED || lf.Column.GetFk() != "" {
+		return
 	}
+	b.err(diag.Atf(lf.Desc, "field %q: deletion_rule set without fk", string(lf.Desc.Name())).
+		WithWhy("deletion_rule declares what happens to this row when its *parent* row is deleted — meaningless without an fk pointing at a parent").
+		WithFix(`either add fk: "<table>.<column>" on (w17.db.column), or remove deletion_rule`))
+}
 
-	// max_len: required for CHAR / SLUG, has a preset default for
-	// EMAIL / URL, and is forbidden on string sem types whose storage
-	// isn't VARCHAR (UUID, JSON, IP, TSEARCH, DECIMAL) or on non-string
-	// carriers (numeric / temporal / bool / bytes).
-	if fieldOpt != nil {
-		col.MaxLen = fieldOpt.GetMaxLen()
+// applyMaxLen populates col.MaxLen and enforces the per-sem-type rules:
+// required on CHAR/SLUG, preset defaults on EMAIL/URL/MAC, forbidden on
+// non-VARCHAR sem types. LIST carriers apply max_len at the element
+// level (repeated string + URL + max_len sizes VARCHAR(N)[]).
+func (b *builder) applyMaxLen(col *irpb.Column, carrier irpb.Carrier, semType irpb.SemType, lf *loader.LoadedField) {
+	if lf.Field != nil {
+		col.MaxLen = lf.Field.GetMaxLen()
 	}
-	// max_len applies to string carriers at the column level, AND to
-	// list carriers at the ELEMENT level (repeated string + type: URL +
-	// max_len: 500 sizes VARCHAR(500)[]).
 	maxLenCarrier := carrier
 	maxLenSem := semType
 	if carrier == irpb.Carrier_CARRIER_LIST {
 		maxLenCarrier = col.GetElementCarrier()
-		// For AUTO elements, no per-element sem — skip max_len sizing.
 		if semType == irpb.SemType_SEM_AUTO {
 			maxLenCarrier = irpb.Carrier_CARRIER_UNSPECIFIED
 		}
 	}
 	if maxLenCarrier == irpb.Carrier_CARRIER_STRING {
-		switch maxLenSem {
-		case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
-			if col.MaxLen <= 0 {
-				b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(maxLenSem)).
-					WithWhy("CHAR / SLUG render as VARCHAR(N) — without N the column type has no fixed size").
-					WithFix("add max_len to (w17.field), e.g. max_len: 80 for short names, 255 for titles"))
-			}
-		case irpb.SemType_SEM_EMAIL:
-			if col.MaxLen <= 0 {
-				col.MaxLen = 320
-			}
-		case irpb.SemType_SEM_URL:
-			if col.MaxLen <= 0 {
-				col.MaxLen = 2048
-			}
-		case irpb.SemType_SEM_MAC:
-			// 17 = xx:xx:xx:xx:xx:xx / xx-xx-xx-xx-xx-xx form (the
-			// two human-readable MAC shapes). Unused on the default
-			// MACADDR storage path (native type has no sizing knob);
-			// activates VARCHAR(17) when the author opts into
-			// string-backed storage via `db_type: VARCHAR`.
-			if col.MaxLen <= 0 {
-				col.MaxLen = 17
-			}
-		case irpb.SemType_SEM_TEXT,
-			irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
-			// optional upper bound — paths store as TEXT, same
-			// semantics as bare TEXT for max_len.
-		default:
-			if col.MaxLen != 0 {
-				b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(maxLenSem)).
-					WithWhy("max_len drives VARCHAR(N) sizing + char_length CHECKs; UUID / JSON / IP / TSEARCH / DECIMAL map to non-VARCHAR SQL types where max_len has no meaning").
-					WithFix("drop max_len, or change type: to CHAR / SLUG / TEXT / EMAIL / URL (all VARCHAR-shaped)"))
-			}
-		}
-	} else if col.MaxLen != 0 {
-		b.err(diag.Atf(desc, "field %q: max_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
+		b.applyMaxLenOnString(col, maxLenSem, lf.Desc)
+		return
+	}
+	if col.MaxLen != 0 {
+		b.err(diag.Atf(lf.Desc, "field %q: max_len is only valid on string carriers (got %s)", string(lf.Desc.Name()), displayCarrier(carrier)).
 			WithWhy("max_len controls char_length on string columns; numeric / temporal / bool / bytes / map columns have no length dimension").
 			WithFix("drop max_len from (w17.field), or change the proto field to a string carrier (or repeated string)"))
 	}
+}
 
-	// DECIMAL precision/scale.
-	if fieldOpt != nil {
-		col.Precision = fieldOpt.GetPrecision()
-		if fieldOpt.Scale != nil {
-			scale := fieldOpt.GetScale()
+// applyMaxLenOnString handles the string-carrier branch of applyMaxLen —
+// required / preset / forbidden dispatch per sem type.
+func (b *builder) applyMaxLenOnString(col *irpb.Column, maxLenSem irpb.SemType, desc protoreflect.FieldDescriptor) {
+	protoName := string(desc.Name())
+	switch maxLenSem {
+	case irpb.SemType_SEM_CHAR, irpb.SemType_SEM_SLUG:
+		if col.MaxLen <= 0 {
+			b.err(diag.Atf(desc, "field %q: type %s requires max_len", protoName, displaySemType(maxLenSem)).
+				WithWhy("CHAR / SLUG render as VARCHAR(N) — without N the column type has no fixed size").
+				WithFix("add max_len to (w17.field), e.g. max_len: 80 for short names, 255 for titles"))
+		}
+	case irpb.SemType_SEM_EMAIL:
+		if col.MaxLen <= 0 {
+			col.MaxLen = 320
+		}
+	case irpb.SemType_SEM_URL:
+		if col.MaxLen <= 0 {
+			col.MaxLen = 2048
+		}
+	case irpb.SemType_SEM_MAC:
+		// 17 = xx:xx:xx:xx:xx:xx / xx-xx-xx-xx-xx-xx form (the two
+		// human-readable MAC shapes). Unused on the default MACADDR
+		// storage path (native type has no sizing knob); activates
+		// VARCHAR(17) when the author opts into string-backed storage
+		// via `db_type: VARCHAR`.
+		if col.MaxLen <= 0 {
+			col.MaxLen = 17
+		}
+	case irpb.SemType_SEM_TEXT,
+		irpb.SemType_SEM_POSIX_PATH, irpb.SemType_SEM_FILE_PATH, irpb.SemType_SEM_IMAGE_PATH:
+		// optional upper bound — paths store as TEXT, same semantics
+		// as bare TEXT for max_len.
+	default:
+		if col.MaxLen != 0 {
+			b.err(diag.Atf(desc, "field %q: max_len is not valid on type %s", protoName, displaySemType(maxLenSem)).
+				WithWhy("max_len drives VARCHAR(N) sizing + char_length CHECKs; UUID / JSON / IP / TSEARCH / DECIMAL map to non-VARCHAR SQL types where max_len has no meaning").
+				WithFix("drop max_len, or change type: to CHAR / SLUG / TEXT / EMAIL / URL (all VARCHAR-shaped)"))
+		}
+	}
+}
+
+// applyDecimalPrecision copies precision / scale from (w17.field) onto
+// the Column and enforces: DECIMAL requires precision; scale ∈ [0,
+// precision]; non-DECIMAL types reject precision/scale (MONEY,
+// PERCENTAGE, RATIO carry their own fixed precision).
+func (b *builder) applyDecimalPrecision(col *irpb.Column, semType irpb.SemType, lf *loader.LoadedField) {
+	desc := lf.Desc
+	protoName := string(desc.Name())
+	if lf.Field != nil {
+		col.Precision = lf.Field.GetPrecision()
+		if lf.Field.Scale != nil {
+			scale := lf.Field.GetScale()
 			col.Scale = &scale
 		}
 	}
@@ -663,240 +812,245 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 				WithWhy("scale counts digits after the decimal point and cannot exceed total digits").
 				WithFix(fmt.Sprintf("raise precision to at least %d, or lower scale to at most %d", *col.Scale, col.GetPrecision())))
 		}
-	} else {
-		if col.GetPrecision() != 0 || col.Scale != nil {
-			b.err(diag.Atf(desc, "field %q: precision/scale only apply to type DECIMAL (got %s)", protoName, displaySemType(semType)).
-				WithWhy("MONEY/PERCENTAGE/RATIO are fixed-shape presets; other types have no precision/scale dimension").
-				WithFix("drop precision/scale, or change the field to type: DECIMAL"))
+		return
+	}
+	if col.GetPrecision() != 0 || col.Scale != nil {
+		b.err(diag.Atf(desc, "field %q: precision/scale only apply to type DECIMAL (got %s)", protoName, displaySemType(semType)).
+			WithWhy("MONEY/PERCENTAGE/RATIO are fixed-shape presets; other types have no precision/scale dimension").
+			WithFix("drop precision/scale, or change the field to type: DECIMAL"))
+	}
+}
+
+// applyDefault resolves the (w17.field) default oneof and attaches the
+// result to col.Default. Errors are aggregated; the partially-resolved
+// default is still written so downstream validators see the attempted
+// value in error cases.
+func (b *builder) applyDefault(col *irpb.Column, lf *loader.LoadedField, carrier irpb.Carrier, semType irpb.SemType) {
+	if lf.Field == nil {
+		return
+	}
+	def, err := b.resolveDefault(lf.Desc, lf.Field, carrier, semType)
+	if err != nil {
+		b.err(err)
+	}
+	col.Default = def
+}
+
+// validateCollectionPkUnique rejects pk / unique on MAP or LIST carriers.
+// PG technically allows them, but whole-collection equality semantics are
+// almost never the author's intent — reject up front; iter-2 can revisit
+// if a pilot surfaces a real need.
+func (b *builder) validateCollectionPkUnique(carrier irpb.Carrier, lf *loader.LoadedField) {
+	if carrier != irpb.Carrier_CARRIER_MAP && carrier != irpb.Carrier_CARRIER_LIST {
+		return
+	}
+	if lf.Field == nil {
+		return
+	}
+	protoName := string(lf.Desc.Name())
+	if lf.Field.GetPk() {
+		b.err(diag.Atf(lf.Desc, "field %q: pk not supported on %s carrier", protoName, displayCarrier(carrier)).
+			WithWhy("primary keys on map / array columns have degenerate semantics (whole-collection equality, index bloat)").
+			WithFix("use a scalar PK (int64 ID with default_auto: IDENTITY is the canonical shape)"))
+	}
+	if lf.Field.GetUnique() {
+		b.err(diag.Atf(lf.Desc, "field %q: unique not supported on %s carrier", protoName, displayCarrier(carrier)).
+			WithWhy("UNIQUE INDEX on a collection column checks whole-collection equality, which is almost never the author's intent").
+			WithFix("drop unique, or use (w17.db.table).raw_indexes to spell the exact index shape you need (e.g. GIN on the element)"))
+	}
+}
+
+// validateStringNumericOptions rejects string-only options (min_len,
+// blank, pattern, choices) on non-string carriers and numeric-only range
+// bounds (gt/gte/lt/lte) on non-numeric carriers. Special-cases:
+// collection carriers reject all string-only options (no forall-element
+// CHECK); choices: is allowed on int + SEM_ENUM where it names the enum
+// driving CHECK IN numbers.
+func (b *builder) validateStringNumericOptions(carrier irpb.Carrier, semType irpb.SemType, lf *loader.LoadedField) {
+	if lf.Field == nil {
+		return
+	}
+	desc := lf.Desc
+	protoName := string(desc.Name())
+	fieldOpt := lf.Field
+	switch {
+	case carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST:
+		if fieldOpt.MinLen != nil || fieldOpt.GetBlank() || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" {
+			b.err(diag.Atf(desc, "field %q: min_len / blank / pattern / choices are not supported on %s carrier", protoName, displayCarrier(carrier)).
+				WithWhy("PG CHECK constraints can't iterate over array / map elements — there's no `forall element` operator without a subquery. Per-element validation needs triggers or application-level checks; raw_checks can spell a whole-column CHECK if that suffices").
+				WithFix("drop the string-only option, or move the check to (w17.db.table).raw_checks with a PG-specific body (e.g. cardinality() <= N)"))
+		}
+	case carrier != irpb.Carrier_CARRIER_STRING:
+		if fieldOpt.MinLen != nil {
+			b.err(diag.Atf(desc, "field %q: min_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("min_len controls char_length on strings; other carriers have no length").
+				WithFix("drop min_len, or change the proto field to a string carrier"))
+		}
+		if fieldOpt.GetBlank() {
+			b.err(diag.Atf(desc, "field %q: blank is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("blank relaxes the implicit `col <> ''` CHECK on strings; non-string columns have no such CHECK").
+				WithFix("drop blank, or change the proto field to a string carrier"))
+		}
+		if fieldOpt.GetPattern() != "" {
+			b.err(diag.Atf(desc, "field %q: pattern is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("pattern emits a regex CHECK; regex only applies to strings").
+				WithFix("drop pattern, or change the proto field to a string carrier"))
+		}
+		// D17: choices: IS permitted on int + SEM_ENUM (it names the
+		// enum whose numeric values drive CHECK IN). Reject only when
+		// the column isn't a numeric-ENUM column.
+		if fieldOpt.GetChoices() != "" && semType != irpb.SemType_SEM_ENUM {
+			b.err(diag.Atf(desc, "field %q: choices is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
+				WithWhy("choices emits `CHECK col IN ('A','B',…)` matched against enum *value names*, which are strings").
+				WithFix("drop choices, or change the proto field to a string carrier"))
 		}
 	}
-
-	// Default value — resolve the oneof and validate against carrier/type.
-	if fieldOpt != nil {
-		def, err := b.resolveDefault(desc, fieldOpt, carrier, semType)
-		if err != nil {
-			b.err(err)
-		}
-		col.Default = def
+	// Numeric for range purposes = INT32 / INT64 / DOUBLE or the DECIMAL
+	// sub-case (string carrier + SEM_DECIMAL, which emits NUMERIC(p,s)).
+	// iteration-1.md D2 permits range bounds on DECIMAL ("bounds are
+	// carried via double and are precision-limited") — the earlier
+	// carrier-only guard rejected that legitimate combination.
+	numericForRange := carrier == irpb.Carrier_CARRIER_INT32 ||
+		carrier == irpb.Carrier_CARRIER_INT64 ||
+		carrier == irpb.Carrier_CARRIER_DOUBLE ||
+		(carrier == irpb.Carrier_CARRIER_STRING && semType == irpb.SemType_SEM_DECIMAL)
+	if !numericForRange && (fieldOpt.Gt != nil || fieldOpt.Gte != nil || fieldOpt.Lt != nil || fieldOpt.Lte != nil) {
+		b.err(diag.Atf(desc, "field %q: gt/gte/lt/lte require a numeric carrier or type: DECIMAL (got carrier=%s, type=%s)", protoName, displayCarrier(carrier), displaySemType(semType)).
+			WithWhy("the range CHECK emits a numeric comparison; it's undefined for non-numeric types").
+			WithFix("drop the bound, or change the proto field to int32/int64/double or string+type: DECIMAL"))
 	}
+}
 
-	// Pk / unique don't compose cleanly with collection carriers — PG
-	// allows array PKs / UNIQUE INDEX on arrays technically, but the
-	// resulting semantics (equality on whole arrays, index bloat) are
-	// rarely what the author wants. Reject up front; iter-2 can revisit
-	// if a pilot surfaces a real need.
-	if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
-		if fieldOpt != nil {
-			if fieldOpt.GetPk() {
-				b.err(diag.Atf(desc, "field %q: pk not supported on %s carrier", protoName, displayCarrier(carrier)).
-					WithWhy("primary keys on map / array columns have degenerate semantics (whole-collection equality, index bloat)").
-					WithFix("use a scalar PK (int64 ID with default_auto: IDENTITY is the canonical shape)"))
-			}
-			if fieldOpt.GetUnique() {
-				b.err(diag.Atf(desc, "field %q: unique not supported on %s carrier", protoName, displayCarrier(carrier)).
-					WithWhy("UNIQUE INDEX on a collection column checks whole-collection equality, which is almost never the author's intent").
-					WithFix("drop unique, or use (w17.db.table).raw_indexes to spell the exact index shape you need (e.g. GIN on the element)"))
-			}
-		}
+// applyPgOverrides lifts (w17.pg.field) passthrough onto col.Pg. Must run
+// before attachChecks so the synth layer can see when PG storage is
+// redirected via `custom_type` and skip string-only synths that would
+// fail at apply on the overridden column type.
+func (b *builder) applyPgOverrides(col *irpb.Column, lf *loader.LoadedField) {
+	if lf.PgField == nil {
+		return
 	}
-
-	// String-only / numeric-only option validation.
-	if fieldOpt != nil {
-		// Element-level CHECK synths (blank, length-via-min, regex, choices)
-		// can't be expressed as PG CHECK on array / map columns (CHECK
-		// constraints don't allow subqueries or forall-element operators).
-		// Reject the explicit-author variants here so intent never silently
-		// drops; max_len stays allowed because it drives VARCHAR(N)[]
-		// storage, not a CHECK.
-		if carrier == irpb.Carrier_CARRIER_MAP || carrier == irpb.Carrier_CARRIER_LIST {
-			if fieldOpt.MinLen != nil || fieldOpt.GetBlank() || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" {
-				b.err(diag.Atf(desc, "field %q: min_len / blank / pattern / choices are not supported on %s carrier", protoName, displayCarrier(carrier)).
-					WithWhy("PG CHECK constraints can't iterate over array / map elements — there's no `forall element` operator without a subquery. Per-element validation needs triggers or application-level checks; raw_checks can spell a whole-column CHECK if that suffices").
-					WithFix("drop the string-only option, or move the check to (w17.db.table).raw_checks with a PG-specific body (e.g. cardinality() <= N)"))
-			}
-		} else if carrier != irpb.Carrier_CARRIER_STRING {
-			if fieldOpt.MinLen != nil {
-				b.err(diag.Atf(desc, "field %q: min_len is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-					WithWhy("min_len controls char_length on strings; other carriers have no length").
-					WithFix("drop min_len, or change the proto field to a string carrier"))
-			}
-			if fieldOpt.GetBlank() {
-				b.err(diag.Atf(desc, "field %q: blank is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-					WithWhy("blank relaxes the implicit `col <> ''` CHECK on strings; non-string columns have no such CHECK").
-					WithFix("drop blank, or change the proto field to a string carrier"))
-			}
-			if fieldOpt.GetPattern() != "" {
-				b.err(diag.Atf(desc, "field %q: pattern is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-					WithWhy("pattern emits a regex CHECK; regex only applies to strings").
-					WithFix("drop pattern, or change the proto field to a string carrier"))
-			}
-			// D17: choices: IS permitted on int + SEM_ENUM (it names the
-			// enum whose numeric values drive CHECK IN). Reject only when
-			// the column isn't a numeric-ENUM column.
-			if fieldOpt.GetChoices() != "" && semType != irpb.SemType_SEM_ENUM {
-				b.err(diag.Atf(desc, "field %q: choices is only valid on string carriers (got %s)", protoName, displayCarrier(carrier)).
-					WithWhy("choices emits `CHECK col IN ('A','B',…)` matched against enum *value names*, which are strings").
-					WithFix("drop choices, or change the proto field to a string carrier"))
-			}
-		}
-		// Numeric for range purposes = INT32 / INT64 / DOUBLE or the DECIMAL
-		// sub-case (string carrier + SEM_DECIMAL, which emits NUMERIC(p,s)).
-		// iteration-1.md D2 permits range bounds on DECIMAL ("bounds are
-		// carried via double and are precision-limited") — the earlier
-		// carrier-only guard rejected that legitimate combination.
-		numericForRange := carrier == irpb.Carrier_CARRIER_INT32 ||
-			carrier == irpb.Carrier_CARRIER_INT64 ||
-			carrier == irpb.Carrier_CARRIER_DOUBLE ||
-			(carrier == irpb.Carrier_CARRIER_STRING && semType == irpb.SemType_SEM_DECIMAL)
-		if !numericForRange {
-			if fieldOpt.Gt != nil || fieldOpt.Gte != nil || fieldOpt.Lt != nil || fieldOpt.Lte != nil {
-				b.err(diag.Atf(desc, "field %q: gt/gte/lt/lte require a numeric carrier or type: DECIMAL (got carrier=%s, type=%s)", protoName, displayCarrier(carrier), displaySemType(semType)).
-					WithWhy("the range CHECK emits a numeric comparison; it's undefined for non-numeric types").
-					WithFix("drop the bound, or change the proto field to int32/int64/double or string+type: DECIMAL"))
-			}
-		}
+	col.Pg = &irpb.PgOptions{
+		CustomType:         lf.PgField.GetCustomType(),
+		RequiredExtensions: append([]string(nil), lf.PgField.GetRequiredExtensions()...),
 	}
+}
 
-	// Postgres dialect passthrough — must be populated BEFORE attachChecks
-	// so the synth layer can see when PG storage is redirected via
-	// `custom_type` and skip string-only synths that would fail at apply on
-	// the overridden column type. Post-D13: curated flags (jsonb / inet /
-	// tsvector / hstore) live as core Types or map-carrier AUTO dispatch;
-	// this passthrough is narrow.
-	if lf.PgField != nil {
-		col.Pg = &irpb.PgOptions{
-			CustomType:         lf.PgField.GetCustomType(),
-			RequiredExtensions: append([]string(nil), lf.PgField.GetRequiredExtensions()...),
-		}
-	}
-
-	// (w17.db.column).db_type — storage override (D14). Orthogonal to
-	// field.Type: data semantic stays on field.Type, storage shape comes
-	// from db_type. Validated for carrier compatibility; conflicts with
-	// custom_type (pick one override path).
+// validateDbType applies (w17.db.column).db_type storage override and
+// enforces carrier compatibility + conflicts with (w17.pg.field).custom_type
+// + the VARCHAR-needs-max_len / NUMERIC-needs-precision guards.
+func (b *builder) validateDbType(col *irpb.Column, carrier irpb.Carrier, lf *loader.LoadedField) {
 	if lf.Column != nil {
 		col.DbType = dbTypeToIR(lf.Column.GetDbType())
 	}
-	if col.GetDbType() != irpb.DbType_DB_TYPE_UNSPECIFIED {
-		if col.GetPg() != nil && col.GetPg().GetCustomType() != "" {
-			b.err(diag.Atf(desc, "field %q: (w17.db.column).db_type conflicts with (w17.pg.field).custom_type", protoName).
-				WithWhy("db_type and custom_type are two different storage-override paths: db_type is the enumerated cross-dialect surface, custom_type is the opaque PG-specific escape hatch. Setting both is ambiguous — the emitter would have to pick one silently").
-				WithFix("pick one: db_type for known types (TEXT, JSONB, CITEXT, …), or custom_type for types the enum doesn't cover (pgvector, PostGIS, custom DOMAINs)"))
-		}
-		if !dbTypeCompatibleWithCarrier(col.GetDbType(), carrier) {
-			b.err(diag.Atf(desc, "field %q: db_type %s is not valid on a %s carrier", protoName, displayDbType(col.GetDbType()), displayCarrier(carrier)).
-				WithWhy("each DbType maps to a class of compatible carriers — text-shaped types require string, numeric types require int/double, BYTEA requires bytes, TIMESTAMP requires google.protobuf.Timestamp, etc. Mismatched pairs would produce SQL the proto wire can't populate").
-				WithFix(fmt.Sprintf("change the proto carrier to one that matches db_type: %s, or drop db_type and let field.Type preset pick storage", displayDbType(col.GetDbType()))))
-		}
-		if col.GetDbType() == irpb.DbType_DBT_VARCHAR && col.GetMaxLen() <= 0 {
-			b.err(diag.Atf(desc, "field %q: db_type: VARCHAR requires (w17.field).max_len", protoName).
-				WithWhy("VARCHAR(N) has no column-type-driven size without N; the emitter can't pick a default").
-				WithFix("add max_len to (w17.field), or pick db_type: TEXT for unbounded text"))
-		}
-		if col.GetDbType() == irpb.DbType_DBT_NUMERIC && col.GetPrecision() <= 0 {
-			b.err(diag.Atf(desc, "field %q: db_type: NUMERIC requires (w17.field).precision", protoName).
-				WithWhy("NUMERIC(p, s) has no defaults — precision is the total significant-digit count and has no safe fallback").
-				WithFix("add precision (and optionally scale) to (w17.field), or pick a fixed-shape type like MONEY"))
+	if col.GetDbType() == irpb.DbType_DB_TYPE_UNSPECIFIED {
+		return
+	}
+	desc := lf.Desc
+	protoName := string(desc.Name())
+	if col.GetPg() != nil && col.GetPg().GetCustomType() != "" {
+		b.err(diag.Atf(desc, "field %q: (w17.db.column).db_type conflicts with (w17.pg.field).custom_type", protoName).
+			WithWhy("db_type and custom_type are two different storage-override paths: db_type is the enumerated cross-dialect surface, custom_type is the opaque PG-specific escape hatch. Setting both is ambiguous — the emitter would have to pick one silently").
+			WithFix("pick one: db_type for known types (TEXT, JSONB, CITEXT, …), or custom_type for types the enum doesn't cover (pgvector, PostGIS, custom DOMAINs)"))
+	}
+	if !dbTypeCompatibleWithCarrier(col.GetDbType(), carrier) {
+		b.err(diag.Atf(desc, "field %q: db_type %s is not valid on a %s carrier", protoName, displayDbType(col.GetDbType()), displayCarrier(carrier)).
+			WithWhy("each DbType maps to a class of compatible carriers — text-shaped types require string, numeric types require int/double, BYTEA requires bytes, TIMESTAMP requires google.protobuf.Timestamp, etc. Mismatched pairs would produce SQL the proto wire can't populate").
+			WithFix(fmt.Sprintf("change the proto carrier to one that matches db_type: %s, or drop db_type and let field.Type preset pick storage", displayDbType(col.GetDbType()))))
+	}
+	if col.GetDbType() == irpb.DbType_DBT_VARCHAR && col.GetMaxLen() <= 0 {
+		b.err(diag.Atf(desc, "field %q: db_type: VARCHAR requires (w17.field).max_len", protoName).
+			WithWhy("VARCHAR(N) has no column-type-driven size without N; the emitter can't pick a default").
+			WithFix("add max_len to (w17.field), or pick db_type: TEXT for unbounded text"))
+	}
+	if col.GetDbType() == irpb.DbType_DBT_NUMERIC && col.GetPrecision() <= 0 {
+		b.err(diag.Atf(desc, "field %q: db_type: NUMERIC requires (w17.field).precision", protoName).
+			WithWhy("NUMERIC(p, s) has no defaults — precision is the total significant-digit count and has no safe fallback").
+			WithFix("add precision (and optionally scale) to (w17.field), or pick a fixed-shape type like MONEY"))
+	}
+}
+
+// validatePgCustomType enforces the TEXT-only contract on
+// (w17.pg.field).custom_type: string carrier + SEM_TEXT only, and no
+// competing string-only CHECK options that would synth against a
+// differently-typed SQL column.
+func (b *builder) validatePgCustomType(col *irpb.Column, carrier irpb.Carrier, semType irpb.SemType, lf *loader.LoadedField) {
+	if col.GetPg() == nil || !pgOverridesStorage(col.GetPg()) {
+		return
+	}
+	desc := lf.Desc
+	protoName := string(desc.Name())
+	switch {
+	case carrier != irpb.Carrier_CARRIER_STRING:
+		b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type is only allowed on string-carrier columns in iter-1 (got %s)", protoName, displayCarrier(carrier)).
+			WithWhy("numeric / bool / temporal / bytes carriers have a deterministic (carrier, type) → SQL mapping — they don't need an escape hatch; allowing an override here would let two contradictory storage choices silently race").
+			WithFix("drop (w17.pg.field).custom_type, or change the proto field to a string carrier + type: TEXT"))
+	case semType != irpb.SemType_SEM_TEXT:
+		b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type requires type: TEXT (got %s)", protoName, displaySemType(semType)).
+			WithWhy("sem types other than TEXT carry their own storage — CHAR/SLUG → VARCHAR(N); UUID → UUID; EMAIL/URL → VARCHAR(default); DECIMAL → NUMERIC; JSON → JSONB; IP → INET; TSEARCH → TSVECTOR. Combining them with custom_type silently drops the sem-driven storage and CHECKs").
+			WithFix("change type to TEXT for the custom_type escape hatch path, or drop custom_type and let the curated Type pick storage"))
+	default:
+		fieldOpt := lf.Field
+		if fieldOpt != nil && (fieldOpt.MinLen != nil || fieldOpt.GetMaxLen() > 0 || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" || fieldOpt.GetBlank()) {
+			b.err(diag.Atf(desc, "field %q: min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field).custom_type", protoName).
+				WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column").
+				WithFix("drop the string-only options, or drop the custom_type override — pick one path"))
 		}
 	}
+}
 
-	// (w17.pg.field).custom_type compatibility — enforce the "TEXT-only"
-	// contract so author intent never silently drops. custom_type is the
-	// remaining storage override after D13 lifted jsonb / inet / tsvector
-	// to core Types; sem types other than TEXT carry their own storage
-	// semantics that would contradict the override. Explicit string-only
-	// CHECK options (min_len, max_len, pattern, choices, explicit blank)
-	// emit synths attachChecks must skip on a non-string SQL column —
-	// reporting the conflict here keeps the author from losing intent
-	// silently.
-	if col.GetPg() != nil && pgOverridesStorage(col.GetPg()) {
-		switch {
-		case carrier != irpb.Carrier_CARRIER_STRING:
-			b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type is only allowed on string-carrier columns in iter-1 (got %s)", protoName, displayCarrier(carrier)).
-				WithWhy("numeric / bool / temporal / bytes carriers have a deterministic (carrier, type) → SQL mapping — they don't need an escape hatch; allowing an override here would let two contradictory storage choices silently race").
-				WithFix("drop (w17.pg.field).custom_type, or change the proto field to a string carrier + type: TEXT"))
-		case semType != irpb.SemType_SEM_TEXT:
-			b.err(diag.Atf(desc, "field %q: (w17.pg.field).custom_type requires type: TEXT (got %s)", protoName, displaySemType(semType)).
-				WithWhy("sem types other than TEXT carry their own storage — CHAR/SLUG → VARCHAR(N); UUID → UUID; EMAIL/URL → VARCHAR(default); DECIMAL → NUMERIC; JSON → JSONB; IP → INET; TSEARCH → TSVECTOR. Combining them with custom_type silently drops the sem-driven storage and CHECKs").
-				WithFix("change type to TEXT for the custom_type escape hatch path, or drop custom_type and let the curated Type pick storage"))
-		default:
-			if fieldOpt != nil && (fieldOpt.MinLen != nil || fieldOpt.GetMaxLen() > 0 || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" || fieldOpt.GetBlank()) {
-				b.err(diag.Atf(desc, "field %q: min_len / max_len / pattern / choices / blank are incompatible with (w17.pg.field).custom_type", protoName).
-					WithWhy("these options synthesise string-only CHECKs (char_length, <>''/regex, IN (...)) that don't type-check against the overridden SQL column").
-					WithFix("drop the string-only options, or drop the custom_type override — pick one path"))
-			}
-		}
+// validateGeneratedExpr (D18) enforces PG's contract on GENERATED ALWAYS
+// AS (expr) STORED columns: no competing default value, no PK role, no FK
+// role. Uniqueness and nullability remain allowed — PG permits both on a
+// STORED generated column.
+func (b *builder) validateGeneratedExpr(col *irpb.Column, lf *loader.LoadedField) {
+	if col.GetGeneratedExpr() == "" {
+		return
 	}
-
-	// (w17.db.column).generated_expr — GENERATED ALWAYS AS (<expr>) STORED
-	// on PG (D18). The computed value IS the value; any author-supplied
-	// way to provide a value (default_*, proto-level PK, FK reference)
-	// would fight the expression. Reject all three combinations here
-	// rather than at apply time so the failure carries file:line:col and
-	// a fix. Uniqueness and nullability remain allowed — PG lets you put
-	// UNIQUE on a STORED generated column, and NULL/NOT NULL is
-	// independent of how the value is produced.
-	if col.GetGeneratedExpr() != "" {
-		if col.GetDefault() != nil {
-			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with default_*", protoName).
-				WithWhy("a generated column is computed from its expression on every INSERT/UPDATE — PG rejects any DEFAULT clause on GENERATED ALWAYS AS columns because the two would compete for the initial value").
-				WithFix("drop default_string / default_int / default_double / default_auto from (w17.field), or drop generated_expr from (w17.db.column)"))
-		}
-		if col.GetPk() {
-			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with pk: true", protoName).
-				WithWhy("Postgres does not allow STORED generated columns as primary keys — the PK must be a plain column you can write to directly").
-				WithFix("drop pk from (w17.field), or drop generated_expr; pick a non-generated column as the primary key"))
-		}
-		if lf.Column != nil && lf.Column.GetFk() != "" {
-			b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with fk", protoName).
-				WithWhy("a FOREIGN KEY on a generated column makes the referential integrity contract depend on a computed value — PG rejects it because the on-delete/on-update machinery can't act on a column the author doesn't own").
-				WithFix(`drop fk from (w17.db.column), or drop generated_expr; model the FK on a plain column and derive the generated one from it`))
-		}
+	desc := lf.Desc
+	protoName := string(desc.Name())
+	if col.GetDefault() != nil {
+		b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with default_*", protoName).
+			WithWhy("a generated column is computed from its expression on every INSERT/UPDATE — PG rejects any DEFAULT clause on GENERATED ALWAYS AS columns because the two would compete for the initial value").
+			WithFix("drop default_string / default_int / default_double / default_auto from (w17.field), or drop generated_expr from (w17.db.column)"))
 	}
-
-	// Build Checks from the surviving facts. CHECK-name length validation
-	// (derivedCheckName fits into NAMEDATALEN) happens in buildTable once
-	// the table name is available — per-column we can't spell the full
-	// constraint name yet.
-	//
-	// Collection carriers (MAP / LIST) skip CHECK synthesis entirely —
-	// PG CHECK constraints can't express per-element predicates without
-	// subqueries, and whole-column predicates on collections are almost
-	// always the wrong tool. Authors who need them reach for
-	// (w17.db.table).raw_checks with dialect-specific SQL.
-	if fieldOpt != nil && carrier != irpb.Carrier_CARRIER_MAP && carrier != irpb.Carrier_CARRIER_LIST {
-		b.attachChecks(col, fieldOpt, carrier, semType, desc)
+	if col.GetPk() {
+		b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with pk: true", protoName).
+			WithWhy("Postgres does not allow STORED generated columns as primary keys — the PK must be a plain column you can write to directly").
+			WithFix("drop pk from (w17.field), or drop generated_expr; pick a non-generated column as the primary key"))
 	}
+	if lf.Column != nil && lf.Column.GetFk() != "" {
+		b.err(diag.Atf(desc, "field %q: generated_expr is incompatible with fk", protoName).
+			WithWhy("a FOREIGN KEY on a generated column makes the referential integrity contract depend on a computed value — PG rejects it because the on-delete/on-update machinery can't act on a column the author doesn't own").
+			WithFix(`drop fk from (w17.db.column), or drop generated_expr; model the FK on a plain column and derive the generated one from it`))
+	}
+}
 
-	// D17 — SEM_ENUM side-data: resolve the enum descriptor, populate
-	// column metadata, and synth CHECK IN (numbers) on int carriers.
-	// Runs after attachChecks so the ENUM constraint sorts last (matches
-	// the string-`choices:` output position inside attachChecks).
+// resolveAuxiliarySemTypes dispatches sem-type-specific final resolution:
+// SEM_ENUM (D17) populates choices + synths numeric CHECK IN; path
+// presets (D22d) synth the extension-format regex CHECK. Returns nil
+// column on a fatal error (unresolved enum, bad extension). Also rejects
+// extensions on non-path sem types.
+func (b *builder) resolveAuxiliarySemTypes(col *irpb.Column, lf *loader.LoadedField, carrier irpb.Carrier, semType irpb.SemType) *irpb.Column {
+	desc := lf.Desc
 	if semType == irpb.SemType_SEM_ENUM {
-		if err := b.resolveEnumColumn(col, desc, fieldOpt, carrier); err != nil {
+		if err := b.resolveEnumColumn(col, desc, lf.Field, carrier); err != nil {
 			b.err(err)
 			return nil
 		}
 	}
-
-	// D22d — path-family presets: resolve allowed_extensions +
-	// synthesise the format regex CHECK. Runs after attachChecks so
-	// the extension regex sorts after any author-supplied pattern
-	// (which we skip setting on path types anyway — paths don't
-	// accept pattern: override; the extensions list IS the
-	// mechanism).
 	if isPathSemType(semType) {
-		if err := b.resolvePathExtensions(col, desc, fieldOpt, semType); err != nil {
+		if err := b.resolvePathExtensions(col, desc, lf.Field, semType); err != nil {
 			b.err(err)
 			return nil
 		}
-	} else if fieldOpt != nil && len(fieldOpt.GetExtensions()) > 0 {
-		b.err(diag.Atf(desc, "field %q: extensions is only valid on path presets (got type %s)", protoName, displaySemType(semType)).
+		return col
+	}
+	if lf.Field != nil && len(lf.Field.GetExtensions()) > 0 {
+		b.err(diag.Atf(desc, "field %q: extensions is only valid on path presets (got type %s)", string(desc.Name()), displaySemType(semType)).
 			WithWhy("extensions drives the format CHECK for FILE_PATH / IMAGE_PATH — it has no meaning on other types").
 			WithFix("drop extensions from (w17.field), or change type: to FILE_PATH / IMAGE_PATH"))
 		return nil
 	}
-
 	return col
 }
 
