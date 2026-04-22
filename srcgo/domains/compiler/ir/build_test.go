@@ -243,18 +243,6 @@ func TestBuildErrors(t *testing.T) {
 			},
 		},
 		{
-			name:    "missing table name",
-			fixture: "testdata/errors/missing_table_name.proto",
-			wants: []string{
-				`missing_table_name.proto:`,
-				`(w17.db.table).name is empty`,
-				`why:`,
-				`never auto-derived`,
-				`fix:`,
-				`snake_case_plural`,
-			},
-		},
-		{
 			name:    "bool carrier must not set type",
 			fixture: "testdata/errors/bool_with_type.proto",
 			wants: []string{
@@ -565,6 +553,20 @@ func TestBuildErrors(t *testing.T) {
 				`why:`,
 				`63 bytes`,
 				`fix:`,
+			},
+		},
+		{
+			name:    "default-derived name hits a reserved keyword",
+			fixture: "testdata/errors/default_name_reserved.proto",
+			wants: []string{
+				`default_name_reserved.proto:`,
+				`"user"`,
+				`Postgres reserved keyword`,
+				`why:`,
+				`reserved keywords`,
+				`fix:`,
+				`(w17.db.table) = { name:`,
+				`derived name "user"`,
 			},
 		},
 	}

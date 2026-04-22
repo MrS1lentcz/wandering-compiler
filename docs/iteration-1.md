@@ -808,6 +808,90 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D21 — Default table name = `snake_case(message.local_name)` (added 2026-04-22)
+
+**Decision.** `(w17.db.table).name` becomes optional. When absent, the
+table name is derived from the proto message's local name via a
+mechanical camelCase → snake_case conversion:
+
+```proto
+message Product          {}  // → product
+message ProductCategory  {}  // → product_category
+message DashboardURLField{}  // → dashboard_url_field   (acronym boundary)
+message User             {}  // → ERROR — "user" is a PG reserved keyword;
+                             //   author overrides via (w17.db.table).name
+                             //   or renames the message
+```
+
+Explicit override precedence unchanged: `(w17.db.table) = { name: "alt" }`
+always wins. A message without `(w17.db.table)` at all is still not a
+table (that's the marker for "this proto is an authoring input"); an
+empty option body `option (w17.db.table) = {};` is the minimal
+annotation to mark a message as a table and derive the name.
+
+**Design choices.**
+
+  - **No pluralisation.** Django doesn't pluralise (`Product` →
+    `app_product`); Rails does (`Product` → `products`). English
+    pluralisation needs irregular-word tables (`Person` → `people`,
+    `Child` → `children`, `Datum` → `data`), the rules don't
+    survive contact with real vocabulary, and `people` / `children`
+    read weirdly for code-generated SQL. Proactive transformations
+    of author-declared names also compose badly with grep / code
+    search / FK references. Stick with the mechanical
+    transformation.
+  - **No package-derived prefix.** The module's namespace (D19)
+    owns the prefix — `catalog.Product` under
+    `(w17.db.module) = { prefix: "catalog" }` becomes
+    `catalog_product`, not `catalog_catalog_product`. Mixing two
+    prefix sources would create surprising output and fight the
+    "one module = one prefix" rule.
+  - **No version-segment stripping.** Models don't carry versions
+    (`catalog.v1.Product` is an anti-pattern in the model layer —
+    versioning lives on the API / FE projection layer, not on the
+    authoritative model). The derivation walks only the message's
+    local name (`desc.Name()`), never the package.
+  - **Reserved-keyword clashes surface at IR time** with a
+    derivation-specific fix hint: rename the proto message, or
+    override via `(w17.db.table).name`. The error message names the
+    derived value (`"user"`) so the author sees what the compiler
+    computed.
+
+**Algorithm.** Insert `_` when (a) the current uppercase rune
+follows a lowercase or digit (`ProductCategory` boundary) or (b) the
+current uppercase rune is followed by a lowercase rune AND preceded
+by another uppercase rune (acronym-then-word boundary,
+`URLParser` → `url_parser`). Lowercase everything. ASCII-only in
+practice (proto identifier grammar restricts to `[A-Za-z_][0-9A-Za-z_]*`).
+
+**Interaction with D19.** Derivation runs first (→ `local`); the
+namespace layer applies after. Under `prefix: "catalog"`:
+`Product` → derived `product` → effective `catalog_product`. The
+NAMEDATALEN validation from D19 runs on the effective (post-prefix)
+form, so derivation + prefix overflow produces one error naming
+both. SCHEMA mode leaves the bare derived name and qualifies at
+emit time.
+
+**Rationale.** `(w17.db.table).name` was required across early
+iter-1 as a caution against auto-derivation spreading into riskier
+places (column names, default types, …). With D11–D19 closing out
+the vocabulary and D3 still protecting column-level invariants (no
+compiler-injected fields), table-name derivation no longer risks
+slippery slope — every column is still explicit, every type is
+still explicit, and only the one identifier that *is* mechanically
+derivable from the proto (the message's local name) gets defaulted.
+Making it optional matches the zero-config ethos of D14
+(per-carrier defaults) and D15 (carrier-driven dispatch). Author
+ergonomics improve without losing expressivity — override is
+always one field away.
+
+**Relation to D3.** D3 rejects compiler-generated **columns**
+(no `timestamps:true` / `soft_delete:true` injection) because
+hidden columns make the proto a lie. D21 is orthogonal: the proto
+still declares every column by hand; only the *SQL table name*
+default is derived, and the message's local name is already in
+the proto.
+
 ### D19 — Module namespace: schema XOR prefix (added 2026-04-22)
 
 **Decision.** Each compilation module (= proto file in iter-1; = proto

@@ -3,9 +3,57 @@ package ir
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 )
+
+// camelToSnake converts a proto CamelCase identifier to snake_case. Used
+// by ir.Build to derive the default SQL table name from a message's
+// local name when the author did not set (w17.db.table).name (D21).
+// No pluralisation — that would need English-only rules (y→ies,
+// Person→people, Child→children, Datum→data, …) which don't survive
+// contact with real vocabulary. Matches what SQLAlchemy does by default
+// (author writes snake-case in Python, we do the conversion from proto
+// CamelCase).
+//
+// Insert `_`:
+//   - between a lowercase/digit and the next uppercase rune
+//     (`ProductCategory` → `product_category`, `URL1Parser` →
+//     `url1_parser`)
+//   - between two uppercase runes when the second is followed by a
+//     lowercase rune (acronym-then-word boundary,
+//     `URLParser` → `url_parser`, `DashboardURLField` →
+//     `dashboard_url_field`)
+//
+// ASCII-only input in practice (proto message names are identifiers in
+// the proto grammar, which restricts to [A-Za-z_][0-9A-Za-z_]*); the
+// unicode package calls cover the corner case without adding a separate
+// ASCII path.
+func camelToSnake(name string) string {
+	if name == "" {
+		return ""
+	}
+	runes := []rune(name)
+	var b strings.Builder
+	b.Grow(len(name) + 4)
+	for i, r := range runes {
+		if i > 0 && unicode.IsUpper(r) {
+			prev := runes[i-1]
+			var next rune
+			if i+1 < len(runes) {
+				next = runes[i+1]
+			}
+			needsSeparator := unicode.IsLower(prev) || unicode.IsDigit(prev) ||
+				(unicode.IsUpper(prev) && unicode.IsLower(next))
+			if needsSeparator {
+				b.WriteByte('_')
+			}
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
+}
 
 // validateIdentifier checks a single SQL identifier — table name, column
 // name, index name, or CHECK constraint name — against two failure modes

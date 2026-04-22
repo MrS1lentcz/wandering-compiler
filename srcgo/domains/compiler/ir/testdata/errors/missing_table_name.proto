@@ -1,9 +1,0 @@
-syntax = "proto3";
-package irtest;
-import "w17/db.proto";
-import "w17/field.proto";
-
-message Thing {
-  option (w17.db.table) = {}; // no name
-  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
-}

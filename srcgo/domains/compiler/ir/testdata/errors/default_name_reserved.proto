@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package d21.default_name_reserved;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D21 error — default name derivation lands on a PG reserved keyword.
+// `User` → `user` which is a category-R reserved word; author must
+// override via (w17.db.table).name or rename the proto message.
+message User {
+  option (w17.db.table) = {};
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 80 }];
+}

@@ -321,11 +321,15 @@ make schemagen
       FileOptions extend; module-immutable, no per-message override;
       PREFIX baked into IR, SCHEMA qualifies at emit time; shipped
       2026-04-22)
-- [ ] **← YOU ARE HERE.** Start D21 (default table name =
-      `snake_case(message.local_name)`, no pluralisation, no
-      package-derived prefix — verze v modelech nejsou; namespace
-      řeší D19 orthogonálně). **Note:** D21 replaces the original
-      "D20 index sort order" slot in the queue.
+- [x] D21 (default table name = `snake_case(message.local_name)`,
+      no pluralisation, no package-derived prefix; reserved-keyword
+      clashes surface at IR time with derivation-specific fix;
+      composes with D19 namespace; shipped 2026-04-22)
+- [ ] **← YOU ARE HERE.** Start D22 (optional bundle — COMMENT ON
+      auto-from-docstring + override annotation; path-family presets
+      IMAGE_PATH / POSIX_PATH / FILE_PATH with `extensions` list +
+      `*` wildcard; MAC_ADDRESS with CHECK when storage doesn't
+      enforce; SMALL_INTEGER preset).
 - [ ] D22 (optional bundle — COMMENT ON auto-from-docstring +
       override annotation; path-family presets IMAGE_PATH /
       POSIX_PATH / FILE_PATH with `extensions` list + `*` wildcard;

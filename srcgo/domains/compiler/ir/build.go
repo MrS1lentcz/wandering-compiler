@@ -147,11 +147,18 @@ type builder struct {
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
 
 func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
-	if msg.Table.GetName() == "" {
-		b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).name is empty", msg.Desc.Name()).
-			WithWhy("the SQL table name is never auto-derived from the proto message name (D6 — explicit over implicit)").
-			WithFix(`add option (w17.db.table) = { name: "snake_case_plural" };`))
-		return nil
+	// D21 — derive the table name from the proto message's local name
+	// (camelCase → snake_case) when (w17.db.table).name is unset. No
+	// pluralisation, no package-derived prefix (namespace is D19's
+	// job). Explicit `name:` always wins over the derivation so
+	// authors can keep legacy / irregular SQL names on a per-table
+	// basis. Derived + explicit share the same validation pipeline
+	// (NAMEDATALEN, reserved keywords, post-prefix length).
+	localName := msg.Table.GetName()
+	derived := false
+	if localName == "" {
+		localName = camelToSnake(string(msg.Desc.Name()))
+		derived = true
 	}
 	// Validate the EFFECTIVE name that will land in PG. In PREFIX
 	// namespace mode (D19) the effective form is `<prefix>_<name>`; in
@@ -160,11 +167,15 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 	// into identifier bytes). Running the check on the effective name
 	// catches NAMEDATALEN overflow under prefix mode at IR time
 	// instead of at apply time.
-	effectiveName := applyPrefix(b.prefix, msg.Table.GetName())
+	effectiveName := applyPrefix(b.prefix, localName)
 	if why := validateIdentifier(effectiveName); why != "" {
+		fix := "rename the table via (w17.db.table).name to a shorter / non-reserved identifier (snake_case)"
+		if derived {
+			fix = fmt.Sprintf(`rename the proto message, or set (w17.db.table) = { name: "<your_choice>" } to override the derived name %q`, localName)
+		}
 		b.err(diag.Atf(msg.Desc, "message %q: %s", msg.Desc.Name(), why).
 			WithWhy("Postgres rejects (or silently truncates) identifiers that exceed 63 bytes or collide with reserved keywords — caught here so the failure never reaches apply time").
-			WithFix("rename the table via (w17.db.table).name to a shorter / non-reserved identifier (snake_case, plural)"))
+			WithFix(fix))
 		return nil
 	}
 	tbl := &irpb.Table{

@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19 shipped; D21, D22, D23 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) + D21 default table name (`snake_case(message.local_name)` when `(w17.db.table).name` unset; no pluralisation; reserved-keyword clashes surface at IR time with derivation-specific fix) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19, D21 shipped; D22, D23 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -1040,6 +1040,57 @@ in code, not in docs:
       so it's a null case. PG natively supports
       `REFERENCES other_schema.table(col)`; iter-2's cross-file
       FK syntax will grow to carry the target's module.
+
+- **D21 default table name (shipped, 2026-04-22) — schema-gap
+  close-out, fourth of four before the D22/D23 finishers.**
+  `(w17.db.table).name` becomes optional; when unset the name is
+  derived from the proto message's local name via mechanical
+  camelCase → snake_case conversion. Full rationale in
+  `iteration-1.md` D21.
+
+  IR changes: new `camelToSnake` helper in `ir/names.go`. Algorithm
+  inserts `_` between lowercase/digit → uppercase boundaries and
+  at acronym boundaries (UPPER → UPPER+lower), lowercases the
+  result. ASCII-only in practice per proto identifier grammar.
+  `buildTable` derives when `msg.Table.GetName() == ""` and
+  validates the derived name through the same pipeline as explicit
+  names (NAMEDATALEN + reserved keywords + post-prefix form under
+  D19 namespace). The existing `applyPrefix` flow already walks
+  through whatever `localName` was resolved (derived or explicit),
+  so D19's prefix mode composes with D21 automatically:
+  `catalog.Product` under `prefix: "catalog"` → `catalog_product`.
+
+  Error diagnostics: when the derived name fails validation, the
+  fix-hint names the derived value explicitly (`derived name
+  "user"`) so authors see what the compiler computed and can pick
+  between renaming the proto message or setting an override.
+
+  Fixture changes: removed the now-stale `missing_table_name`
+  fixture + test case (the former "error: name required" path is
+  now the "derive default" path). Added positive fixture
+  `default_name_derivation` exercising four shapes (`Product` →
+  `product`, `ProductCategory` → `product_category`,
+  `DashboardURLField` → `dashboard_url_field` for acronym
+  boundary, explicit `name: "ye_olde_profiles"` override) plus FK
+  resolution against a derived target name. Added error fixture
+  `default_name_reserved.proto` proving the reserved-keyword
+  clash path works end-to-end.
+
+  Grand-tour count: 21 positive fixtures green on M8 goldens + M9
+  apply-roundtrip against `postgres:18-alpine` (20 previous + 1
+  D21 new). `TestBuildErrors` gains one case (reserved-keyword
+  derivation) and loses one (missing_table_name), staying at
+  parity in count.
+
+  **Design choices recap.** No pluralisation (English irregulars
+  don't survive real vocabulary; `Datum` → `data` surprises
+  readers; mechanical transform composes better with grep / code
+  search / FK references). No package-derived prefix (D19's
+  namespace owns that axis; mixing two prefix sources would
+  produce `catalog_catalog_product`). No version-segment stripping
+  (models don't carry versions — `catalog.v1.Product` is an
+  anti-pattern in the model layer; versioning lives on the API
+  projection layer).
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

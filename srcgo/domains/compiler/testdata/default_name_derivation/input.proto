@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package d21.default_name_derivation;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D21 fixture — default table name derived from proto message's local
+// name via camelToSnake. No pluralisation, no package-derived prefix.
+// Exercises: bare `option (w17.db.table) = {};` (empty option body),
+// CamelCase → snake_case conversion, acronym boundary handling,
+// explicit `name:` override precedence, and FK references resolving
+// against derived target names.
+
+message Product {
+  option (w17.db.table) = {};
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string sku  = 2 [(w17.field) = { type: CHAR, max_len: 40, unique: true }];
+}
+
+message ProductCategory {
+  option (w17.db.table) = {};
+
+  int64  id         = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  product_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "product.id", deletion_rule: CASCADE }
+  ];
+  string label      = 3 [(w17.field) = { type: CHAR, max_len: 80 }];
+}
+
+message DashboardURLField {
+  option (w17.db.table) = {};
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string href = 2 [(w17.field) = { type: URL }];
+}
+
+// Explicit override wins — derived would be "legacy_profile", author
+// keeps the historical table name.
+message LegacyProfile {
+  option (w17.db.table) = { name: "ye_olde_profiles" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 80 }];
+}
