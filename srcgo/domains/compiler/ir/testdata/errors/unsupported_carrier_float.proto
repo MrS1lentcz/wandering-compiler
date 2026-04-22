@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ir.unsupported_carrier_float;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Iter-1 accepts double (8-byte) but not float (4-byte) as a DB-column
+// carrier — forcing the author to double avoids silent precision
+// surprises. This fixture exercises the describeKind + protoKindToCarrier
+// rejection path for future carrier extensions.
+message Metric {
+  option (w17.db.table) = { name: "metrics" };
+
+  int64 id    = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  float ratio = 2 [(w17.field) = { type: NUMBER }];
+}

@@ -665,6 +665,17 @@ func TestBuildErrors(t *testing.T) {
 				`BTREE`,
 			},
 		},
+		{
+			name:    "unsupported carrier: float rejected",
+			fixture: "testdata/errors/unsupported_carrier_float.proto",
+			wants: []string{
+				`unsupported_carrier_float.proto:`,
+				`carrier float is not supported in iteration-1`,
+				`why:`,
+				`iteration-1 accepts string, int32, int64, bool, double`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {
