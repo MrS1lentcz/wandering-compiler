@@ -29,6 +29,6 @@ CREATE TABLE orders (
 );
 
 CREATE INDEX orders_customer_id_status_idx ON orders (customer_id, status) INCLUDE (total);
-CREATE INDEX orders_assigned_to_idx ON orders (assigned_to);
+CREATE INDEX orders_assigned_to_explicit_idx ON orders (assigned_to);
 
 COMMIT;

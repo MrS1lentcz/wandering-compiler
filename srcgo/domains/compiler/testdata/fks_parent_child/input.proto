@@ -31,7 +31,12 @@ message Order {
   option (w17.db.table) = {
     name: "orders",
     indexes: [
-      { fields: [{ name: "customer_id" }, { name: "status" }], include: ["total"] }
+      { fields: [{ name: "customer_id" }, { name: "status" }], include: ["total"] },
+      // Explicit single-col non-unique index on `assigned_to` —
+      // collides with the `(w17.db.column).index: true` synth path.
+      // synthesiseSingleColumnIndexes must detect and skip the
+      // synthetic duplicate.
+      { fields: [{ name: "assigned_to" }], name: "orders_assigned_to_explicit_idx" }
     ]
   };
 

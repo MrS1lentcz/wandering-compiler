@@ -1096,6 +1096,16 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "fk target column missing",
+			fixture: "testdata/errors/fk_target_column_missing.proto",
+			wants: []string{
+				`fk_target_column_missing.proto:`,
+				`fk target column "ghost_column" not found on table "customers"`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

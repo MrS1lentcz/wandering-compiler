@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package ir.fk_target_column_missing;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// FK references a column that doesn't exist on the target table.
+// Rejected at resolveFKs's hasColumn check — distinct from
+// fk_target_missing (no target table at all) and fk_target_not_unique
+// (target exists but isn't PK / unique).
+message Customer {
+  option (w17.db.table) = { name: "customers" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+}
+
+message Order {
+  option (w17.db.table) = { name: "orders" };
+
+  int64 id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64 customer_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "customers.ghost_column" }
+  ];
+}

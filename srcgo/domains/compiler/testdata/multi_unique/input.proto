@@ -20,7 +20,11 @@ message User {
       { name: "users_tenant_email_cover_uidx",
         fields: [{ name: "tenant_id" }, { name: "email" }],
         unique: true,
-        include: ["username"] }
+        include: ["username"] },
+      // Explicit single-col UNIQUE on `username` — collides with the
+      // (w17.field).unique synth path. synthesiseSingleColumnIndexes
+      // must detect and skip the synthetic duplicate.
+      { name: "users_username_explicit_uidx", fields: [{ name: "username" }], unique: true }
     ]
   };
 

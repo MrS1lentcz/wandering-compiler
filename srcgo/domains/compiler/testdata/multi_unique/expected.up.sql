@@ -15,8 +15,8 @@ CREATE TABLE users (
 
 CREATE UNIQUE INDEX users_tenant_handle_uidx ON users (tenant_id, handle);
 CREATE UNIQUE INDEX users_tenant_email_cover_uidx ON users (tenant_id, email) INCLUDE (username);
+CREATE UNIQUE INDEX users_username_explicit_uidx ON users (username);
 CREATE UNIQUE INDEX users_email_uidx ON users (email);
-CREATE UNIQUE INDEX users_username_uidx ON users (username);
 
 COMMENT ON TABLE users IS 'Golden: three uniqueness sources on one table — two single-column
 (w17.field).unique synths (email, username) plus one named multi-column
