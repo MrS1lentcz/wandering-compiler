@@ -277,6 +277,51 @@ the backlog stays explicit.
 - **MSSQL- / Oracle-specific types** — iter-2+ when those emitters
   land.
 
+### 3.3-bis 2026-04-22/23 Phase-B sweep — remaining ~2% gap
+
+After the two-day Phase-B sweep (refactor → fixture sweep → unit tests
+→ 30+ error fixtures → direct-IR unit tests), cross-package coverage
+reached **97.8 %** (up from ~53 % single-binary / ~89 % initial cross-
+package). The remaining ~2 % gap is concentrated in three categories:
+
+**Log.Fatalf paths — untestable without subprocess-based re-invocation:**
+- `compiler.NewConfigFromEnv` (config.go:27) — `env.Parse` returning
+  an error requires a non-string field that the Config struct doesn't
+  have yet. Fatalf is structurally dead code until Config grows a
+  typed field that could fail at parse time.
+- `application.app.OutputDir` (application.go:27) — fires when the
+  output module wasn't wired through `application.New`. Unreachable
+  through the public constructor; only reachable via `&app{}` bypass
+  which no test does.
+
+Both branches could be covered via a subprocess test pattern
+(exec.Command with `CRASH=1` env and exit-code assertion). Skipped as
+low-ROI — two LOC each, identical shape.
+
+**Protoreflect internals — defensive paths:**
+- `diag.At` at file.go:62 — the `file == nil` guard (descriptor with
+  no ParentFile). Real descriptors loaded through protocompile always
+  have a file; only synthetic dynamicpb descriptors can miss it, and
+  constructing those in a test is far more code than the guard itself.
+- `ir.sourceLocation` — similar shape.
+- `loader.reparse` — the proto.Marshal / proto.Unmarshal error returns
+  never fire on a protocompile-loaded message. The wrapper exists as
+  defence-in-depth against future proto library bumps changing the
+  round-trip contract.
+
+**Emit-layer IR-invariant violations:**
+- `emit/postgres/column.go` per-carrier helpers — each ends with a
+  `return "", fmt.Errorf("no PG type mapping for carrier=%s type=%s
+  (ir invariant violated)")` that only fires if the IR produces a
+  (carrier, sem) pair the validators didn't catch. Several are
+  covered directly by `column_dispatch_test.go` via synthetic column
+  construction; the rest stay uncovered because the test matrix
+  would be exhaustively checking defended-against invariants rather
+  than user-reachable paths.
+
+None of these are user-visible bugs. The coverage floor is set by
+policy, not by untested behaviour.
+
 ### 3.3 Test gaps (paths the code supports but no fixture exercises)
 
 Found during the audit — low-risk but worth patching or acknowledging:
@@ -347,9 +392,10 @@ bugs live in corners; not in the main dispatch.
 
 | | |
 |---|---|
-| Positive fixtures | 15 |
-| Error-class fixtures | 26 |
-| Decision records | D1–D15 |
+| Positive fixtures | 16 (15 iter-1 + `empty_schema` added 2026-04-22) |
+| Error-class fixtures | 60 (26 iter-1 + 34 Phase-B sweep 2026-04-22/23) |
+| Decision records | D1–D23 |
+| Cross-package coverage | 97.8 % (Phase-B sweep close-out) |
 | `(w17.field).type` values | 20 (including AUTO) |
 | `(w17.db.column).db_type` values | 27 (+ UNSPECIFIED) |
 | AutoDefault variants | 9 |
