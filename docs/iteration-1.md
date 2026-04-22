@@ -808,6 +808,119 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D22 — Ergonomic bundle: COMMENT ON + path / MAC / small-int presets (added 2026-04-22)
+
+**Decision.** Four independent ergonomic features shipped as one
+batch — they share no mechanism but all land at the "optional
+polish before alter-diff" boundary. Each is self-contained and
+independently revertable; the grouping is for release hygiene, not
+technical coupling.
+
+---
+
+**D22a — COMMENT ON TABLE / COLUMN.** `(w17.db.table).comment` and
+`(w17.db.column).comment` become the DB-facing doc text. Both
+default to the proto leading comment when unset; annotation
+overrides are an escape hatch for when the developer-flavoured
+proto comment shouldn't be the DB-facing documentation.
+
+```proto
+// Published article visible to subscribers.
+// Rows are immutable once published — use archive_at for soft delete.
+message Article {
+  option (w17.db.table) = { name: "articles" };
+
+  // Primary key, auto-incrementing.
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+
+  string title = 2 [
+    (w17.field)     = { type: CHAR, max_len: 200 },
+    (w17.db.column) = { comment: "DB-facing: article title, max 200 chars." }
+  ];
+}
+```
+
+Emits after CREATE TABLE + indexes:
+```sql
+COMMENT ON TABLE articles IS 'Published article visible to subscribers.
+Rows are immutable once published — use archive_at for soft delete.';
+COMMENT ON COLUMN articles.id IS 'Primary key, auto-incrementing.';
+COMMENT ON COLUMN articles.title IS 'DB-facing: article title, max 200 chars.';
+```
+
+Down: no explicit `COMMENT ... IS NULL` — `DROP TABLE` cascades
+pg_description entries. Apostrophes double-escaped via the
+existing `sqlStringLiteral`; multi-line comments stay multi-line
+(PG string literals handle line breaks natively).
+
+Capability: `CapCommentOn = {}` on PG (SQL:1999, universal).
+
+---
+
+**D22b — MAC_ADDRESS preset.** New string-carrier sem type. Default
+path: PG MACADDR native storage (enforces format on
+INSERT/UPDATE) — no regex CHECK emitted (same "native type
+enforces" rule as UUID). `db_type: VARCHAR` override activates
+regex + blank CHECK ("max defensibility when the native enforcer
+isn't in play"). max_len defaults to 17 (xx:xx:xx:xx:xx:xx form),
+used only on the VARCHAR path.
+
+---
+
+**D22c — SMALL_INTEGER preset.** New int32-carrier sem type. Maps
+to `SMALLINT` on PG. Range bounds compose normally (`gte: 1,
+lte: 10` emits `CHECK (col BETWEEN 1 AND 10)`). Rejected on int64
+carrier — widening to BIGINT would defeat the preset's sizing
+benefit; author picks NUMBER on int64 if they need the wider
+range.
+
+Note: SMALL_INTEGER stands solo. There's no bundled preset family
+(POSITIVE_INTEGER / BIG_POSITIVE_INTEGER etc.) — authors compose
+range bounds explicitly via `gte` / `lte` on NUMBER. Revisit if
+pilot schemas surface repeated compositions.
+
+---
+
+**D22d — Path-family presets: POSIX_PATH / FILE_PATH / IMAGE_PATH.**
+Three new string-carrier sem types, all storing as PG TEXT.
+Differentiated by the format CHECK:
+
+  - **POSIX_PATH** — no extension constraint. Directories,
+    executables, pipes, arbitrary filesystem paths. Blank + optional
+    `char_length` only.
+  - **FILE_PATH** — requires `extensions: ["csv", "json", "xml"]`.
+    Regex CHECK `(?i)\.(csv|json|xml)$` synthesises from the
+    list. `extensions: ["*"]` is the explicit "any suffix is fine"
+    marker — disables the CHECK but documents intent. Empty list
+    is an error (ambiguous — equivalent to POSIX_PATH).
+  - **IMAGE_PATH** — `FILE_PATH` preset with default
+    `["jpg", "jpeg", "png", "gif", "webp", "avif", "svg"]`.
+    Authors override via explicit `extensions:` (e.g. raster-only
+    = `["jpg", "jpeg", "png", "webp"]`).
+
+Wildcard must stand alone: `["*", "csv"]` is a diag error
+(contradictory intent — either open or closed). Regex tokens pass
+through `regexpQuote` so unusual characters (dots, dashes) render
+as literal sequences.
+
+New `w17.Field.extensions` proto field (repeated string) + IR
+`Column.allowed_extensions` (preserved for admin-gen / alter-diff
+/ --verbose output; the `RegexCheck` on `col.Checks` is the
+apply-time enforcement).
+
+---
+
+**Rationale.** D22 wraps up the "ergonomic polish" slice before
+the D23 indexes+constraints overhaul. COMMENT ON closes the
+author-documentation gap (pg_description is DB data, not an
+admin-layer concern — authored comments should reach operators
+via `\d+` without extra tooling). The preset additions fill
+concrete Django parity gaps: `MAC_ADDRESS` (Django has no first-
+class MAC field but `django-macaddress` is a popular third-party
+field), `SMALLINT` (`SmallIntegerField`), `FileField` /
+`ImageField` / `FilePathField` (restricted to their DB-visible
+aspects — the actual storage backend is out of scope).
+
 ### D21 — Default table name = `snake_case(message.local_name)` (added 2026-04-22)
 
 **Decision.** `(w17.db.table).name` becomes optional. When absent, the

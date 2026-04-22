@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) + D21 default table name (`snake_case(message.local_name)` when `(w17.db.table).name` unset; no pluralisation; reserved-keyword clashes surface at IR time with derivation-specific fix) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19, D21 shipped; D22, D23 queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) + D21 default table name (`snake_case(message.local_name)` when `(w17.db.table).name` unset; no pluralisation; reserved-keyword clashes surface at IR time with derivation-specific fix) + D22 ergonomic bundle (D22a COMMENT ON TABLE / COLUMN auto-from-proto-doc-string + override; D22b MAC_ADDRESS preset on MACADDR native + VARCHAR override path; D22c SMALL_INTEGER preset on int32 → SMALLINT; D22d path-family presets POSIX_PATH / FILE_PATH / IMAGE_PATH with `extensions` list + `*` wildcard) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19, D21, D22 shipped; D23 indexes+constraints overhaul queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -1091,6 +1091,65 @@ in code, not in docs:
   (models don't carry versions — `catalog.v1.Product` is an
   anti-pattern in the model layer; versioning lives on the API
   projection layer).
+
+- **D22 ergonomic bundle (shipped, 2026-04-22) — schema-gap
+  close-out, optional polish before the D23 indexes+constraints
+  overhaul.** Four independent features shipped as four commits
+  under one D-record. Full rationale per feature in
+  `iteration-1.md` D22 (a/b/c/d subsections).
+
+  - **D22a COMMENT ON** — `(w17.db.table).comment` +
+    `(w17.db.column).comment` annotations; both default to the
+    proto leading comment when unset (precedence: override wins,
+    then proto doc-string, then empty). New
+    `ir.resolveComment` helper pulls
+    `SourceLocations().ByDescriptor(d).LeadingComments` from
+    protoreflect and strips per-line leading space. Emitter
+    renders `COMMENT ON TABLE <qualified> IS '<text>';` +
+    `COMMENT ON COLUMN <qualified>.<col> IS '<text>';` after
+    CREATE TABLE + indexes; down relies on DROP TABLE cascading
+    pg_description entries (no explicit IS NULL reset). Every
+    existing golden with proto doc-strings above messages / fields
+    regenerated to include the auto-pulled comments.
+
+  - **D22b MAC_ADDRESS** — `SEM_MAC` on string carrier. Native PG
+    MACADDR storage by default (enforces format — no regex
+    CHECK, parallel to UUID). `db_type: VARCHAR` override
+    activates VARCHAR(17) + regex `(?i)^([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}$`
+    + blank CHECK ("max defensibility when the native enforcer
+    isn't in play"). max_len default = 17.
+
+  - **D22c SMALL_INTEGER** — `SEM_SMALL_INTEGER` on int32 carrier.
+    Maps to SMALLINT on PG. Range bounds compose as on any
+    numeric type. int64 + SMALL_INTEGER is rejected at IR time
+    with a fix pointing at int32 — widening would defeat the
+    sizing benefit. Split the previously-combined int32/int64
+    validation block in `validateCarrierSemType` to enforce the
+    carrier-specific rule.
+
+  - **D22d path family** — `SEM_POSIX_PATH`, `SEM_FILE_PATH`,
+    `SEM_IMAGE_PATH` on string carrier, all TEXT storage. New
+    `w17.Field.extensions` (repeated string) drives the regex
+    CHECK for FILE_PATH / IMAGE_PATH. IMAGE_PATH defaults to
+    `["jpg","jpeg","png","gif","webp","avif","svg"]` when
+    extensions is empty; FILE_PATH requires an explicit list (or
+    `["*"]` for "any suffix is fine" — disables the CHECK).
+    Mixing `"*"` with concrete extensions = contradictory intent
+    error. Extensions on non-path types = error. IR
+    `Column.allowed_extensions` preserves the resolved list for
+    admin-gen / alter-diff / --verbose output; `RegexCheck` on
+    `col.Checks` is the apply-time enforcement. Regex tokens pass
+    through a local `regexpQuote` so unusual characters stay
+    literal.
+
+  Fixture totals: 25 positive (21 previous + 4 D22 new —
+  `comments`, `mac_address`, `small_integer`, `path_presets`) +
+  4 new error fixtures (D22d: `file_path_no_extensions`,
+  `extensions_on_non_path`, `wildcard_mixed_with_extensions`).
+  All green on M8 goldens + M9 `make test-apply` against
+  `postgres:18-alpine`.
+
+  Capability catalog: `CapCommentOn` added with `{}` on PG.
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

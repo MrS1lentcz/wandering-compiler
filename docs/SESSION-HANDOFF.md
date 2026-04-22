@@ -325,11 +325,21 @@ make schemagen
       no pluralisation, no package-derived prefix; reserved-keyword
       clashes surface at IR time with derivation-specific fix;
       composes with D19 namespace; shipped 2026-04-22)
-- [ ] **← YOU ARE HERE.** Start D22 (optional bundle — COMMENT ON
-      auto-from-docstring + override annotation; path-family presets
-      IMAGE_PATH / POSIX_PATH / FILE_PATH with `extensions` list +
-      `*` wildcard; MAC_ADDRESS with CHECK when storage doesn't
-      enforce; SMALL_INTEGER preset).
+- [x] D22 (ergonomic bundle — D22a COMMENT ON auto-from-doc-string
+      + override annotation; D22b MAC_ADDRESS preset on MACADDR /
+      VARCHAR override; D22c SMALL_INTEGER preset on int32 →
+      SMALLINT; D22d path family POSIX_PATH / FILE_PATH /
+      IMAGE_PATH with `extensions` list + `*` wildcard; shipped
+      2026-04-22 as four commits under one D-record)
+- [ ] **← YOU ARE HERE.** Start D23 (indexes + constraints dynamic
+      overhaul — structured `GinIndex` / `GistIndex` /
+      `PartialIndex` / `ExpressionIndex` messages graduating from
+      D11 raw_indexes; column-level sort + nulls direction inside
+      indexes via an `IndexColumn` struct; structured CHECK
+      variants beyond the current raw_checks escape hatch. NULLS
+      FIRST/LAST lands inside this redesign, not as a standalone
+      feature. Must happen BEFORE alter-diff so the differ works
+      against the final index/CHECK IR shape.)
 - [ ] D22 (optional bundle — COMMENT ON auto-from-docstring +
       override annotation; path-family presets IMAGE_PATH /
       POSIX_PATH / FILE_PATH with `extensions` list + `*` wildcard;

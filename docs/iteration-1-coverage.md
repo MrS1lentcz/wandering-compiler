@@ -25,7 +25,7 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | `URLField` | ✅ | `type: URL`; preset max_len 2048, override works | D2, D13 |
 | `UUIDField` | ✅ | `type: UUID` + `default_auto: UUID_V4` / `UUID_V7` | D7 |
 | `IntegerField` | ✅ | zero-config on `int32` / `int64` → INTEGER / BIGINT | D14 |
-| `SmallIntegerField` | ⚠️ | int32+NUMBER → INTEGER by default; `db_type: SMALLINT` forces SMALLINT | D14 |
+| `SmallIntegerField` | ✅ | int32 + `type: SMALL_INTEGER` → SMALLINT (D22c); `db_type: SMALLINT` still works as an override path | D14, D22 |
 | `BigIntegerField` | ✅ | zero-config on `int64` | D14 |
 | `PositiveIntegerField` | ⚠️ | `int64 [gte: 0]`; Django has dedicated field shape, we compose | — |
 | `AutoField` / `BigAutoField` | ✅ | `type: ID, pk: true, default_auto: IDENTITY` | D7 |
@@ -40,8 +40,10 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | `JSONField` | ✅ | `type: JSON` (on string or bytes carrier) → JSONB | D13 |
 | `BinaryField` | ✅ | zero-config on `bytes` → BYTEA | D12, D14 |
 | `GenericIPAddressField` | ✅ | `type: IP` → INET | D13 |
-| `FilePathField` | ⛔ | filesystem concern, not DB | — |
-| `FileField` / `ImageField` | ⛔ | storage-backend concern, not DB | — |
+| MAC address (third-party `django-macaddress`) | ✅ | `type: MAC_ADDRESS` → MACADDR (native), or `+ db_type: VARCHAR` → VARCHAR(17) + regex CHECK | D22 |
+| `FilePathField` | ✅ | `type: POSIX_PATH` (no extension constraint) or `type: FILE_PATH, extensions: [...]`; storage backend still out of scope | D22 |
+| `FileField` | ✅ (DB-visible shape only) | `type: FILE_PATH, extensions: [...]` — TEXT + format CHECK. Upload / storage backend is a runtime concern outside this layer | D22 |
+| `ImageField` | ✅ (DB-visible shape only) | `type: IMAGE_PATH` (default image ext list, overridable) — TEXT + format CHECK. Upload / storage backend is a runtime concern outside this layer | D22 |
 | `ForeignKey` | ✅ | `(w17.db.column).fk` + `deletion_rule` | D12 |
 | `OneToOneField` | ✅ | `fk + unique: true` OR shared-PK (pk:true + fk) | D12 |
 | `ManyToManyField` | ✅ | explicit join table (composite PK + two FKs); see `m2m_join` fixture | D12 |
@@ -65,8 +67,9 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | `db_column` | ✅ | `(w17.db.column).name` |
 | `db_index` | ✅ | `(w17.db.column).index` — single-col non-unique storage index |
 | `GeneratedField` (4.2+) | ✅ | `(w17.db.column).generated_expr: "<sql>"` → GENERATED ALWAYS AS (expr) STORED (PG 12+); incompatible with default/pk/fk. See D18 |
+| `db_comment` (4.2+) | ✅ | `(w17.db.column).comment` override + proto leading-comment auto-pull. See D22a |
 | `db_tablespace` | ⛔ | iter-2+ (PG-specific, rare outside specialized deploys) |
-| `db_comment` (4.2+) | ⛔ | iter-2 — pairs with admin/UI generation |
+| `db_comment` (4.2+) | ✅ | `(w17.db.column).comment` override + proto leading comment auto-pull. See D22a |
 | `db_collation` (3.2+) | ⛔ | iter-2+ — belongs on `(w17.pg.field)` or DbType modifier |
 | `max_length` | ✅ | `(w17.field).max_len`; defaults for EMAIL/URL, required for CHAR/SLUG |
 | `choices` | ✅ | `(w17.field).choices: "pkg.EnumFQN"` → CHECK IN (…) |
@@ -83,7 +86,7 @@ Django 4.2 is the reference. ✅ = shipped, ⚠️ = partial / workaround,
 | `app_label` (as schema prefix) | ✅ | `(w17.db.module) = { prefix: "<name>" }` — module-level, immutable across the module. See D19 |
 | PG schema qualification (SQLAlchemy `__table_args__ = {'schema': 'X'}`) | ✅ | `(w17.db.module) = { schema: "<name>" }` — PG-native, mutually exclusive with prefix. See D19 |
 | `db_tablespace` | ⛔ | iter-2+ |
-| `db_table_comment` (4.2+) | ⛔ | iter-2 with admin gen |
+| `db_table_comment` (4.2+) | ✅ | `(w17.db.table).comment` override + proto message leading comment auto-pull. See D22a |
 | `indexes = [Index(…)]` | ✅ | `(w17.db.table).indexes` covers fields + name + unique + include; `raw_indexes` covers WHERE / USING / expressions / opclasses |
 | `constraints = [UniqueConstraint(…)]` | ✅ | `(w17.db.table).indexes[].unique: true`; partial via `raw_indexes`; opclasses via `raw_indexes` |
 | `constraints = [CheckConstraint(check=Q(…))]` | ✅ | per-field CHECKs for single-column; `raw_checks` for cross-column / function-call / expression |
