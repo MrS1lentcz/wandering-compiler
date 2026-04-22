@@ -1146,6 +1146,26 @@ func TestBuildErrors(t *testing.T) {
 				`fix:`,
 			},
 		},
+		{
+			name:    "db_type NUMERIC requires precision",
+			fixture: "testdata/errors/dbtype_numeric_needs_precision.proto",
+			wants: []string{
+				`dbtype_numeric_needs_precision.proto:`,
+				`db_type: NUMERIC requires (w17.field).precision`,
+				`why:`,
+				`fix:`,
+			},
+		},
+		{
+			name:    "ENUM on list carrier rejected",
+			fixture: "testdata/errors/enum_on_list_carrier.proto",
+			wants: []string{
+				`enum_on_list_carrier.proto:`,
+				`type ENUM is not supported on LIST carrier`,
+				`why:`,
+				`fix:`,
+			},
+		},
 	}
 
 	for _, tc := range cases {

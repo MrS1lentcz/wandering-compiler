@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package ir.enum_on_list_carrier;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  ON  = 1;
+  OFF = 2;
+}
+
+// `repeated int64 [type: ENUM]` — explicit ENUM on a LIST carrier.
+// Rejected at resolveEnumColumn's non-scalar carrier branch
+// (collection-of-enum storage is parked).
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  repeated int64 states = 2 [(w17.field) = {
+    type: ENUM,
+    choices: "ir.enum_on_list_carrier.Status"
+  }];
+}

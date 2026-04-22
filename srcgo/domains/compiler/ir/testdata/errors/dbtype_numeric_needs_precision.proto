@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package ir.dbtype_numeric_needs_precision;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// db_type: NUMERIC requires precision. Rejected at validateDbType's
+// NUMERIC-requires-precision branch — parallel to
+// dbtype_varchar_needs_max_len but on the numeric path.
+message X {
+  option (w17.db.table) = { name: "xs" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string rate = 2 [
+    (w17.field)     = { type: TEXT },
+    (w17.db.column) = { db_type: NUMERIC }
+  ];
+}
