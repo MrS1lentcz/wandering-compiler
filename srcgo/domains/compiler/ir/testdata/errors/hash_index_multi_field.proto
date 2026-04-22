@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package d23.hash_index_multi_field;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D23 error — HASH indexes cover exactly one field.
+message User {
+  option (w17.db.table) = {
+    name: "usersx",
+    indexes: [
+      { method: HASH,
+        fields: [{ name: "tenant_id" }, { name: "handle" }]
+      }
+    ]
+  };
+
+  int64  id        = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  tenant_id = 2 [(w17.field) = { type: ID }];
+  string handle    = 3 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

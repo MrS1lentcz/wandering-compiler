@@ -108,16 +108,95 @@ message Table {
   string comment = 5;
 }
 
+// Index — structured index definition. Single authoring path; opaque
+// SQL bodies live on (w17.db.table).raw_indexes. D23.
+//
+// Authoring (simple):
+//   { fields: [{ name: "category_id" }, { name: "is_active" }] }
+//
+// Authoring (detailed):
+//   { method: GIN,
+//     fields: [{ name: "tags", opclass: "gin_trgm_ops" }],
+//     storage: { "fastupdate": "on" },
+//     name: "posts_tags_gin" }
+//
+// Partial indexes (WHERE) and expression indexes (`lower(email)`) park
+// on raw_indexes until the DQL iteration lands — conditions and
+// expressions authored via DQL keep the structured surface consistent
+// across schema / query / gRPC layers.
 message Index {
-  repeated string fields = 1;
+  // Proto-field list with per-field sort / nulls / opclass metadata.
+  // Each entry is at minimum `{ name: "<proto_field>" }`; desc / nulls
+  // / opclass default to the dialect's own defaults when unset.
+  repeated IndexField fields = 1;
+
   bool unique = 2;
 
   // Optional name override. Default: auto-derived from table + fields.
   string name = 3;
 
-  // Postgres INCLUDE — covering-index columns. Emitters that don't support
-  // INCLUDE must error if non-empty.
+  // Postgres INCLUDE — covering-index columns. Bare proto-field names
+  // (no per-field options — INCLUDE columns are stored, not indexed,
+  // so sort / opclass don't apply). Emitters that don't support INCLUDE
+  // error if non-empty.
   repeated string include = 4;
+
+  // Access method — BTREE when unspecified. Methods impose restrictions
+  // (GIN / BRIN reject UNIQUE; HASH rejects per-field sort + opclass;
+  // etc.) validated at IR time. Adding a method here requires a
+  // matching capability in emit/capabilities.go + the dialect catalog.
+  IndexMethod method = 5;
+
+  // Storage parameters — free-form key/value map rendered as
+  // `WITH (key1=value1, key2=value2)` after the column list. Common
+  // knobs: `fillfactor`, `fastupdate`, `pages_per_range`,
+  // `autosummarize`. wc passes through verbatim; PG validates at
+  // apply time. Graduation path: if pilots repeat the same options,
+  // typed per-method submessages can replace the map (parallel to
+  // D9's custom_type → curated-flags graduation).
+  map<string, string> storage = 6;
+}
+
+message IndexField {
+  // Proto-field name on the owning message. FK semantics: the field
+  // must exist on the message; wc validates at IR time.
+  string name = 1;
+
+  // Sort direction. Default ASC.
+  bool desc = 2;
+
+  // NULLS FIRST / LAST. Unspecified = dialect default
+  // (PG: NULLS LAST for ASC, NULLS FIRST for DESC).
+  NullsOrder nulls = 3;
+
+  // Operator class for specialised comparators. Opaque string passed
+  // through verbatim (PG examples: `text_pattern_ops`, `gin_trgm_ops`,
+  // `jsonb_path_ops`). Type-correctness against the column is PG's
+  // concern at apply time. Empty = default comparator for the column
+  // type. HASH method rejects opclass (HASH uses the type's default
+  // hash function exclusively).
+  string opclass = 4;
+}
+
+// IndexMethod — access method for the index. UNSPECIFIED maps to
+// BTREE (PG's own default), rendered without an explicit `USING`
+// clause. Non-BTREE methods emit `USING <method>` after the table
+// name.
+enum IndexMethod {
+  INDEX_METHOD_UNSPECIFIED = 0;   // BTREE, no USING clause in SQL
+  BTREE  = 1;                     // explicit BTREE — emits USING btree
+  GIN    = 2;                     // Generalized Inverted Index
+  GIST   = 3;                     // Generalized Search Tree
+  BRIN   = 4;                     // Block Range Index
+  HASH   = 5;                     // Hash-based equality lookups
+  SPGIST = 6;                     // Space-Partitioned GiST
+}
+
+// NullsOrder — NULL-position directive for ordered index fields.
+enum NullsOrder {
+  NULLS_ORDER_UNSPECIFIED = 0;    // dialect default (PG: LAST/FIRST per desc)
+  NULLS_FIRST = 1;
+  NULLS_LAST  = 2;
 }
 
 // RawCheck is the escape hatch for CHECK constraints the per-field

@@ -368,7 +368,7 @@ in code, not in docs:
 - [x] `.gitignore` covers `out/`, `srcgo/pb/`, `srcgo/**/gen/`,
       `srcgo/**/bin/`, `.volumes/`, `.env`.
 
-**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) + D21 default table name (`snake_case(message.local_name)` when `(w17.db.table).name` unset; no pluralisation; reserved-keyword clashes surface at IR time with derivation-specific fix) + D22 ergonomic bundle (D22a COMMENT ON TABLE / COLUMN auto-from-proto-doc-string + override; D22b MAC_ADDRESS preset on MACADDR native + VARCHAR override path; D22c SMALL_INTEGER preset on int32 → SMALLINT; D22d path-family presets POSIX_PATH / FILE_PATH / IMAGE_PATH with `extensions` list + `*` wildcard) complete; **iter-1 schema-gap close-out in progress (D17, D18, D19, D21, D22 shipped; D23 indexes+constraints overhaul queued per `docs/SESSION-HANDOFF.md`).** See `iteration-2-backlog.md` for the next-iteration candidate list.
+**Status (2026-04-22).** Skeleton + M1 + M1 rev2 + M1 rev3 + M2 + M2 rev2 + M3 + M4 + M5 + M6 + M7 + M8 + M9 + M10 + reliability polish + D11 raw-escape-hatches + D12 FK relocation / deletion_rule / bytes carrier + D13 preset lift (JSON / IP / TSEARCH; EMAIL / URL max_len defaults + override) + D14 zero-config per-carrier defaults + orthogonal DbType override axis + D15 collection carriers (map / repeated) + AUTO dispatch + element typing + D16 dialect-capability catalog + inspection interface + D17 ENUM type (carrier-dispatched storage: string → CREATE TYPE AS ENUM; int / proto-enum field → CHECK IN numbers) + D18 generated columns (GENERATED ALWAYS AS (expr) STORED on `(w17.db.column).generated_expr`; incompatible with default / pk / fk) + D19 module namespace (schema XOR prefix via `(w17.db.module)` FileOptions; module-immutable, no per-message override; PG system schemas rejected; prefix bakes into IR at build time, schema qualifies at emit time) + D21 default table name (`snake_case(message.local_name)` when `(w17.db.table).name` unset; no pluralisation; reserved-keyword clashes surface at IR time with derivation-specific fix) + D22 ergonomic bundle (D22a COMMENT ON TABLE / COLUMN auto-from-proto-doc-string + override; D22b MAC_ADDRESS preset on MACADDR native + VARCHAR override path; D22c SMALL_INTEGER preset on int32 → SMALLINT; D22d path-family presets POSIX_PATH / FILE_PATH / IMAGE_PATH with `extensions` list + `*` wildcard) + D23 indexes structured (`repeated IndexField fields` with per-field desc/nulls/opclass, `method` enum BTREE/GIN/GIST/BRIN/HASH/SPGIST with UNSPECIFIED → BTREE default, free-form `storage` map → WITH options, method × option invariants validated IR-time; partial/expression indexes park to DQL iteration via `raw_indexes`) complete; **iter-1 schema-gap close-out done (D17, D18, D19, D21, D22, D23 shipped).** See `iteration-2-backlog.md` for the next-iteration candidate list.
 - Skeleton: `srcgo/go.mod` (Go 1.26), `Makefile` placeholders, `.gitignore`.
 - M1 rev3 lands four Django-parity fills + a dialect-extension namespace:
   - `(w17.field).orphanable` (optional bool, FK-only) — property-shape
@@ -1150,6 +1150,75 @@ in code, not in docs:
   `postgres:18-alpine`.
 
   Capability catalog: `CapCommentOn` added with `{}` on PG.
+
+- **D23 indexes structured (shipped, 2026-04-22) — final
+  schema-gap close-out before alter-diff.** `(w17.db.table).
+  indexes[].fields` reshaped from `repeated string` to `repeated
+  IndexField { name, desc, nulls, opclass }`. New `method` enum
+  (BTREE default / GIN / GIST / BRIN / HASH / SPGIST) + free-form
+  `storage: map<string,string>` → WITH clause. Full rationale in
+  `iteration-1.md` D23.
+
+  Proto changes: `w17.db.Index.fields` type change (breaking);
+  new `w17.db.IndexField`, `IndexMethod`, `NullsOrder` messages.
+  Mirror IR types (`irpb.IndexField`, `irpb.IndexMethod` with
+  `IDX_*` prefixed values to avoid namespace clash with authoring
+  enum, `irpb.NullsOrder`).
+
+  IR plumbing: new helpers in `build.go` — `indexMethodToIR` /
+  `nullsOrderToIR` / `convertIndexFields` / `copyStringMap` (lowering
+  authoring → IR), `validateIndexMethodOptions` (method × options
+  invariants with file:line:col diag errors), `indexMethodDisplay`
+  (user-facing name for diag). Existing `buildTable` FK / UNIQUE
+  / storage-index synth updated for the new structured field
+  shape; FK target lookup and derived name construction walk
+  `f.GetName()` on IndexField entries.
+
+  PG emitter: rewrite of `renderIndexes`. New helpers in
+  `index.go` — `renderIndexField` (per-column clause with opclass
+  before DESC / NULLS), `indexMethodKeyword` (lowercase
+  `gin`/`gist`/`brin`/`hash`/`spgist`; "" for BTREE / unspecified),
+  `renderStorageOptions` (WITH body with alphabetically sorted
+  keys for deterministic output). ASC never emitted (PG default).
+
+  Method × options invariants enforced at IR time:
+    - GIN / GIST / BRIN / SPGIST reject `unique: true`
+    - HASH rejects `unique: true`, `desc:`, `nulls:`, `opclass:`,
+      and multi-field (single-column equality-only)
+    - BTREE accepts every option
+  Each rejection carries `file:line:col` + `why:` (the PG
+  constraint that enforces it) + `fix:` (typical swap path, e.g.
+  "change method: to BTREE").
+
+  Capability catalog: five new cap IDs — `CapGinIndex` (PG 8.2),
+  `CapGistIndex` (PG 8.1), `CapBrinIndex` (PG 9.5),
+  `CapSpgistIndex` (PG 9.2), `CapHashIndex` (PG 10 WAL-logged
+  crash-safe floor).
+
+  Migration impact: zero. Existing fixtures mechanically migrated
+  from `fields: ["a", "b"]` to `fields: [{ name: "a" }, { name:
+  "b" }]` via a Python one-liner; eight .proto files touched. All
+  existing goldens unchanged (structured-default output matches
+  pre-D23 byte-for-byte).
+
+  One positive fixture: `index_methods` exercises five distinct
+  shapes — BTREE composite sort+nulls, BTREE with opclass, GIN
+  with gin_trgm_ops, BRIN with pages_per_range + autosummarize
+  storage, HASH single-column. Five error fixtures:
+  `gin_index_with_unique`, `hash_index_with_sort`,
+  `hash_index_with_opclass`, `hash_index_multi_field`,
+  `brin_index_with_unique`. All 26 grand-tour fixtures green on
+  M8 goldens + M9 apply-roundtrip against postgres:18-alpine.
+  Makefile `test-apply` harness extended to load `pg_trgm`
+  extension alongside hstore + citext (gin_trgm_ops dependency).
+
+  **Parked for DQL iteration** (iter-2+): partial indexes
+  (`where:`), expression indexes (`(lower(col))`), CHECK
+  conditions (structured cross-column). All three route through
+  the existing `raw_*` escape hatches today; when DQL lands, they
+  graduate to structured shapes without an interim migration.
+  The escape-hatch discipline keeps authors from accumulating
+  opaque-SQL usage that DQL will then invalidate.
 
 **Next:** iteration-2 planning. The backlog (alter-diff, multi-file
 schemas, platform, deploy client, MySQL / SQLite-as-production

@@ -116,14 +116,16 @@ Inference when `deletion_rule` unspecified: `null: true` → ORPHAN, else CASCAD
 
 | Django Index option | w17 | Notes |
 |---|---|---|
-| `fields=[…]` | ✅ | `(w17.db.table).indexes[].fields` |
+| `fields=[…]` | ✅ | `(w17.db.table).indexes[].fields = [{ name: "…" }, …]` (D23 structured) |
 | `name` | ✅ | derived or explicit |
 | `unique` (via UniqueConstraint) | ✅ | `unique: true` on the index |
 | `include=[…]` | ✅ | PG INCLUDE (covering index) |
-| `condition=Q(…)` (partial) | ✅ | via `raw_indexes` with WHERE |
-| `expressions=[F(…)]` (functional) | ✅ | via `raw_indexes` with `(lower(col))` etc. |
-| `opclasses=[…]` | ✅ | via `raw_indexes` with `(col gin_trgm_ops)` |
-| `GinIndex` / `GistIndex` / `BrinIndex` / `HashIndex` | ✅ | via `raw_indexes` with USING |
+| `-field` DESC shorthand + `nulls_first/last` | ✅ | `{ name: "field", desc: true, nulls: NULLS_FIRST }` per IndexField (D23) |
+| `condition=Q(…)` (partial) | ⚠️ (via raw) | `raw_indexes` with WHERE today; structured `where:` parks to DQL iteration |
+| `expressions=[F(…)]` (functional) | ⚠️ (via raw) | `raw_indexes` with `(lower(col))` today; structured `expr:` parks to DQL iteration |
+| `opclasses=[…]` | ✅ | `{ name: "col", opclass: "gin_trgm_ops" }` per IndexField (D23) |
+| `GinIndex` / `GistIndex` / `BrinIndex` / `HashIndex` / `SpGistIndex` | ✅ | `method: GIN/GIST/BRIN/HASH/SPGIST` (D23); method × options invariants enforced IR-time |
+| WITH storage options (`fillfactor`, `fastupdate`, `pages_per_range`, …) | ✅ | `storage: [{ key: "...", value: "..." }, …]` free-form (D23) |
 | `db_tablespace` | ⛔ | iter-2+ |
 
 ### 1.6 CHECK constraints

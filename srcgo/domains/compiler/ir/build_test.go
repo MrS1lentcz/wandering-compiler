@@ -605,6 +605,66 @@ func TestBuildErrors(t *testing.T) {
 				`without the wildcard`,
 			},
 		},
+		{
+			name:    "GIN index rejects UNIQUE",
+			fixture: "testdata/errors/gin_index_with_unique.proto",
+			wants: []string{
+				`gin_index_with_unique.proto:`,
+				`GIN does not support UNIQUE`,
+				`why:`,
+				`inverted / block-range`,
+				`fix:`,
+				`change ` + "`method:`" + ` to BTREE`,
+			},
+		},
+		{
+			name:    "HASH index rejects sort direction",
+			fixture: "testdata/errors/hash_index_with_sort.proto",
+			wants: []string{
+				`hash_index_with_sort.proto:`,
+				`HASH does not support sort direction`,
+				`why:`,
+				`no traversal order`,
+				`fix:`,
+				`BTREE (the default)`,
+			},
+		},
+		{
+			name:    "HASH index rejects per-field opclass",
+			fixture: "testdata/errors/hash_index_with_opclass.proto",
+			wants: []string{
+				`hash_index_with_opclass.proto:`,
+				`HASH does not accept a per-field opclass`,
+				`why:`,
+				`default hash function`,
+				`fix:`,
+				`drop ` + "`opclass:`",
+			},
+		},
+		{
+			name:    "HASH index rejects multi-field",
+			fixture: "testdata/errors/hash_index_multi_field.proto",
+			wants: []string{
+				`hash_index_multi_field.proto:`,
+				`HASH indexes cover exactly one field`,
+				`why:`,
+				`strictly single-column`,
+				`fix:`,
+				`BTREE`,
+			},
+		},
+		{
+			name:    "BRIN index rejects UNIQUE",
+			fixture: "testdata/errors/brin_index_with_unique.proto",
+			wants: []string{
+				`brin_index_with_unique.proto:`,
+				`BRIN does not support UNIQUE`,
+				`why:`,
+				`inverted / block-range`,
+				`fix:`,
+				`BTREE`,
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -645,7 +705,7 @@ func TestBuildErrors(t *testing.T) {
 
 func hasUniqueIdxOn(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0] == field {
+		if i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0].GetName() == field {
 			return true
 		}
 	}
@@ -654,7 +714,7 @@ func hasUniqueIdxOn(idx []*irpb.Index, field string) bool {
 
 func hasPlainIdxOn(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if !i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0] == field {
+		if !i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0].GetName() == field {
 			return true
 		}
 	}

@@ -331,15 +331,15 @@ make schemagen
       SMALLINT; D22d path family POSIX_PATH / FILE_PATH /
       IMAGE_PATH with `extensions` list + `*` wildcard; shipped
       2026-04-22 as four commits under one D-record)
-- [ ] **← YOU ARE HERE.** Start D23 (indexes + constraints dynamic
-      overhaul — structured `GinIndex` / `GistIndex` /
-      `PartialIndex` / `ExpressionIndex` messages graduating from
-      D11 raw_indexes; column-level sort + nulls direction inside
-      indexes via an `IndexColumn` struct; structured CHECK
-      variants beyond the current raw_checks escape hatch. NULLS
-      FIRST/LAST lands inside this redesign, not as a standalone
-      feature. Must happen BEFORE alter-diff so the differ works
-      against the final index/CHECK IR shape.)
+- [x] D23 (indexes structured: `repeated IndexField` with
+      desc/nulls/opclass + `method` enum + free-form `storage`
+      map; partial/expression indexes park to DQL iteration via
+      `raw_indexes`; HASH/GIN/GIST/BRIN/SPGIST × options
+      invariants enforced IR-time; shipped 2026-04-22)
+- [ ] **← YOU ARE HERE.** Iter-1 schema-gap close-out done. Next:
+      open `iteration-2.md` with alter-diff as M1, against an IR
+      that's closed on every schema-declaration axis iter-1 will
+      ever carry.
 - [ ] D22 (optional bundle — COMMENT ON auto-from-docstring +
       override annotation; path-family presets IMAGE_PATH /
       POSIX_PATH / FILE_PATH with `extensions` list + `*` wildcard;

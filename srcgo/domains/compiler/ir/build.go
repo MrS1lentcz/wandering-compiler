@@ -244,32 +244,49 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 	for i, idx := range msg.Table.GetIndexes() {
 		if len(idx.GetFields()) == 0 {
 			b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has no fields", msg.Desc.Name(), i).
-				WithWhy("an index with zero columns has nothing to index on").
-				WithFix("supply at least one field name in the `fields:` list"))
+				WithWhy("an index with zero fields has nothing to index on").
+				WithFix("supply at least one entry in the `fields:` list (minimum: `[{ name: \"<proto_field>\" }]`)"))
 			continue
 		}
-		for _, fname := range idx.GetFields() {
-			if findLoadedField(msg, fname) == nil {
-				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] references unknown field %q", msg.Desc.Name(), i, fname).
-					WithWhy("every index column must refer to a declared proto field on the same message").
-					WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from this index's `fields:` list", fname)))
+		for _, f := range idx.GetFields() {
+			if f.GetName() == "" {
+				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] has a field entry with empty name", msg.Desc.Name(), i).
+					WithWhy("every index field must reference a declared proto field on the same message").
+					WithFix("fill `name:` with the proto field name this index entry covers"))
+				continue
+			}
+			if findLoadedField(msg, f.GetName()) == nil {
+				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] references unknown field %q", msg.Desc.Name(), i, f.GetName()).
+					WithWhy("every index field must refer to a declared proto field on the same message").
+					WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from this index's `fields:` list", f.GetName())))
 			}
 		}
 		for _, fname := range idx.GetInclude() {
 			if findLoadedField(msg, fname) == nil {
 				b.err(diag.Atf(msg.Desc, "message %q: (w17.db.table).indexes[%d] INCLUDE references unknown field %q", msg.Desc.Name(), i, fname).
-					WithWhy("every INCLUDE column must refer to a declared proto field on the same message").
+					WithWhy("every INCLUDE field must refer to a declared proto field on the same message").
 					WithFix(fmt.Sprintf("either declare field %q on the message, or remove it from `include:`", fname)))
 			}
+		}
+		// D23 — validate method × options compatibility before lowering
+		// into IR; the message anchors at the index's position on the
+		// table message (no finer source location available for
+		// repeated field entries).
+		method := indexMethodToIR(idx.GetMethod())
+		if err := validateIndexMethodOptions(msg.Desc, i, method, idx); err != nil {
+			b.err(err)
+			continue
 		}
 		tbl.Indexes = append(tbl.Indexes, &irpb.Index{
 			// Author-supplied name gets the module prefix so it shares
 			// the same post-prefix identifier namespace as derived
 			// names. In SCHEMA / NONE modes applyPrefix is identity.
 			Name:    applyPrefix(b.prefix, idx.GetName()),
-			Fields:  append([]string(nil), idx.GetFields()...),
+			Fields:  convertIndexFields(idx.GetFields()),
 			Unique:  idx.GetUnique(),
 			Include: append([]string(nil), idx.GetInclude()...),
+			Method:  method,
+			Storage: copyStringMap(idx.GetStorage()),
 		})
 	}
 
@@ -284,7 +301,7 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			continue
 		}
 		tbl.Indexes = append(tbl.Indexes, &irpb.Index{
-			Fields: []string{col.GetProtoName()},
+			Fields: []*irpb.IndexField{{Name: col.GetProtoName()}},
 			Unique: true,
 		})
 	}
@@ -297,7 +314,7 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 			continue
 		}
 		tbl.Indexes = append(tbl.Indexes, &irpb.Index{
-			Fields: []string{col.GetProtoName()},
+			Fields: []*irpb.IndexField{{Name: col.GetProtoName()}},
 		})
 	}
 
@@ -354,7 +371,7 @@ func (b *builder) buildTable(msg *loader.LoadedMessage) *irpb.Table {
 		if idx.Name == "" {
 			sqlCols := make([]string, 0, len(idx.GetFields()))
 			for _, f := range idx.GetFields() {
-				sqlCols = append(sqlCols, colSQLNameByProto[f])
+				sqlCols = append(sqlCols, colSQLNameByProto[f.GetName()])
 			}
 			idx.Name = derivedIndexName(tbl.GetName(), sqlCols, idx.GetUnique())
 		}
@@ -1405,7 +1422,7 @@ func fkTargetColumnIsUnique(target *irpb.Table, colProtoName string) bool {
 			continue
 		}
 		fields := idx.GetFields()
-		if len(fields) == 1 && fields[0] == colProtoName {
+		if len(fields) == 1 && fields[0].GetName() == colProtoName {
 			return true
 		}
 	}
@@ -1811,6 +1828,141 @@ func findLoadedField(msg *loader.LoadedMessage, protoName string) *loader.Loaded
 	return nil
 }
 
+// --- D23 helpers: Index method / fields / storage lowering ---
+
+// indexMethodToIR maps the authoring-surface w17.db.IndexMethod enum to
+// the IR's own IndexMethod enum. Kept parallel so the IR doesn't import
+// the authoring vocabulary.
+func indexMethodToIR(m dbpb.IndexMethod) irpb.IndexMethod {
+	switch m {
+	case dbpb.IndexMethod_BTREE:
+		return irpb.IndexMethod_IDX_BTREE
+	case dbpb.IndexMethod_GIN:
+		return irpb.IndexMethod_IDX_GIN
+	case dbpb.IndexMethod_GIST:
+		return irpb.IndexMethod_IDX_GIST
+	case dbpb.IndexMethod_BRIN:
+		return irpb.IndexMethod_IDX_BRIN
+	case dbpb.IndexMethod_HASH:
+		return irpb.IndexMethod_IDX_HASH
+	case dbpb.IndexMethod_SPGIST:
+		return irpb.IndexMethod_IDX_SPGIST
+	}
+	return irpb.IndexMethod_INDEX_METHOD_UNSPECIFIED
+}
+
+// nullsOrderToIR maps the authoring NullsOrder to the IR NullsOrder.
+func nullsOrderToIR(n dbpb.NullsOrder) irpb.NullsOrder {
+	switch n {
+	case dbpb.NullsOrder_NULLS_FIRST:
+		return irpb.NullsOrder_NULLS_FIRST
+	case dbpb.NullsOrder_NULLS_LAST:
+		return irpb.NullsOrder_NULLS_LAST
+	}
+	return irpb.NullsOrder_NULLS_ORDER_UNSPECIFIED
+}
+
+// convertIndexFields copies authoring-surface IndexField entries into
+// the IR shape 1:1. Performs no validation — callers have already
+// verified that every field name exists on the message.
+func convertIndexFields(src []*dbpb.IndexField) []*irpb.IndexField {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]*irpb.IndexField, 0, len(src))
+	for _, f := range src {
+		out = append(out, &irpb.IndexField{
+			Name:    f.GetName(),
+			Desc:    f.GetDesc(),
+			Nulls:   nullsOrderToIR(f.GetNulls()),
+			Opclass: f.GetOpclass(),
+		})
+	}
+	return out
+}
+
+// copyStringMap returns a defensive shallow copy of a string/string
+// map so the IR doesn't alias proto-owned memory. Returns nil on empty
+// input (keeping the zero-value shape consistent).
+func copyStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// validateIndexMethodOptions enforces method × options compatibility
+// at IR time so the diag anchors on the authoring site (not apply
+// time). Iter-1 D23 covers the invariants every PG version enforces;
+// exotic / subtle restrictions (e.g. specific opclasses required by
+// specific methods for specific column types) are left to PG's apply-
+// time errors so the compiler doesn't shadow the authoritative check.
+//
+// Covered rules:
+//   GIN / GIST / BRIN / SPGIST — UNIQUE rejected (these methods don't
+//     support uniqueness).
+//   HASH — UNIQUE, per-field DESC, NULLS order, and opclass all
+//     rejected (HASH has a single-column equality-only shape).
+//   BTREE / unspecified — no restrictions.
+func validateIndexMethodOptions(desc protoreflect.Descriptor, idxIndex int, method irpb.IndexMethod, idx *dbpb.Index) *diag.Error {
+	switch method {
+	case irpb.IndexMethod_IDX_GIN, irpb.IndexMethod_IDX_GIST, irpb.IndexMethod_IDX_BRIN, irpb.IndexMethod_IDX_SPGIST:
+		if idx.GetUnique() {
+			return diag.Atf(desc, "(w17.db.table).indexes[%d]: %s does not support UNIQUE", idxIndex, indexMethodDisplay(method)).
+				WithWhy("GIN / GIST / BRIN / SPGIST are inverted / block-range / space-partitioned structures without a uniqueness guarantee — PG rejects CREATE UNIQUE INDEX with these methods at apply time").
+				WithFix("drop `unique: true` from this index, or change `method:` to BTREE (the default — typically the right choice for uniqueness)")
+		}
+	case irpb.IndexMethod_IDX_HASH:
+		if idx.GetUnique() {
+			return diag.Atf(desc, "(w17.db.table).indexes[%d]: HASH does not support UNIQUE", idxIndex).
+				WithWhy("PG hash indexes only support equality lookups and do not implement uniqueness enforcement").
+				WithFix("drop `unique: true`, or use BTREE for a unique index")
+		}
+		for _, f := range idx.GetFields() {
+			if f.GetDesc() || f.GetNulls() != dbpb.NullsOrder_NULLS_ORDER_UNSPECIFIED {
+				return diag.Atf(desc, "(w17.db.table).indexes[%d]: HASH does not support sort direction or NULLS ordering (field %q)", idxIndex, f.GetName()).
+					WithWhy("HASH indexes have no traversal order — ASC/DESC and NULLS FIRST/LAST are meaningless; PG rejects them at apply time").
+					WithFix("drop `desc:` / `nulls:` from the HASH index's fields, or change `method:` to BTREE (the default) if you need sort order")
+			}
+			if f.GetOpclass() != "" {
+				return diag.Atf(desc, "(w17.db.table).indexes[%d]: HASH does not accept a per-field opclass (field %q has opclass %q)", idxIndex, f.GetName(), f.GetOpclass()).
+					WithWhy("HASH indexes use the type's default hash function exclusively — custom opclasses are not applicable").
+					WithFix("drop `opclass:` from the HASH index's fields, or pick a method that supports opclasses (BTREE / GIN / GIST / BRIN / SPGIST)")
+			}
+		}
+		if len(idx.GetFields()) > 1 {
+			return diag.Atf(desc, "(w17.db.table).indexes[%d]: HASH indexes cover exactly one field (got %d)", idxIndex, len(idx.GetFields())).
+				WithWhy("PG hash indexes are strictly single-column — multi-column HASH is not supported").
+				WithFix("split into multiple single-column HASH indexes, or change `method:` to BTREE for a composite index")
+		}
+	}
+	return nil
+}
+
+// indexMethodDisplay returns the user-facing method name for diag
+// output (strips the IR enum's `IDX_` prefix).
+func indexMethodDisplay(m irpb.IndexMethod) string {
+	switch m {
+	case irpb.IndexMethod_IDX_BTREE:
+		return "BTREE"
+	case irpb.IndexMethod_IDX_GIN:
+		return "GIN"
+	case irpb.IndexMethod_IDX_GIST:
+		return "GIST"
+	case irpb.IndexMethod_IDX_BRIN:
+		return "BRIN"
+	case irpb.IndexMethod_IDX_HASH:
+		return "HASH"
+	case irpb.IndexMethod_IDX_SPGIST:
+		return "SPGIST"
+	}
+	return "UNSPECIFIED"
+}
+
 // fkRef is the parsed form of (w17.field).fk — package-private; the wire-
 // shape lives in irpb.ForeignKey.
 type fkRef struct {
@@ -1828,7 +1980,7 @@ func parseFKRef(s string) (fkRef, bool) {
 
 func hasSingleColUniqueIndex(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0] == field {
+		if i.GetUnique() && len(i.GetFields()) == 1 && i.GetFields()[0].GetName() == field {
 			return true
 		}
 	}
@@ -1837,7 +1989,7 @@ func hasSingleColUniqueIndex(idx []*irpb.Index, field string) bool {
 
 func hasSingleColIndex(idx []*irpb.Index, field string) bool {
 	for _, i := range idx {
-		if len(i.GetFields()) == 1 && i.GetFields()[0] == field {
+		if len(i.GetFields()) == 1 && i.GetFields()[0].GetName() == field {
 			return true
 		}
 	}

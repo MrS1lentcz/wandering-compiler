@@ -23,9 +23,9 @@ message Product {
   option (w17.db.table) = {
     name: "products",
     indexes: [
-      { fields: ["slug"], unique: true },
-      { fields: ["category_id", "is_active"] },
-      { fields: ["name"], name: "products_name_covering_idx", include: ["price"] }
+      { fields: [{ name: "slug" }], unique: true },
+      { fields: [{ name: "category_id" }, { name: "is_active" }] },
+      { fields: [{ name: "name" }], name: "products_name_covering_idx", include: ["price"] }
     ]
   };
 

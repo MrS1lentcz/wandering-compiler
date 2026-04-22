@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package d23.brin_index_with_unique;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D23 error — BRIN indexes don't support UNIQUE.
+import "google/protobuf/timestamp.proto";
+
+message Audit {
+  option (w17.db.table) = {
+    name: "audits",
+    indexes: [
+      { method: BRIN,
+        unique: true,
+        fields: [{ name: "occurred_at" }]
+      }
+    ]
+  };
+
+  int64 id = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  google.protobuf.Timestamp occurred_at = 2 [(w17.field) = { type: DATETIME, default_auto: NOW }];
+}

@@ -13,7 +13,7 @@ message X {
   option (w17.db.table) = {
     name: "xs",
     indexes: [
-      { name: "xs_email_uidx", fields: ["name"], unique: true }
+      { name: "xs_email_uidx", fields: [{ name: "name" }], unique: true }
     ]
   };
 

@@ -28,7 +28,7 @@ message Order {
   option (w17.db.table) = {
     name: "orders",
     indexes: [
-      { fields: ["customer_id", "status"] }
+      { fields: [{ name: "customer_id" }, { name: "status" }] }
     ]
   };
 

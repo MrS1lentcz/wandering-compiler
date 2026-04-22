@@ -191,9 +191,43 @@ message PgOptions {
 
 message Index {
   string name = 1;              // auto-derived by the naming package when empty
-  repeated string fields = 2;
+  repeated IndexField fields = 2;
   bool unique = 3;
   repeated string include = 4;  // Postgres INCLUDE — covering-index columns
+
+  // Access method (D23). UNSPECIFIED → BTREE (emitter omits USING
+  // clause). Non-BTREE methods emit `USING <method>` and may carry
+  // method-specific restrictions enforced at IR build time.
+  IndexMethod method = 5;
+
+  // Free-form WITH options. Keys / values are dialect-specific and
+  // opaque to the compiler; emitter renders them verbatim as
+  // `WITH (k1=v1, k2=v2)`. Key iteration order at emit time is
+  // deterministic (alphabetical) so goldens stay stable across runs.
+  map<string, string> storage = 6;
+}
+
+message IndexField {
+  string name = 1;          // proto field name
+  bool desc = 2;            // default ASC
+  NullsOrder nulls = 3;     // dialect default when unspecified
+  string opclass = 4;       // opaque per-field operator class
+}
+
+enum IndexMethod {
+  INDEX_METHOD_UNSPECIFIED = 0;
+  IDX_BTREE  = 1;
+  IDX_GIN    = 2;
+  IDX_GIST   = 3;
+  IDX_BRIN   = 4;
+  IDX_HASH   = 5;
+  IDX_SPGIST = 6;
+}
+
+enum NullsOrder {
+  NULLS_ORDER_UNSPECIFIED = 0;
+  NULLS_FIRST = 1;
+  NULLS_LAST  = 2;
 }
 
 // ForeignKey references its owning column by proto_name (not by pointer, so

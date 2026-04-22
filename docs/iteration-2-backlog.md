@@ -13,6 +13,56 @@ are unordered and un-prioritised.
 
 ## Big blocks (full milestones)
 
+### DQL — ORM-like query language
+
+**Why.** User decision 2026-04-22: a future iteration introduces
+DQL (Doctrine-inspired, ORM-like) as the authoring surface for
+conditions / expressions / queries. Replaces opaque SQL strings
+in structured messages.
+
+**Scope surfaces that land on DQL when it ships:**
+  - Partial index predicates (`Index.where`) — currently via
+    `raw_indexes`.
+  - Expression indexes (`IndexField.expr`) — currently via
+    `raw_indexes`.
+  - CHECK constraint bodies (cross-column, function-call,
+    expression) — currently via `raw_checks`.
+  - Query generation (iter-2+ M-block).
+  - gRPC handler query bodies.
+
+**Naming consistency:** DQL uses `fields` (not `columns`) — same
+identifier as the schema's `(w17.field)` and proto field names.
+Author sees the same word whether declaring a schema, writing a
+query, or building a gRPC method.
+
+**Escape-hatch discipline today:** until DQL lands, the `raw_*`
+escape hatches (raw_indexes, raw_checks) own every opaque-SQL
+authoring path. Structured messages (`Index`, CHECK synths) do
+NOT accept opaque strings — authors who need them go through
+raw, migrate to DQL when it lands. This keeps the structured
+surface DQL-ready from day one.
+
+### Local schema validator (post-commit check)
+
+**Why.** User decision 2026-04-22: later phases keep a local
+representation of the current DB schema state and replay
+migrations against it as a "post-commit check" validation phase.
+Catches drift / impossibilities / missing capabilities before the
+migration reaches a real target DB.
+
+**Benefits:** universality (same check in CI / local dev /
+pre-merge, no running target DB needed), 100% stability
+(deterministic replay), catches problems at the authoring
+boundary rather than apply time.
+
+**Preconditions.** Hosted platform + deploy client. The pieces
+exist in iter-1 (IR + capability catalog); the persistent state
+store + CI integration are the new work.
+
+---
+
+## Big blocks (original list)
+
 ### Alter-diff
 
 **Why.** `plan.Diff(nil, curr)` handles only the initial-migration case.

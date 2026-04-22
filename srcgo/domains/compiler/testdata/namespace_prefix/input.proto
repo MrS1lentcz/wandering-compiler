@@ -30,7 +30,7 @@ message Category {
 message Product {
   option (w17.db.table) = {
     name: "products",
-    indexes: [{ fields: ["category_id"], name: "by_category" }],
+    indexes: [{ fields: [{ name: "category_id" }], name: "by_category" }],
     raw_checks: [{ name: "price_non_negative", expr: "price >= 0" }]
   };
 

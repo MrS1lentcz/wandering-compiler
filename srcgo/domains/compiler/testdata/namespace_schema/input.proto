@@ -23,7 +23,7 @@ message Dashboard {
 message Widget {
   option (w17.db.table) = {
     name: "widgets",
-    indexes: [{ fields: ["dashboard_id", "kind"] }]
+    indexes: [{ fields: [{ name: "dashboard_id" }, { name: "kind" }] }]
   };
 
   int64  id           = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];

@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package d23.gin_index_with_unique;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D23 error — GIN indexes don't support UNIQUE.
+message Post {
+  option (w17.db.table) = {
+    name: "posts",
+    indexes: [
+      { method: GIN,
+        unique: true,
+        fields: [{ name: "tags", opclass: "gin_trgm_ops" }]
+      }
+    ]
+  };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string tags = 2 [(w17.field) = { type: TEXT }];
+}

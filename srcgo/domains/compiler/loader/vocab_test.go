@@ -53,13 +53,13 @@ func TestW17VocabularyCompiles(t *testing.T) {
 	if got, want := len(tableExt.GetIndexes()), 3; got != want {
 		t.Fatalf("len(table.indexes) = %d, want %d", got, want)
 	}
-	if got, want := tableExt.GetIndexes()[0].GetFields(), []string{"slug"}; !equalStrings(got, want) {
+	if got, want := indexFieldNames(tableExt.GetIndexes()[0].GetFields()), []string{"slug"}; !equalStrings(got, want) {
 		t.Errorf("table.indexes[0].fields = %v, want %v", got, want)
 	}
 	if !tableExt.GetIndexes()[0].GetUnique() {
 		t.Error("table.indexes[0].unique = false, want true")
 	}
-	if got, want := tableExt.GetIndexes()[1].GetFields(), []string{"category_id", "is_active"}; !equalStrings(got, want) {
+	if got, want := indexFieldNames(tableExt.GetIndexes()[1].GetFields()), []string{"category_id", "is_active"}; !equalStrings(got, want) {
 		t.Errorf("table.indexes[1].fields = %v, want %v", got, want)
 	}
 	if tableExt.GetIndexes()[1].GetUnique() {
@@ -268,4 +268,19 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// indexFieldNames extracts the .name field from each authoring-surface
+// IndexField entry — test helper so equality assertions stay terse
+// after the D23 shape change (fields: ["a", "b"] → fields: [{ name:
+// "a" }, { name: "b" }]).
+func indexFieldNames(fs []*dbpb.IndexField) []string {
+	if len(fs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(fs))
+	for _, f := range fs {
+		out = append(out, f.GetName())
+	}
+	return out
 }

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package d23.index_methods;
+
+import "google/protobuf/timestamp.proto";
+import "w17/db.proto";
+import "w17/field.proto";
+
+// D23 fixture — structured index methods + per-field sort / nulls /
+// opclass + WITH storage options. Exercises:
+//   BTREE with DESC + NULLS LAST and a composite sort.
+//   BTREE with per-field opclass (text_pattern_ops for LIKE-by-prefix).
+//   GIN with opclass (gin_trgm_ops) — method != BTREE emits USING gin.
+//   BRIN with storage options (pages_per_range, autosummarize).
+//   HASH — single-col equality-only (validates HASH restrictions pass).
+
+message Event {
+  option (w17.db.table) = {
+    name: "events",
+    indexes: [
+      // Composite sort: recent-first timeline lookup with tiebreak.
+      { fields: [
+          { name: "occurred_at", desc: true, nulls: NULLS_LAST },
+          { name: "id" }
+        ],
+        name: "events_timeline_idx"
+      },
+      // LIKE-by-prefix on subject text.
+      { fields: [
+          { name: "subject", opclass: "text_pattern_ops" }
+        ],
+        name: "events_subject_prefix_idx"
+      },
+      // Trigram GIN for fuzzy search.
+      { method: GIN,
+        fields: [
+          { name: "subject", opclass: "gin_trgm_ops" }
+        ],
+        name: "events_subject_trgm_gin"
+      },
+      // BRIN over a monotone time column with storage knobs.
+      { method: BRIN,
+        fields: [{ name: "occurred_at" }],
+        storage: [
+          { key: "pages_per_range", value: "32" },
+          { key: "autosummarize", value: "on" }
+        ],
+        name: "events_occurred_brin"
+      },
+      // HASH equality-only on a high-cardinality exact-match column.
+      { method: HASH,
+        fields: [{ name: "external_id" }],
+        name: "events_external_id_hash"
+      }
+    ]
+  };
+
+  int64 id           = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  google.protobuf.Timestamp occurred_at = 2 [(w17.field) = { type: DATETIME, default_auto: NOW }];
+  string subject      = 3 [(w17.field) = { type: CHAR, max_len: 200 }];
+  string external_id  = 4 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

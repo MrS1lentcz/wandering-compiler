@@ -121,6 +121,15 @@ const (
 	// only for the CREATE statement text).
 	CapCommentOn = "COMMENT_ON"
 
+	// Index access methods (D23). BTREE is universal and needs no cap
+	// (it's the default every dialect assumes). The others declare
+	// per-dialect min-version / extension requirements.
+	CapGinIndex    = "GIN_INDEX"
+	CapGistIndex   = "GIST_INDEX"
+	CapBrinIndex   = "BRIN_INDEX"
+	CapSpgistIndex = "SPGIST_INDEX"
+	CapHashIndex   = "HASH_INDEX"
+
 	// Indexes + constraints.
 	CapIncludeIndex       = "INCLUDE_INDEX"        // covering index
 	CapPartialIndex       = "PARTIAL_INDEX"        // CREATE INDEX … WHERE

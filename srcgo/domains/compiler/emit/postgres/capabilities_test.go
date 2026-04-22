@@ -47,6 +47,11 @@ var expectedPgCaps = []string{
 	emit.CapGeneratedColumn,
 	emit.CapOnDeleteRestrict,
 	emit.CapOnDeleteSetDefault,
+	emit.CapGinIndex,
+	emit.CapGistIndex,
+	emit.CapBrinIndex,
+	emit.CapSpgistIndex,
+	emit.CapHashIndex,
 
 	// Transactional DDL
 	emit.CapTransactionalDDL,

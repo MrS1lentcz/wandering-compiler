@@ -808,6 +808,152 @@ of the columns the index covers with `required_extensions` as a
 workaround; iter-2 may lift `required_extensions` to the table level
 for raw-index use cases.
 
+### D23 — Indexes: structured method + per-field sort/nulls/opclass + storage (added 2026-04-22)
+
+**Decision.** `(w17.db.table).indexes[].fields` reshapes from
+`repeated string` to `repeated IndexField` — each entry is a
+structured `{ name, desc, nulls, opclass }`. Adds `method` (access
+method) and `storage` (WITH options) to `Index`. Conditions and
+expressions (`WHERE`, `lower(col)`, …) deliberately **do NOT**
+land on structured `Index` in iter-1 — those belong to a planned
+DQL (Doctrine-style ORM-like query language) iteration, and
+routing them through `raw_indexes` today keeps authors from
+building up opaque-SQL usage the DQL migration will then
+invalidate.
+
+**New proto shape** (`proto/w17/db.proto`):
+
+```proto
+message Index {
+  repeated IndexField fields = 1;   // was: repeated string
+  bool unique = 2;
+  string name = 3;
+  repeated string include = 4;
+  IndexMethod method = 5;           // new — UNSPECIFIED → BTREE
+  map<string, string> storage = 6;  // new — free-form WITH options
+}
+
+message IndexField {
+  string name = 1;       // proto field name
+  bool desc = 2;         // default ASC
+  NullsOrder nulls = 3;  // default = dialect default
+  string opclass = 4;    // opaque operator class
+}
+
+enum IndexMethod { ... BTREE GIN GIST BRIN HASH SPGIST }
+enum NullsOrder  { ... NULLS_FIRST NULLS_LAST }
+```
+
+**Why `fields` (not `columns`).** Everything in the schema world
+references *fields* — proto fields, `(w17.field)`, DQL queries
+(planned), gRPC methods. Keeping the vocabulary uniform across
+layers means authors don't context-switch. The IndexField submessage
+packages sort / nulls / opclass around the proto field identifier.
+
+**Authoring examples.**
+
+```proto
+// Simple — per-field options default to ASC, no NULLS order, no opclass.
+indexes: [{ fields: [{ name: "category_id" }, { name: "is_active" }] }]
+
+// Sort + nulls.
+indexes: [{
+  fields: [
+    { name: "occurred_at", desc: true, nulls: NULLS_LAST },
+    { name: "id" }
+  ],
+  name: "events_timeline_idx"
+}]
+
+// GIN + opclass — USING gin, per-field operator class.
+indexes: [{
+  method: GIN,
+  fields: [{ name: "subject", opclass: "gin_trgm_ops" }],
+  name: "events_subject_trgm_gin"
+}]
+
+// BRIN + storage knobs — WITH (autosummarize=on, pages_per_range=32).
+indexes: [{
+  method: BRIN,
+  fields: [{ name: "occurred_at" }],
+  storage: [
+    { key: "pages_per_range", value: "32" },
+    { key: "autosummarize", value: "on" }
+  ]
+}]
+
+// HASH — single-column equality-only.
+indexes: [{
+  method: HASH,
+  fields: [{ name: "external_id" }]
+}]
+```
+
+**SQL output shape:**
+
+```sql
+CREATE [UNIQUE] INDEX <name>
+ON <qualified_table>
+[USING <method>]                    -- omitted for BTREE / unspecified
+(<field>[ <opclass>][ DESC][ NULLS FIRST|LAST], ...)
+[INCLUDE (<col>, ...)]
+[WITH (<k>=<v>, ...)]               -- keys alphabetically sorted
+```
+
+ASC is never rendered (PG default; terse output). NULLS unspecified
+= PG default (LAST for ASC, FIRST for DESC). WITH clause keys sort
+alphabetically so goldens stay deterministic across runs.
+
+**Invariants enforced at IR time.**
+
+  - GIN / GIST / BRIN / SPGIST reject `unique: true` — these methods
+    are inverted / block-range / space-partitioned and don't
+    support uniqueness.
+  - HASH rejects `unique: true`, per-field `desc`, per-field
+    `nulls`, per-field `opclass`, AND multi-field — hash indexes
+    are single-column equality-only with no traversal order and a
+    single default hash function per type.
+  - BTREE / unspecified accept every option.
+  - Empty `fields` entry (missing `name`) is an error.
+  - Author's fields must reference declared proto fields on the
+    owning message.
+
+Exotic / subtle restrictions (e.g. specific opclasses required by
+specific methods for specific column types) are left to PG's
+apply-time errors so the compiler doesn't shadow the authoritative
+check with incomplete knowledge.
+
+**Parked for DQL iteration.**
+
+  - `where:` partial index predicates — today via `raw_indexes`
+    with a WHERE-clause body.
+  - Expression indexes (`lower(email)`) — today via `raw_indexes`
+    with a `(lower(col))` body.
+  - CHECK constraint conditions — `raw_checks.expr` stays (per-
+    field synths unchanged).
+  - EXCLUDE constraints — iter-2-backlog, PG-niche.
+  - Deferrable / DEFAULTable — iter-2-backlog.
+
+**Rationale.** Django's `Index` subclass family (`GinIndex`,
+`GistIndex`, `BrinIndex`, …) each ship method-specific options
+tightly coupled to the method; a oneof per method in proto would
+work but inflates the surface four-fold. A single structured
+`Index` message with `method` + free-form `storage` map captures
+the whole surface in one shape. Per-method option typing graduates
+later (following D9's `custom_type → curated flags` pattern) when
+pilot schemas repeat the same options enough to justify.
+
+Capabilities added: `CapGinIndex` (PG 8.2), `CapGistIndex` (PG
+8.1), `CapBrinIndex` (PG 9.5), `CapSpgistIndex` (PG 9.2),
+`CapHashIndex` (PG 10 — WAL-logged / crash-safe). BTREE is PG's
+default and needs no cap.
+
+Migration impact: zero — existing fixtures using the previous
+`repeated string fields` were mechanically migrated to
+`repeated IndexField fields` with one-liner `{ name: "<x>" }`
+entries. Generated SQL unchanged for every existing fixture
+(structured-default output matches pre-D23 output byte-for-byte).
+
 ### D22 — Ergonomic bundle: COMMENT ON + path / MAC / small-int presets (added 2026-04-22)
 
 **Decision.** Four independent ergonomic features shipped as one

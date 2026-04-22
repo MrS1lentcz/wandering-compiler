@@ -57,6 +57,22 @@ var pgCatalog = map[string]emit.Requirement{
 	// PG release we support.
 	emit.CapCommentOn: {},
 
+	// Index access methods (D23). BTREE is PG's default and always
+	// available (no cap). Non-BTREE methods have per-version release
+	// floors:
+	//   GIN    — PG 8.2 (contrib in 7.4, core in 8.2)
+	//   GIST   — PG 8.1 (core since 7.1; modern shape since 8.1)
+	//   BRIN   — PG 9.5 (new in 9.5, no earlier variant)
+	//   SPGIST — PG 9.2 (new in 9.2)
+	//   HASH   — PG 10 (crash-safe / WAL-logged since 10; earlier
+	//            releases had HASH but couldn't replicate or survive
+	//            crashes, effectively unusable in production)
+	emit.CapGinIndex:    {MinVersion: "8.2"},
+	emit.CapGistIndex:   {MinVersion: "8.1"},
+	emit.CapBrinIndex:   {MinVersion: "9.5"},
+	emit.CapSpgistIndex: {MinVersion: "9.2"},
+	emit.CapHashIndex:   {MinVersion: "10.0"},
+
 	// Index + constraint features.
 	emit.CapIncludeIndex:       {MinVersion: "11.0"},
 	emit.CapPartialIndex:       {MinVersion: "7.4"},
