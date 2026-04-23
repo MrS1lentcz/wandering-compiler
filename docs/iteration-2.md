@@ -758,6 +758,306 @@ scoping for the author's tables, not for wc bookkeeping.
 M1 shipping blocks future platform work. Small cost, large
 unblock.
 
+### D28 — Migration-safety classification matrix (added 2026-04-23)
+
+**Status: design pending.** Captures the complete fact-pair × strategy
+table that the differ uses to classify every column / table /
+constraint change. Today's binary SAFE / REFUSE split is too coarse
+for production use — D28 expands it into six strategies and pins
+each fact transition to one.
+
+**Strategies:**
+
+- **SAFE** — type + data both fit; clean ALTER, no user input
+  needed. (e.g. NOT NULL → NULL, max_len widen, default add.)
+- **LOSSLESS_USING** — PG cast handles the conversion in-place;
+  data may overflow but PG fails apply rather than silent
+  corruption. (e.g. TEXT ↔ CITEXT, JSON ↔ JSONB.)
+- **NEEDS_CONFIRM** — types are theoretically convertible but
+  data may not fit (string→int, max_len narrow). User must
+  explicitly opt in via `--decide` flag; differ generates a
+  paired `check.sql` that pre-validates current data. If the
+  check fails on real data, user falls back to DROP_AND_CREATE
+  or CUSTOM_MIGRATION.
+- **DROP_AND_CREATE** — author-acknowledged lossy change; emit
+  drops the column + adds a fresh one. Effectively a destructive
+  migration with explicit user opt-in.
+- **CUSTOM_MIGRATION** — escape hatch where author writes their
+  own SQL/DQL block that knows how to transform the column's data
+  before the structural change applies.
+- **REFUSE** — default for changes that can't be safely automated
+  (carrier change, message ↔ scalar, custom_type swap). Differ
+  surfaces a strategy menu; user picks one of the above
+  alternatives explicitly.
+
+**Decision plumbing (D29-aware):**
+
+- Standalone mode: CLI flags `--decide users.email=using` or
+  decisions YAML via `--decisions <file>`.
+- Tool-integrated mode (D29): decisions live in the tool's
+  migration plan, surfaced in tool UI with data-impact analysis,
+  immutable after migration approval. CLI is a transparent
+  client.
+
+**Check.sql generation:**
+
+Per fact-change that lands in NEEDS_CONFIRM, the emitter produces a
+parallel `check.<ts>.sql` artifact with validation queries:
+
+- `string → int`: `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+$' LIMIT 1`
+- `max_len 200 → 50`: `SELECT count(*) FROM t WHERE char_length(col) > 50 LIMIT 1`
+- `NULL → NOT NULL`: `SELECT count(*) FROM t WHERE col IS NULL LIMIT 1`
+
+Operator (CI / deploy client / tool) runs check.sql before the
+real migration; non-zero count → abort with structured fail
+report.
+
+**Test discipline:**
+
+D28 is the foundation of an exhaustive table-driven test matrix:
+
+- Carrier × carrier (8 × 8 = 64 cells)
+- Sem × sem within carrier (~150 cases)
+- DbType × DbType (~50 reachable cells)
+- Constraint changes (max_len, precision, scale, nullable,
+  unique, default, comment, etc.)
+
+**Estimated ~500-800 generated test cases.** Each verifies:
+
+1. Correct classification (SAFE / USING / NEEDS_CONFIRM / etc.).
+2. Generated up.sql matches expected pattern.
+3. Generated check.sql (when applicable) matches.
+4. Apply-roundtrip on PG with seeded data — both happy path
+   (data fits) and unhappy path (check.sql blocks the apply).
+
+**Phasing:**
+
+1. Document the full classification matrix here in D28
+   (paper exhaustive, every fact transition pinned).
+2. Refactor `plan/diff.go` strategy classifier from binary →
+   six-strategy enum; emit structured "needs decision X"
+   objects.
+3. CLI `--decide` flag plumbing.
+4. `check.sql` emit pipeline.
+5. Test matrix exhaustive.
+
+**Open questions:**
+
+- Should NEEDS_CONFIRM auto-generate check.sql even without user
+  decision, so reviewer can preview risk? (Lean: yes.)
+- DROP_AND_CREATE proto-side semantics — does it require a new
+  proto field number + reserved old, or is it acceptable as-is
+  with a force flag in the decision? (Lean: force flag with
+  reserved-number warning, since reserved-number requirement is
+  proto convention not enforceable in compiler.)
+- CUSTOM_MIGRATION location — inline in proto as
+  `(w17.db.column).migration_custom_sql` or external in
+  decisions YAML? (Lean: decisions YAML; proto is point-in-time-
+  decision-free.)
+
+### D29 — Schema source-of-truth: tool + git lock-file model (added 2026-04-23)
+
+**Status: north-star architecture.** Pins the long-term shape of
+how schemas, generated code, and migrations relate to git
+repositories and the hosted platform tool. No implementation
+work today — CLI standalone mode (current reality) keeps
+working unchanged. D29 governs every architectural decision
+made between now and tool integration so we don't paint
+ourselves into a corner.
+
+**Mental model: schema is a package, tool is a registry, git is a consumer.**
+
+Borrows from proven patterns:
+
+- **Buf Schema Registry / npm registry** — schema lives
+  centrally; consumer repo holds a lock file referencing
+  versions.
+- **Cargo.lock / go.sum / package-lock.json** — reproducibility
+  via hash, not via vendored copy.
+- **Atlas migration approval** — migrations are immutable after
+  approval; deploy is read-only consumer.
+
+**Artifact placement (where things live and why):**
+
+| Artifact | Location | Rationale |
+|---|---|---|
+| Schema source (`*.proto` with `w17.*`) | **Tool as source of truth, locally cached (gitignored)** | Cross-service registry; DBA approval workflow; full audit trail. Locally cached so dev / Claude can edit. |
+| Schema reference (`w17.yaml`) | **Git** — consumer repo | The single bridge between git PR and tool version. Mergeable like any source. Conflicts on the version field only, easy to resolve. |
+| Generated code (proto stubs, gRPC handlers) | **Gitignored, regenerated from `w17.yaml`** | No noise in PR diffs. CI / local `wc sync` regenerates from cached or fetched schema. New contributor: one `wc sync` and they're up. |
+| Migration SQL | **Tool, immutable after approval** | Single source of truth for deploys. Git never carries SQL → no drift between "what's in git" and "what runs on DB". |
+| Decisions (D28 strategy choices) | **Tool, attached to migration plan** | Reviewed in tool UI with data-impact analysis ("this NEEDS_CONFIRM affects 2.3M rows"). Immutable post-approval. |
+| Application code (handlers, DQL queries) | **Git** | Standard application code; imports gen code. |
+
+**Versioning convention (the elegant part):**
+
+Code semver `XX.YY.zz` where:
+
+- **major (`XX`)** — schema **breaking** change (drop column,
+  type change with data loss, REFUSE → DROP_AND_CREATE
+  acknowledged).
+- **minor (`YY`)** — schema **additive** change (add column,
+  widen type, add index — forward-compatible: old code runs
+  against new schema).
+- **patch (`zz`)** — code-only change, no schema impact.
+
+The convention enables **automatic deploy-time compatibility
+checking**: app `14.25.99` declares min schema `14.25` → DB
+schema is `14.26` (additive bump) → deploy OK. App `14.25.99`
+against schema `15.0` → REFUSE without explicit major-bump
+acknowledgement.
+
+**Tool determines major vs minor automatically** from the
+D28 classification matrix:
+
+- All-SAFE / all-LOSSLESS_USING migration → **minor** bump.
+- Any NEEDS_CONFIRM / DROP_AND_CREATE / REFUSE-overridden →
+  **major** bump (and requires elevated approval).
+
+**`w17.yaml` shape:**
+
+```yaml
+# w17.yaml — committed to git
+schema:
+  version: "14.26"             # production-ready reference (tagged)
+  draft_id: "01J9X4Z2K..."     # UUID while schema is unmerged in tool
+  hash: "sha256:abc...def"     # integrity, CI verifies
+deploy:
+  min_schema: "14.25"          # min compatible schema (forward-compat range)
+  max_schema: "14.26"          # max known-good (before next major)
+```
+
+`draft_id` is auto-cleared by a tool bot-PR after schema is
+merged in tool (becomes a real `version`). `hash` protects
+against tool-side mutation: CI re-fetches by version/UUID,
+recomputes hash, asserts match.
+
+**Workflow:**
+
+```
+1. wc sync                     # cache schema per w17.yaml (skip if cache hit)
+2. <edit proto locally>        # gitignored area
+3. wc generate                 # POST diff to tool → returns draft_id, regen code locally
+4. <write app code, tests>
+5. git diff                    # sees: app code + w17.yaml (draft_id changed)
+6. git push, open PR
+7. CI: wc verify              # re-syncs, regens, hash matches → green
+8. Tool review (PR-link in commit)
+9. Tool approves → schema becomes version "14.26"; bot-PR updates w17.yaml
+10. CI re-runs, mergeable
+11. Merge to main
+12. Deploy reads w17.yaml, fetches matching schema/migration version, applies
+```
+
+**Multi-team conflict resolution:**
+
+- **Schema:** two teams editing same message → tool serializes
+  drafts (linearized access). Second team's `wc sync` says
+  "rebase your draft on top of merged version."
+- **Lock file:** classic git merge conflict on `w17.yaml`
+  version field → resolved by `wc sync && wc regen` after
+  pull.
+- **Generated code:** never in git, no conflicts ever.
+- **Cross-service awareness:** tool tracks which git repos
+  consume which schema versions; surfaces "service B uses
+  v14.25, you're bumping to 14.26 (additive, OK)" in approval
+  UI.
+
+**Atomicity (git ↔ tool):**
+
+Tool approval is a **CI gate**:
+
+1. Tool migration plan: `draft → review → approved → applied`.
+2. Git PR has required CI check `wc check` calling tool API:
+   "is migration X approved?"
+3. CI fails until tool returns `approved`.
+4. Merge possible only when both git review + tool approval pass.
+5. Post-deploy: tool flips to `applied`, immutable forever.
+
+**Reverse:** revert PR in git → wc CLI generates down migration
+on the down branch → tool approves → deploy applies down →
+app reverts.
+
+**Cache + offline story:**
+
+- `~/.wc-cache/<version_or_uuid>/` holds fetched schema +
+  pre-generated code.
+- `wc sync` checks cache first; falls back to tool API on miss.
+- CI cache keyed on hash, shared across builds.
+- New contributor without tool credentials: anonymous read-only
+  schema fetch (open-source / docs reading); no schema edit
+  permission.
+- Fully offline (after first sync): everything works from cache.
+
+**Environment-aware deploy client:**
+
+- `local` / `ci` mode: accepts UUID-versioned schemas
+  (work-in-progress).
+- `staging` / `production` mode: refuses UUIDs; only
+  tagged-version schemas allowed (`14.26`, not
+  `01J9X4Z2K...`). Forces all production deploys to reference
+  approved-and-published schema versions.
+- Mode flag is deploy-client config, not in `w17.yaml` (env-
+  specific).
+
+**Cross-service compatibility tracker:**
+
+Tool tracks which git repos / services pin which schema versions:
+
+- Bumping schema `14.26 → 14.27`: tool surfaces in approval UI:
+  - "Service B (last seen on `14.25`) is 2 versions behind, forward-compatible? ✅"
+  - "Service C (last seen on `14.26-draft`) actively testing the bump, ✅"
+  - "Service D (last seen on `13.99`) is a major version behind. REFUSE deploy without explicit upgrade."
+
+This makes schema a **discoverable service contract** across
+microservices.
+
+**Open architectural questions (parked to iter-3+):**
+
+- **Rollback across minor versions** — `14.26.05 → 14.25.99`
+  requires schema downgrade. Tool orchestrates down migration
+  with same approval flow as forward.
+- **Hotfix branches off old versions** — pinning `14.26` while
+  main is on `15.0`: tool supports "supported old version"
+  status; hotfixes against deprecated schemas have their own
+  approval path.
+- **Schema deprecation lifecycle** — `draft → approved → active
+  → deprecated → archived`. Deploy refuses `archived`.
+- **Multi-tenant schema isolation** — single self-hosted tool
+  per org vs SaaS multi-org. SaaS adds cross-org schema sharing
+  semantics.
+
+**Implications for `wc` CLI today:**
+
+CLI must have **two modes with one interface**:
+
+1. **Standalone (today's reality):** proto in git, `wc generate`
+   produces SQL to `out/`, decisions via `--decide` flags, no
+   tool. Works for single-repo simple projects.
+2. **Tool-integrated (D29 target):** proto fetched from tool,
+   `wc generate` POSTs migration plan to tool, gets `draft_id`,
+   updates `w17.yaml`. Decisions surfaced in tool UI.
+
+CLI **command surface is identical** in both modes. A
+configuration file `wc.toml` decides where the migration plan
+goes (local `out/` vs tool API). This separation means:
+
+- Standalone mode = today, works as-is.
+- Tool mode = layered on top of standalone without breaking
+  changes.
+- No decision about the tool today preempts anything in CLI / IR.
+
+**Timing:**
+
+- D29 is fixed as the architectural north star.
+- **No code changes today** — CLI standalone mode is the
+  current reality and keeps working unchanged.
+- Tool integration is iter-3+ work, after D28 (migration
+  safety) lands and after the hosted platform itself is
+  built (separate big iter-3 milestone).
+- Every architectural decision between now and then is
+  measured against D29: does it make tool integration easier
+  or harder?
+
 ## Acceptance criteria for M1
 
 1. `wc generate --prev prev.proto curr.proto` emits a migration pair
