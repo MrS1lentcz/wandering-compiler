@@ -246,38 +246,46 @@ tables / columns / indexes / FKs / checks observed via
 
 **Column alter strategies (per-fact table).** Each fact class has a
 pinned strategy; emitter routes to it deterministically. Strategy
-column values: **SAFE** (ALTER in place, no data risk); **USING**
-(ALTER in place with `USING <cast>` on PG); **WIDEN-SAFE /
-NARROW-GATED** (widen always SAFE; narrow requires `USING` +
-content-dependent check, emits warning); **DROP+ADD** (PG has no
-ALTER for this fact — drop constraint / index / column, re-add);
-**REFUSE** (lossy with no safe automation — emit
-`-- wc: lossy transform refused` + fix hint).
+column values: **DIRECT** (plain `ALTER COLUMN …` — PG rejects the
+apply if live data doesn't fit; that's the right outcome, deploy
+client / platform handles pre-apply data validation per the platform
+contract); **USING** (PG needs an explicit `USING <cast>` to do the
+conversion at all — same fail-on-incompatible-data semantics);
+**DROP+ADD** (PG has no ALTER for this fact — drop constraint /
+index / generated expr, re-add); **REFUSE** (proto-wire breaking
+change — compiler emits `diag.Error` at generate time because the
+shape of the change doesn't have a non-destructive alter path).
+
+The compiler does **not** emit warning comments or data-loss gating.
+Data survival is the deploy client's job (runs pre-apply checks
+against real data, surfaces issues to platform UI for human review);
+PG itself is the last line of defence (refuses the ALTER at apply
+time if live rows don't match). Compiler stays deterministic.
 
 | Fact | Strategy |
 |---|---|
-| `name` | SAFE — `ALTER TABLE t RENAME COLUMN a TO b` |
-| `nullable` NOT NULL → NULL | SAFE — `ALTER COLUMN DROP NOT NULL` |
-| `nullable` NULL → NOT NULL | USING — `ALTER COLUMN SET NOT NULL`, emit pre-check helper SQL block `DO $$ IF EXISTS (SELECT 1 FROM t WHERE col IS NULL) THEN RAISE …` |
-| `default` add / change / drop | SAFE — `SET DEFAULT …` / `DROP DEFAULT` |
-| `comment` add / change / drop | SAFE — `COMMENT ON COLUMN …` |
-| `max_len` widen | SAFE — `ALTER COLUMN TYPE VARCHAR(N_new)` |
-| `max_len` narrow | NARROW-GATED — emit `USING LEFT(col, N_new)` + warning comment |
-| `precision` / `scale` widen | SAFE — `ALTER COLUMN TYPE NUMERIC(p_new, s_new)` |
-| `precision` / `scale` narrow | NARROW-GATED — same shape as max_len |
+| `name` | DIRECT — `ALTER TABLE t RENAME COLUMN a TO b` |
+| `nullable` NOT NULL → NULL | DIRECT — `ALTER COLUMN DROP NOT NULL` |
+| `nullable` NULL → NOT NULL | DIRECT — `ALTER COLUMN SET NOT NULL` (PG fails if any NULL row exists; deploy client pre-checks) |
+| `default` add / change / drop | DIRECT — `SET DEFAULT …` / `DROP DEFAULT` |
+| `comment` add / change / drop | DIRECT — `COMMENT ON COLUMN …` |
+| `max_len` widen | DIRECT — `ALTER COLUMN TYPE VARCHAR(N_new)` |
+| `max_len` narrow | DIRECT — `ALTER COLUMN TYPE VARCHAR(N_new)` (PG refuses apply if any row exceeds N_new) |
+| `precision` / `scale` widen | DIRECT — `ALTER COLUMN TYPE NUMERIC(p_new, s_new)` |
+| `precision` / `scale` narrow | DIRECT — PG refuses apply on overflow |
 | `db_type` compatible (TEXT↔VARCHAR, JSON↔JSONB) | USING — `ALTER COLUMN TYPE … USING col::<new>` |
-| `db_type` incompatible (INTEGER↔TEXT) | REFUSE — fix: author writes explicit migration |
-| `pk` change | REFUSE — PK change is table-rebuild territory |
+| `db_type` incompatible (INTEGER↔TEXT) | USING — emitter writes the cast; PG refuses apply if any row fails the cast |
+| `pk` change | REFUSE — PK change is table-rebuild territory; explicit drop+recreate |
 | `unique` add / drop | DROP+ADD — `ADD CONSTRAINT UNIQUE` / `DROP CONSTRAINT` |
-| `storage_index` add / drop | DROP+ADD — as an implicit non-unique index |
-| `carrier` change | REFUSE — changing proto wire type is drop+add + new field number |
-| `element_carrier` / `element_is_message` | REFUSE — collection reshape refused (lossy) |
-| `enum_names` add value (proto enum appended) | SAFE — `ALTER TYPE <enum> ADD VALUE 'new'` (PG 12+) |
+| `storage_index` add / drop | DROP+ADD — implicit non-unique index |
+| `carrier` change | REFUSE — proto wire type change = new field number; diag hints author |
+| `element_carrier` / `element_is_message` | REFUSE — collection reshape |
+| `enum_names` add value (proto enum appended) | DIRECT — `ALTER TYPE <enum> ADD VALUE 'new'` (PG 12+) |
 | `enum_names` remove value | REFUSE — PG can't drop enum values; fix: drop+recreate type |
 | `enum_numbers` change mapping | REFUSE — data-meaning change |
-| `generated_expr` add | DROP+ADD — can't add GENERATED to an existing column in PG; drop and re-add |
+| `generated_expr` add | DROP+ADD — can't add GENERATED to an existing column in PG |
 | `generated_expr` change | DROP+ADD |
-| `generated_expr` remove | SAFE — `ALTER COLUMN DROP EXPRESSION` (PG 13+) |
+| `generated_expr` remove | DIRECT — `ALTER COLUMN DROP EXPRESSION` (PG 13+) |
 | `checks` any change | DROP+ADD the specific CHECK constraint |
 | `allowed_extensions` change | DROP+ADD the derived regex CHECK |
 | `pg.custom_type` change | REFUSE — custom_type is author-owned |
@@ -308,9 +316,10 @@ Grouped; grand-tour fixture at the bottom combines many axes.
   `nullable_loosen`, `nullable_tighten`, `default_add`,
   `default_change`, `default_drop`, `max_len_widen`,
   `max_len_narrow`, `numeric_precision_widen`, `db_type_compat`
-  (TEXT→CITEXT), `db_type_refuse` (INT→TEXT), `comment_change`,
-  `enum_add_value`, `enum_remove_value_refuse`,
-  `generated_expr_add`, `generated_expr_remove`.
+  (TEXT→CITEXT), `db_type_cast` (INT→TEXT via USING),
+  `comment_change`, `enum_add_value`, `enum_remove_value_refuse`,
+  `carrier_change_refuse`, `generated_expr_add`,
+  `generated_expr_remove`.
 - Index axis: `add_index`, `drop_index`, `replace_index_method`
   (BTREE → GIN), `replace_index_add_include`,
   `add_raw_index`, `replace_raw_index_body`.
@@ -444,9 +453,7 @@ message AddIndex / DropIndex / ReplaceIndex / AddForeignKey / …
 
 message WcMigrationsCreate {
   // Emitted in the very first migration for a (domain, connection).
-  // Carries namespace placement so emitter qualifies the CREATE.
-  w17.compiler.ir.NamespaceMode namespace_mode = 1;
-  string namespace = 2;
+  // Table lives in the connection's default schema — no qualifier.
 }
 
 message WcMigrationsInsert {
@@ -455,10 +462,8 @@ message WcMigrationsInsert {
   // content_sha256 = sha256 of the up.sql body (computed AFTER the
   // body is otherwise finalised, and appended to the body as the
   // last statement — so the hash covers everything before it).
-  w17.compiler.ir.NamespaceMode namespace_mode = 1;
-  string namespace = 2;
-  string timestamp = 3;        // e.g. "20260423T143015Z"
-  bytes  content_sha256 = 4;
+  string timestamp = 1;        // e.g. "20260423T143015Z"
+  bytes  content_sha256 = 2;
 }
 ```
 
@@ -666,12 +671,19 @@ orchestration is M3.
 
 ### D27 — Applied-state tracking via `wc_migrations` table (added 2026-04-23)
 
-**Decision.** Every target DB carries a bookkeeping table named
-`wc_migrations` that records which migrations have been applied. The
-schema compiler emits the `CREATE TABLE` in the very first migration
-for a (domain, connection) and an `INSERT` row at the tail of every
-subsequent migration's `up.sql`. Down-migrations prepend a matching
-`DELETE FROM wc_migrations` so rollback is symmetric.
+**Decision.** Every target DB carries exactly one bookkeeping table
+named `wc_migrations` that records which migrations have been applied.
+One domain = one DB (primary connection); secondary connections in a
+domain (e.g. side SQLite for configs) are separate DB instances with
+their own `wc_migrations`. Either way, on any given DB instance the
+table is unique — no domain scoping needed in the name or schema
+because the DB itself is domain-scoped by D26's
+"(dialect, version) unique per domain" rule.
+
+The schema compiler emits the `CREATE TABLE` in the very first
+migration for a (domain, connection) and an `INSERT` row at the tail
+of every subsequent migration's `up.sql`. Down-migrations prepend a
+matching `DELETE FROM wc_migrations` so rollback is symmetric.
 
 ```sql
 CREATE TABLE wc_migrations (
@@ -681,13 +693,10 @@ CREATE TABLE wc_migrations (
 );
 ```
 
-Placement: qualified by the module's namespace (D19):
-
-- SCHEMA mode → `<namespace>.wc_migrations`.
-- PREFIX mode → `<namespace>_wc_migrations` (shared prefix bakes in).
-- NONE mode → bare `wc_migrations` (public schema on PG). If two
-  NONE-mode modules target the same DB (M3 multi-connection scenario),
-  they collide and wc emits a diagnostic at IR build time.
+Placement: connection's default schema (PG `public`). One table per
+DB instance. Multi-module domains share the one table at the domain
+level — module namespaces (D19, SCHEMA / PREFIX) are user-schema
+scoping for the author's tables, not for wc bookkeeping.
 
 **Rationale.**
 
@@ -766,13 +775,14 @@ unblock.
    introspect(empty)` — every step green.
 4. Same (prev, curr) input produces byte-identical diff SQL on
    re-run (AC #4 of iter-1 extended).
-5. Lossy transforms (column carrier change, PK change, enum
-   value removal, incompatible `db_type`, `pg.custom_type` change)
-   surface a `diag.Error` with `file:line:col` + `why:` + `fix:`.
-   Fixture `…_refuse` per refused case. No silent wrong SQL.
-6. Narrow-gated changes (max_len narrow, precision narrow) emit
-   SQL with a prominent `-- wc: narrowing change — review USING
-   cast for data loss` comment above the statement.
+5. REFUSE cases (column carrier change, PK change, enum value
+   removal, `pg.custom_type` change) surface a `diag.Error` with
+   `file:line:col` + `why:` + `fix:`. Fixture `…_refuse` per
+   refused case. No silent wrong SQL.
+6. Narrow / incompatible-cast changes emit plain SQL; PG is the
+   apply-time gate (refuses ALTER if live data doesn't fit).
+   Compiler adds no warning comments; data-survival validation is
+   the deploy client's job (M4+).
 7. `wc_migrations` table is created in the initial migration and
    an INSERT row lands at the tail of every `up.sql`. Fixture
    `wc_migrations_hash_detects_edit` asserts that hand-edited SQL
@@ -783,34 +793,27 @@ unblock.
    M1 shouldn't regress it; realistically moves up since every Op
    gets unit coverage on top of fixtures).
 
-## Open questions (resolve before M1 coding)
+## Open questions
 
-Most of the prior open questions are closed by the rescoping:
-nothing is parked to a later M, so the "M2-deferred diagnostics"
-question disappears; `NoOpTable` is dropped entirely; `--no-
-applied-state` is a minor escape hatch documented under D27.
-Remaining:
+All prior iter-2 M1 open questions resolved as of 2026-04-23:
 
-1. **Empty-plan emit behaviour (resolved: SKIP).** `prev == curr`
-   emits nothing to `out/` — not empty files, not a placeholder.
-   Rationale: D6 framing ("migration is a unit of work"); platform
-   can add a sentinel later if it needs one. Fixture `alter_noop/`
-   asserts zero files written. **Confirmed with user 2026-04-23.**
-2. **Namespace placement for multi-module domains.** Open. Default
-   plan: `wc_migrations` lives in each module's own namespace; if
-   two modules share a namespace they share the table (rows are
-   timestamp-unique regardless). If two modules target the same
-   DB with different namespaces, each owns its own `wc_migrations`
-   in its own namespace — operator can inspect both via `psql`.
-   Resolve during M1 coding if a fixture surfaces an ambiguity.
-3. **Narrow-gated change UX — warning comment vs interactive
-   confirm.** For `max_len` narrow and `precision` narrow, wc
-   emits SQL with a comment block warning of potential data
-   truncation but doesn't refuse. Alternative: refuse by default,
-   with a `--allow-narrowing` CLI flag. Lean toward "emit + comment"
-   — the author explicitly changed the schema, surfacing a refuse
-   would be pedantic. Worth one user confirmation before wiring;
-   reversible either way.
+1. **Empty-plan emit behaviour — resolved: SKIP.** `prev == curr`
+   emits nothing to `out/` (no files, no placeholder). Fixture
+   `alter_noop/` asserts zero files written.
+2. **`wc_migrations` placement — resolved: one per DB, domain-
+   scoped by design.** D26 pins "one domain = one DB"; therefore
+   on any DB instance there's exactly one `wc_migrations` in the
+   connection's default schema. No module-namespace scoping, no
+   domain column, no name suffix.
+3. **Narrow / incompatible-cast UX — resolved: compiler emits plain
+   SQL, PG gates at apply time, deploy client + platform UI handle
+   data-survival review.** No warning comments, no `--allow-*`
+   flags. Compiler stays deterministic; data validation is the
+   platform's responsibility (confirmed with user's earlier
+   architectural decision — pre-apply checks on real data live
+   in the deploy client / UI, not in the compiler).
+
+M1 coding is unblocked.
 
 ## Where this document stops
 
