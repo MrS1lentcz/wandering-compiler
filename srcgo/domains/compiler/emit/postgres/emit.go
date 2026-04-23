@@ -76,6 +76,10 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitDropRawCheck(v.DropRawCheck)
 	case *planpb.Op_ReplaceRawCheck:
 		return e.emitReplaceRawCheck(v.ReplaceRawCheck)
+	case *planpb.Op_WcMigrationsCreate:
+		return e.emitWcMigrationsCreate(v.WcMigrationsCreate)
+	case *planpb.Op_WcMigrationsInsert:
+		return e.emitWcMigrationsInsert(v.WcMigrationsInsert)
 	default:
 		return "", "", fmt.Errorf("postgres: unsupported op variant %T (M1 implementation in progress; see iteration-2.md)", op.GetVariant())
 	}
