@@ -67,16 +67,21 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 		return both[i].Curr.GetName() < both[j].Curr.GetName()
 	})
 
-	ops := make([]*planpb.Op, 0, len(dropOrdered)+len(addOrdered)+len(both)*2)
+	ops := make([]*planpb.Op, 0, len(dropOrdered)+len(addOrdered)+len(both)*4)
 	for _, t := range dropOrdered {
 		ops = append(ops, &planpb.Op{
 			Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: t}},
 		})
 	}
+	// Table-axis renames first on `both` tables — subsequent
+	// column-axis ops reference the post-rename qualifier.
+	for _, pair := range both {
+		ops = append(ops, tableRenames(pair)...)
+	}
 	// Column drops first across all carried-over tables, then adds.
 	// Inside one table we drop before add per the M1 ordering rule
-	// (renumbered replacements work cleanly; rename detection in a
-	// later commit will collapse matching pairs).
+	// (renumbered replacements work cleanly; rename detection
+	// collapses matching pairs).
 	for _, pair := range both {
 		ops = append(ops, columnDrops(pair)...)
 	}
@@ -95,9 +100,13 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	for _, pair := range both {
 		ops = append(ops, columnRenames(pair)...)
 	}
-	// Table-fact (rename / namespace / comment) and column-fact
-	// (AlterColumn) + index / FK / CHECK diffs land in subsequent
-	// commits.
+	// Table comments after all structural changes — COMMENT ON
+	// references the post-rename qualifier and post-add columns.
+	for _, pair := range both {
+		ops = append(ops, tableCommentChanges(pair)...)
+	}
+	// Namespace move + AlterColumn + index / FK / CHECK diffs land in
+	// subsequent commits.
 
 	return &planpb.MigrationPlan{Ops: ops}, nil
 }
@@ -196,6 +205,36 @@ func tableCtxOf(t *irpb.Table) *planpb.TableCtx {
 		NamespaceMode:  t.GetNamespaceMode(),
 		Namespace:      t.GetNamespace(),
 	}
+}
+
+// tableRenames returns RenameTable ops for `both` pairs whose SQL name
+// changed while the FQN stayed (D24): a rename of (w17.db.table).name
+// or, in PREFIX mode, a change to the module prefix that re-derives
+// the name. Emitted before any column-axis op on the same table so
+// subsequent ops reference the new name.
+func tableRenames(pair TablePair) []*planpb.Op {
+	if pair.Prev.GetName() == pair.Curr.GetName() {
+		return nil
+	}
+	return []*planpb.Op{{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{
+		Ctx:      tableCtxOf(pair.Curr),
+		FromName: pair.Prev.GetName(),
+		ToName:   pair.Curr.GetName(),
+	}}}}
+}
+
+// tableCommentChanges returns SetTableComment ops for `both` pairs
+// whose resolved comment changed (D22). Empty `to` = drop comment via
+// COMMENT ON TABLE … IS NULL.
+func tableCommentChanges(pair TablePair) []*planpb.Op {
+	if pair.Prev.GetComment() == pair.Curr.GetComment() {
+		return nil
+	}
+	return []*planpb.Op{{Variant: &planpb.Op_SetTableComment{SetTableComment: &planpb.SetTableComment{
+		Ctx:  tableCtxOf(pair.Curr),
+		From: pair.Prev.GetComment(),
+		To:   pair.Curr.GetComment(),
+	}}}}
 }
 
 // tablesOf returns the schema's tables, or nil for a nil schema. Single

@@ -270,6 +270,66 @@ func TestDiffColumnDropBeforeAddOrder(t *testing.T) {
 	}
 }
 
+// TestDiffRenameTable — D24 in action: FQN stable, SQL name changed
+// → RenameTable op (single ALTER ... RENAME TO, data-preserving).
+// No drop+add false positive.
+func TestDiffRenameTable(t *testing.T) {
+	mk := func(name string) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name:       name,
+			MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk("users"), mk("accounts"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1 (rename, not drop+add)", len(ops))
+	}
+	rt := ops[0].GetRenameTable()
+	if rt == nil {
+		t.Fatalf("ops[0] = %T, want *Op_RenameTable", ops[0].GetVariant())
+	}
+	if rt.GetFromName() != "users" || rt.GetToName() != "accounts" {
+		t.Errorf("rename = %q→%q, want users→accounts", rt.GetFromName(), rt.GetToName())
+	}
+}
+
+// TestDiffSetTableComment — comment add / change / drop produces a
+// SetTableComment op carrying both from + to (so down restores prev).
+func TestDiffSetTableComment(t *testing.T) {
+	mk := func(comment string) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User", Comment: comment,
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk(""), mk("user accounts"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	stc := ops[0].GetSetTableComment()
+	if stc == nil {
+		t.Fatalf("ops[0] = %T, want *Op_SetTableComment", ops[0].GetVariant())
+	}
+	if stc.GetFrom() != "" || stc.GetTo() != "user accounts" {
+		t.Errorf("comment from→to = %q→%q, want \"\"→\"user accounts\"", stc.GetFrom(), stc.GetTo())
+	}
+}
+
 // TestDiffRenameColumn — D10 in action: same field number, different
 // name → RenameColumn op. No DropColumn + AddColumn false positive.
 func TestDiffRenameColumn(t *testing.T) {

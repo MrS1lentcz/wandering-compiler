@@ -63,6 +63,58 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 	return upB.String(), downB.String(), nil
 }
 
+// emitRenameTable renders ALTER TABLE ... RENAME TO <new>. Symmetric:
+// down swaps. PG metadata-only operation, data-preserving. Schema
+// qualification: the old name is qualified with the same namespace
+// the new name lives in (RENAME doesn't move schemas — that's
+// SetTableNamespace's job).
+func (e Emitter) emitRenameTable(rt *planpb.RenameTable) (string, string, error) {
+	from, to := rt.GetFromName(), rt.GetToName()
+	if from == "" || to == "" {
+		return "", "", fmt.Errorf("postgres: RenameTable missing from/to name (from=%q to=%q)", from, to)
+	}
+	if from == to {
+		return "", "", fmt.Errorf("postgres: RenameTable no-op (from=%q to=%q)", from, to)
+	}
+	ctx := rt.GetCtx()
+	tblFrom := tableShellFromCtx(&planpb.TableCtx{
+		TableName:     from,
+		NamespaceMode: ctx.GetNamespaceMode(),
+		Namespace:     ctx.GetNamespace(),
+	}, nil)
+	tblTo := tableShellFromCtx(&planpb.TableCtx{
+		TableName:     to,
+		NamespaceMode: ctx.GetNamespaceMode(),
+		Namespace:     ctx.GetNamespace(),
+	}, nil)
+	qualFrom := qualifiedTable(tblFrom)
+	qualTo := qualifiedTable(tblTo)
+	up := fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualFrom, to)
+	down := fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", qualTo, from)
+	return up, down, nil
+}
+
+// emitSetTableComment renders COMMENT ON TABLE ... IS '<text>';.
+// Empty `to` drops the comment via `IS NULL`. Symmetric: down
+// restores the prev value (also via `IS NULL` if prev was empty).
+func (e Emitter) emitSetTableComment(stc *planpb.SetTableComment) (string, string, error) {
+	tbl := tableShellFromCtx(stc.GetCtx(), nil)
+	qual := qualifiedTable(tbl)
+	up := fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qual, commentLiteral(stc.GetTo()))
+	down := fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qual, commentLiteral(stc.GetFrom()))
+	return up, down, nil
+}
+
+// commentLiteral renders a comment value: empty = NULL (PG's "no
+// comment" sentinel), otherwise SQL string literal with quotes
+// doubled by sqlStringLiteral.
+func commentLiteral(v string) string {
+	if v == "" {
+		return "NULL"
+	}
+	return sqlStringLiteral(v)
+}
+
 // emitRenameColumn renders ALTER TABLE ... RENAME COLUMN <from> TO
 // <to>. Symmetric: down swaps. PG ALTER ... RENAME COLUMN is a
 // metadata-only operation (no rewrite), data-preserving.

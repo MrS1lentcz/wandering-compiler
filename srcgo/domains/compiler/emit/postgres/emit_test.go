@@ -286,6 +286,49 @@ func TestEmitAddColumnEnum(t *testing.T) {
 	}
 }
 
+// TestEmitRenameTable — symmetric ALTER ... RENAME TO with schema
+// qualification on both sides.
+func TestEmitRenameTable(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{
+		Ctx: &planpb.TableCtx{
+			TableName: "accounts", MessageFqn: "shop.User",
+			NamespaceMode: irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+			Namespace:     "auth",
+		},
+		FromName: "users", ToName: "accounts",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE auth.users RENAME TO accounts;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE auth.accounts RENAME TO users;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitSetTableComment — empty `to` drops the comment via IS NULL;
+// a non-empty `to` sets via IS '<text>'. Down inverts symmetrically.
+func TestEmitSetTableComment(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableComment{SetTableComment: &planpb.SetTableComment{
+		Ctx:  &planpb.TableCtx{TableName: "users"},
+		From: "",
+		To:   "user accounts",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "COMMENT ON TABLE users IS 'user accounts';" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "COMMENT ON TABLE users IS NULL;" {
+		t.Errorf("down = %q (want NULL for empty prev)", down)
+	}
+}
+
 // TestEmitRenameColumn — symmetric ALTER ... RENAME COLUMN. Down
 // swaps from/to.
 func TestEmitRenameColumn(t *testing.T) {
