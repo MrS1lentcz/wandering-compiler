@@ -549,3 +549,114 @@ unchanged from the earlier handoff: **alter-diff**.
   iter-1 (Decision + Invariants + Escape Hatches + Rationale).
 - Commit hygiene: one feature = one commit. Push after each.
 - `make test-apply` before every ship — 16 fixtures on PG 18.
+
+---
+
+## 2026-04-24 — D28 classifier + D30 engine isolation shipped
+
+**Status: Phase 2 + Phase 4 complete.** 10 commits in one session,
+last `dfc2253`. The matrix-driven classifier + engine envelope +
+adapter stack runs end-to-end; `wc generate` uses `engine.Plan` →
+`FilesystemSink` with `--decide` flag support + auto-emit of
+check.sql + CustomSQL splicing. See
+[`iteration-2.md`](iteration-2.md) D28 / D29 / D30 sections for
+the decisions + matrix.
+
+### Commit trail (in order)
+
+```
+e9a4d74  docs: D30 engine isolation decision record
+c314a79  proto: Plan envelope (Plan, Migration, ReviewFinding,
+         Resolution, NamedSQL, Manifest, ColumnRef,
+         FindingContext, Strategy/Severity enums)
+fb54578  classifier: matrix index + 43 landmark tests
+59a8a85  plan.Diff: DiffResult with classifier-driven Findings
+         (cls-nil fallback preserves pre-D30 error path)
+98debb1  engine: Sink + ResolutionSource interfaces +
+         Memory impls + 9 tests
+8ca16db  engine: FilesystemSink + CLI Decisions parser
+         (18 tests covering layout + flag-syntax)
+0a1c6b7  engine.Plan() top-level + cmd/cli refactor to call
+         engine.Plan via FilesystemSink; COMPILER_CLASSIFICATION_DIR
+         env var; 8 integration tests
+cbb6a9d  classifier: exhaustive YAML coverage tests
+         (253 sub-tests iterate every cell)
+5edb68c  engine: --decide flag wiring + check.sql emit pipeline
+         (per-FactChange classifier dispatch; NEEDS_CONFIRM cells
+         emit NamedSQL in Migration.Checks[])
+dfc2253  engine: CustomSQL splicing on CUSTOM_MIGRATION
+         resolutions (attribution markers, rollback note)
+```
+
+### Where the engine lives
+
+- `srcgo/domains/compiler/classifier/` — YAML loader + axis lookup
+  + Fold strictness. Load once per process via `classifier.Load(dir)`.
+- `srcgo/domains/compiler/plan/` — `plan.Diff(prev, curr, cls)`
+  returns `*DiffResult{Plan, Findings}`.
+- `srcgo/domains/compiler/engine/` — `Plan()` top-level, Sink +
+  ResolutionSource interfaces, checks.go (FactChange → NamedSQL).
+- `srcgo/domains/compiler/engine/memory/` — Memory impls (tests).
+- `srcgo/domains/compiler/engine/filesystem/` — FilesystemSink.
+- `srcgo/domains/compiler/engine/cli/` — Decisions parser for
+  `--decide` flag.
+
+### Classifier source of truth
+
+`docs/classification/*.yaml` — four files:
+- `strategies.yaml` — 5 strategies + ranks + DDL templates +
+  governing-rule citation.
+- `carrier.yaml` — 110 cells (D28.2).
+- `dbtype.yaml` — 50 cells (D28.3).
+- `constraint.yaml` — 56 cells (D28.1 column-level + table-level).
+
+Reminder: **YAML wins on conflict** with the markdown tables in
+`iteration-2.md`. Markdown is a rendering; YAML is authoritative
+(per D28 banner). Edits go to YAML first.
+
+### Governing rule pinned 2026-04-23
+
+> "Types must be compatible; no silent coercion. If source data
+> isn't already in the target's canonical form, author writes the
+> conversion via DQL/CUSTOM_MIGRATION — compiler never guesses
+> unit, encoding, or semantic intent."
+
+Strict form check for `STRING→BOOL` ('0'/'1' only), `INT→BOOL`
+(0/1 only), ISO-8601 for timestamp/duration. Unit-ambiguous casts
+(TIMESTAMP↔INT, BYTES↔scalar) default to CUSTOM_MIGRATION.
+`DROP_AND_CREATE` is user-opt-in only (2 exceptions in
+`constraint.yaml` A7 generated_expr where PG semantics mandate it).
+
+### Where to resume
+
+**M4 is the natural next block.** Emitter-driven capability
+tracking populates `Migration.Manifest.RequiredExtensions` +
+`Capabilities`. Today manifest only carries
+`AppliedResolutions` (audit trail). See `iteration-2.md`
+Milestones for M4 scope; capability catalog from D16 is ready
+to wire.
+
+Other live threads:
+- `wc_migrations` extensions (hash verify utility, multi-
+  connection rollback).
+- Makefile standard targets (pre-poc gate).
+- Core-fn 100% coverage (Phase B iter-1 close-out).
+
+**Parked (iter-3+):**
+- DQL (Doctrine-inspired ORM).
+- Local schema validator.
+
+### Non-negotiable reminders
+
+- YAML source of truth for D28 matrix. Markdown tables drift;
+  YAML never.
+- `engine.Plan` is pure per D30. No file I/O inside. Storage is
+  Sink's concern.
+- Findings are deterministic (SHA-256 of table FQN + axis + prev
+  wire + curr wire). Resolutions survive re-runs idempotently.
+- `make test-apply` before every ship — PG 18 apply-roundtrip
+  now covers iter-1 + alter fixtures.
+- CLI uses `COMPILER_CLASSIFICATION_DIR` env var to find YAMLs;
+  defaults to `./docs/classification` (repo-root relative).
+  Makefile test-apply sets the var; production users can
+  override if they ship YAMLs elsewhere.
