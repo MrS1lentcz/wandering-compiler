@@ -49,10 +49,139 @@ func TestDiffNilSchemas(t *testing.T) {
 	}
 }
 
-func TestDiffNonNilPrevRejected(t *testing.T) {
-	_, err := plan.Diff(&irpb.Schema{}, &irpb.Schema{})
-	if err == nil {
-		t.Fatal("Diff(non-nil, …) succeeded; expected iter-1 rejection")
+// TestDiffPrevEqualsCurrEmptyPlan — when prev and curr are structurally
+// equivalent (same FQNs, same table content), the differ emits no Ops.
+// AC #1 of iter-2 M1 (`alter_noop` fixture's basis).
+func TestDiffPrevEqualsCurrEmptyPlan(t *testing.T) {
+	got, err := plan.Diff(schemaTwoTables(), schemaTwoTables())
+	if err != nil {
+		t.Fatalf("Diff(equal, equal): %v", err)
+	}
+	if len(got.GetOps()) != 0 {
+		t.Errorf("len(ops) = %d, want 0 on equal prev/curr", len(got.GetOps()))
+	}
+}
+
+// TestDiffDropTableOnly — table FQN present in prev but not in curr
+// becomes a DropTable Op. Reverse FK topological order: a referencer
+// drops before its referencee.
+func TestDiffDropTableOnly(t *testing.T) {
+	prev := schemaTwoTables()                       // shop.Order, shop.Customer
+	curr := &irpb.Schema{Tables: prev.GetTables()[:1]} // keeps shop.Order only
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	dt := ops[0].GetDropTable()
+	if dt == nil {
+		t.Fatalf("ops[0] variant = %T, want *planpb.Op_DropTable", ops[0].GetVariant())
+	}
+	if n := dt.GetTable().GetName(); n != "customers" {
+		t.Errorf("dropped table = %q, want customers", n)
+	}
+}
+
+// TestDiffDropOrderReverseTopo — when dropping multiple tables related
+// by FK, the referencer drops first so the referencee's drop doesn't
+// hit "still referenced by …". Inverse of TestDiffTopoOrderReferencedBeforeReferencer.
+func TestDiffDropOrderReverseTopo(t *testing.T) {
+	prev := &irpb.Schema{
+		Tables: []*irpb.Table{
+			{
+				Name:       "product_tags",
+				MessageFqn: "shop.ProductTag",
+				ForeignKeys: []*irpb.ForeignKey{
+					{Column: "product_id", TargetTable: "products", TargetColumn: "id"},
+					{Column: "tag_id", TargetTable: "tags", TargetColumn: "id"},
+				},
+			},
+			{Name: "products", MessageFqn: "shop.Product"},
+			{Name: "tags", MessageFqn: "shop.Tag"},
+		},
+	}
+	curr := &irpb.Schema{} // drop everything
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 3 {
+		t.Fatalf("len(ops) = %d, want 3", len(ops))
+	}
+	order := []string{
+		ops[0].GetDropTable().GetTable().GetName(),
+		ops[1].GetDropTable().GetTable().GetName(),
+		ops[2].GetDropTable().GetTable().GetName(),
+	}
+	// Forward topo: [products, tags, product_tags] (referenced-first;
+	// products/tags lexical tiebreak between independents). Reversed
+	// for drops: product_tags first (it references products + tags),
+	// then tags, then products. The order of products vs tags here
+	// is the reverse of the forward lexical tiebreak — both orders
+	// are FK-correct, and reverse-of-forward is what determinism
+	// gives us.
+	want := []string{"product_tags", "tags", "products"}
+	for i, w := range want {
+		if order[i] != w {
+			t.Errorf("ops[%d] = %q, want %q (full order got=%v want=%v)", i, order[i], w, order, want)
+		}
+	}
+}
+
+// TestDiffDropAndAddCombined — prev has A; curr has B. Plan must drop
+// A first, then add B. (B has no FQN match in prev, A has no FQN match
+// in curr.)
+func TestDiffDropAndAddCombined(t *testing.T) {
+	prev := &irpb.Schema{
+		Tables: []*irpb.Table{{Name: "old_table", MessageFqn: "shop.Old"}},
+	}
+	curr := &irpb.Schema{
+		Tables: []*irpb.Table{{Name: "new_table", MessageFqn: "shop.New"}},
+	}
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 2 {
+		t.Fatalf("len(ops) = %d, want 2", len(ops))
+	}
+	if dt := ops[0].GetDropTable(); dt == nil || dt.GetTable().GetName() != "old_table" {
+		t.Errorf("ops[0] = %v, want DropTable(old_table)", ops[0].GetVariant())
+	}
+	if at := ops[1].GetAddTable(); at == nil || at.GetTable().GetName() != "new_table" {
+		t.Errorf("ops[1] = %v, want AddTable(new_table)", ops[1].GetVariant())
+	}
+}
+
+// TestDiffMessageRenameIsDropPlusAdd — D24: changing the proto message
+// name (= changing FQN) is semantically a destroy + create, not an
+// in-place rename. Even if the SQL `name` is identical, FQN difference
+// drives drop+add.
+func TestDiffMessageRenameIsDropPlusAdd(t *testing.T) {
+	prev := &irpb.Schema{
+		Tables: []*irpb.Table{{Name: "users", MessageFqn: "shop.OldUser"}},
+	}
+	curr := &irpb.Schema{
+		Tables: []*irpb.Table{{Name: "users", MessageFqn: "shop.NewUser"}},
+	}
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 2 {
+		t.Fatalf("len(ops) = %d, want 2", len(ops))
+	}
+	if ops[0].GetDropTable() == nil {
+		t.Errorf("ops[0] = %T, want DropTable", ops[0].GetVariant())
+	}
+	if ops[1].GetAddTable() == nil {
+		t.Errorf("ops[1] = %T, want AddTable", ops[1].GetVariant())
 	}
 }
 

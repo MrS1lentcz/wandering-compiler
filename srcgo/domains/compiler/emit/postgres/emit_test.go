@@ -140,6 +140,72 @@ func TestUnknownOpVariantErrors(t *testing.T) {
 	}
 }
 
+// TestEmitDropTableMirrorsAddTable — DropTable's up SQL is the
+// inverse of AddTable's up: DROP INDEX + DROP TABLE + DROP TYPE.
+// Down side rebuilds the table verbatim (= AddTable.up). Tests
+// against a hand-built IR with one ENUM column and one secondary
+// index so both the table-down and the index/enum cleanup branches
+// fire.
+func TestEmitDropTableMirrorsAddTable(t *testing.T) {
+	table := &irpb.Table{
+		Name:       "products",
+		MessageFqn: "shop.Product",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+			{Name: "status", ProtoName: "status",
+				Carrier:    irpb.Carrier_CARRIER_STRING,
+				Type:       irpb.SemType_SEM_ENUM,
+				EnumFqn:    "shop.ProductStatus",
+				EnumNames:  []string{"DRAFT", "PUBLISHED"},
+				EnumNumbers: []int64{1, 2},
+			},
+		},
+		PrimaryKey: []string{"id"},
+		Indexes: []*irpb.Index{
+			{Fields: []*irpb.IndexField{{Name: "status"}}, Name: "products_status_idx"},
+		},
+	}
+
+	addOp := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
+	dropOp := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: table}}}
+
+	addUp, _, err := postgres.Emitter{}.EmitOp(addOp)
+	if err != nil {
+		t.Fatalf("AddTable: %v", err)
+	}
+	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp)
+	if err != nil {
+		t.Fatalf("DropTable: %v", err)
+	}
+
+	// up.sql for DropTable must drop the index, the table, and the enum
+	// type. Order: index → table → type (table down inversion).
+	iIdx := strings.Index(dropUp, "DROP INDEX IF EXISTS products_status_idx;")
+	iTbl := strings.Index(dropUp, "DROP TABLE IF EXISTS products;")
+	iTyp := strings.Index(dropUp, "DROP TYPE IF EXISTS products_status;")
+	if iIdx < 0 || iTbl < 0 || iTyp < 0 {
+		t.Fatalf("missing drops in up:\n%s", dropUp)
+	}
+	if !(iIdx < iTbl && iTbl < iTyp) {
+		t.Errorf("drop order wrong (idx<table<type expected):\n%s", dropUp)
+	}
+
+	// down.sql for DropTable rebuilds the table — should equal AddTable's up.
+	if dropDown != addUp {
+		t.Errorf("DropTable.down != AddTable.up:\n--- down ---\n%s\n--- add up ---\n%s", dropDown, addUp)
+	}
+}
+
+// TestDropTableEmptyNameErrors — defensive: empty table name on the
+// op surface bails out with a clear error rather than emitting bogus
+// SQL.
+func TestDropTableEmptyNameErrors(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: &irpb.Table{}}}}
+	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty table name accepted on DropTable, want error")
+	}
+}
+
 // TestAddTableEmptyNameErrors — emitAddTable refuses a table with no
 // name. Defensive branch against an ir.Build invariant violation.
 func TestAddTableEmptyNameErrors(t *testing.T) {

@@ -32,9 +32,40 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 	switch v := op.GetVariant().(type) {
 	case *planpb.Op_AddTable:
 		return e.emitAddTable(v.AddTable.GetTable())
+	case *planpb.Op_DropTable:
+		return e.emitDropTable(v.DropTable.GetTable())
 	default:
-		return "", "", fmt.Errorf("postgres: unsupported op variant %T (iteration-1 implements AddTable only)", op.GetVariant())
+		return "", "", fmt.Errorf("postgres: unsupported op variant %T (M1 implementation in progress; see iteration-2.md)", op.GetVariant())
 	}
+}
+
+// emitDropTable is the symmetric inverse of emitAddTable: up renders
+// DROP INDEX (reverse) + DROP TABLE + DROP TYPE (reverse), down
+// re-creates the table from the carried prev-side ir.Table the same
+// way emitAddTable would have.
+func (e Emitter) emitDropTable(t *irpb.Table) (up string, down string, err error) {
+	if t.GetName() == "" {
+		return "", "", fmt.Errorf("postgres: DropTable with empty name (builder invariant violated)")
+	}
+	addUp, _, err := e.emitAddTable(t)
+	if err != nil {
+		return "", "", err
+	}
+	colByProto := map[string]*irpb.Column{}
+	for _, c := range t.GetColumns() {
+		colByProto[c.GetProtoName()] = c
+	}
+	qualTable := qualifiedTable(t)
+	enumTypes := collectPgEnumTypes(t)
+	_, idxNames, err := renderIndexes(t, colByProto)
+	if err != nil {
+		return "", "", err
+	}
+	for _, ri := range t.GetRawIndexes() {
+		idxNames = append(idxNames, ri.GetName())
+	}
+	dropSQL := renderTableDown(t, qualTable, idxNames, enumTypes)
+	return dropSQL, addUp, nil
 }
 
 // emitAddTable renders CREATE TABLE + separate CREATE INDEX statements
