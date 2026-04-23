@@ -106,13 +106,13 @@ message Table {
   // comment; otherwise empty (no COMMENT statement emitted).
   string comment = 12;
 
-  // Per-table connection override (D26). Empty when the table lives
-  // on its module's default connection; set when
-  // `(w17.db.table).connection` names a secondary connection
-  // declared in the same domain. IR carries the connection NAME
-  // here; the orchestrator (M3) resolves name → Connection via the
-  // domain-level connection registry.
-  string connection_name = 13;
+  // Per-table effective connection (D26). Every Table carries the
+  // full Connection it targets — either the module's declared
+  // connection (inherited) or the per-table `(w17.db.table).connection`
+  // override resolved against the domain's connection registry.
+  // Empty when no module in the domain declared a connection (the
+  // iter-1 default path).
+  Connection connection = 13;
 }
 
 message RawCheck {

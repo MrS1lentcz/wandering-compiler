@@ -67,7 +67,7 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 			allErrs = append(allErrs, b.errs...)
 			continue
 		}
-		b.fileConnectionName = fileSchema.GetConnection().GetName()
+		b.fileConnection = fileSchema.GetConnection()
 		b.namespaceMode = fileSchema.GetNamespaceMode()
 		b.namespace = fileSchema.GetNamespace()
 		if b.namespaceMode == irpb.NamespaceMode_NAMESPACE_MODE_PREFIX {
@@ -296,12 +296,12 @@ type builder struct {
 	namespaceMode irpb.NamespaceMode
 	namespace     string
 	prefix        string
-	// fileConnectionName — the module-level connection name resolved
-	// from (w17.db.module).connection. Empty when the module didn't
-	// declare a connection (table inherits the project default).
-	// Per-table override via (w17.db.table).connection is applied in
-	// buildTable after this is set.
-	fileConnectionName string
+	// fileConnection — the module-level connection resolved from
+	// (w17.db.module).connection. Nil when the module didn't declare
+	// one (table inherits the project default). Per-table override
+	// via (w17.db.table).connection is applied in buildTable after
+	// this is set.
+	fileConnection *irpb.Connection
 }
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
@@ -380,6 +380,10 @@ func (b *builder) newTableFrame(msg *loader.LoadedMessage) (*irpb.Table, bool) {
 		// override wins, else proto message's leading comment, else
 		// empty. Emitter emits COMMENT ON TABLE iff non-empty.
 		Comment: resolveComment(msg.Table.GetComment(), msg.Desc),
+		// D26 — per-table effective connection. Module-level for now;
+		// `(w17.db.table).connection` override + cross-module registry
+		// lookup follows. Nil when no module declared a connection.
+		Connection: b.fileConnection,
 	}, true
 }
 
