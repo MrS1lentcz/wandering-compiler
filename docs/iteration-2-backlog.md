@@ -90,6 +90,54 @@ Biggest iter-2 block.
 
 ---
 
+### Multi-connection per domain (DB-per-domain + per-table override)
+
+> **Pinned 2026-04-23 as D26 in `iteration-2.md`. Actual
+> implementation lands as M6.** Design decided, implementation
+> follows once M1–M5 (alter-diff + multi-file) stabilise the
+> differ + loader infrastructure it extends.
+
+**Why.** A single project often needs a main relational DB plus a
+small side store — SQLite for static configs, a KV engine for session
+blobs, a dedicated reporting DB. Today authors hand-roll the wrapper
+over each backend. A schema compiler that already owns proto-first
+types + typed gRPC surfaces can extend that typing benefit to *every*
+backend, relational or not. The compiler keeps the structured-schema
+value proposition even when the DB underneath doesn't offer it.
+
+**Sketch.**
+
+  - `(w17.db.module).connection = { name, dialect, version }`
+    (FileOptions). Absent → project default.
+  - `(w17.db.table).connection = "side_configs"` optional override
+    (must resolve inside the same domain).
+  - `ir.Schema.connection` + `ir.Table.connection` populated at
+    build time; differ runs per connection; emitter dispatches per
+    `(dialect, version)`.
+  - **Output:** `out/<domain>/migrations/<dialect>-<version>/
+    YYYYMMDDTHHMMSSZ.{up,down}.sql` (D6 still applies — gitignored).
+  - **Invariant.** Within a domain, `(dialect, version)` pair must be
+    unique. Two of the same = domain split. Enforces clean boundaries
+    at the IR level.
+
+**DQL angle (parks with the DQL block).**
+
+  - **Cross-connection reads.** Planner splits per-connection,
+    composes in the app layer. Simple nested-loop by default; can
+    grow smarter over time.
+  - **Cross-connection mutations.** Carry an `@non_atomic` flag
+    into generated handler wrappers + admin UI. Not a block — a
+    warning badge. Authors chose the split; compiler makes the
+    consequence visible so nobody assumes atomicity they don't have.
+  - **2PC out of scope.** Saga / outbox is an application pattern,
+    not a compiler feature.
+
+**Preconditions.** M1–M5 (differ infrastructure + multi-file loader).
+MySQL / SQLite dialect emitters when those connections are declared
+(iter-2 backlog "Additional dialects").
+
+---
+
 ### Multi-file schemas + cross-file FK
 
 **Why.** Real projects split schemas across files (one per domain /
