@@ -76,8 +76,11 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 			Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: t}},
 		})
 	}
-	// Table-axis renames first on `both` tables — subsequent
-	// column-axis ops reference the post-rename qualifier.
+	// Table-axis namespace moves + renames first on `both` tables —
+	// subsequent column-axis ops reference the post-move qualifier.
+	for _, pair := range both {
+		ops = append(ops, tableNamespaceMoves(pair)...)
+	}
 	for _, pair := range both {
 		ops = append(ops, tableRenames(pair)...)
 	}
@@ -785,19 +788,47 @@ func rawIndexMap(ris []*irpb.RawIndex) map[string]*irpb.RawIndex {
 }
 
 // tableRenames returns RenameTable ops for `both` pairs whose SQL name
-// changed while the FQN stayed (D24): a rename of (w17.db.table).name
-// or, in PREFIX mode, a change to the module prefix that re-derives
-// the name. Emitted before any column-axis op on the same table so
-// subsequent ops reference the new name.
+// changed while the FQN AND namespace stayed (D24). Pure name change
+// only — namespace moves (which may also imply a baked-prefix name
+// change) flow through tableNamespaceMoves instead so we don't
+// double-emit.
 func tableRenames(pair TablePair) []*planpb.Op {
 	if pair.Prev.GetName() == pair.Curr.GetName() {
 		return nil
+	}
+	if namespaceChanged(pair.Prev, pair.Curr) {
+		return nil // SetTableNamespace handles
 	}
 	return []*planpb.Op{{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{
 		Ctx:      tableCtxOf(pair.Curr),
 		FromName: pair.Prev.GetName(),
 		ToName:   pair.Curr.GetName(),
 	}}}}
+}
+
+// tableNamespaceMoves returns SetTableNamespace ops for `both` pairs
+// whose (NamespaceMode, Namespace) changed. Carries from + to mode +
+// namespace + table-name pair so the emitter can route per the
+// alter-strategies table (SCHEMA↔SCHEMA → SET SCHEMA, PREFIX↔PREFIX
+// → RENAME TO with new-prefixed name, cross-mode → chain).
+func tableNamespaceMoves(pair TablePair) []*planpb.Op {
+	if !namespaceChanged(pair.Prev, pair.Curr) {
+		return nil
+	}
+	return []*planpb.Op{{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		MessageFqn:     pair.Curr.GetMessageFqn(),
+		TableNameFrom:  pair.Prev.GetName(),
+		TableNameTo:    pair.Curr.GetName(),
+		FromMode:       pair.Prev.GetNamespaceMode(),
+		FromNamespace:  pair.Prev.GetNamespace(),
+		ToMode:         pair.Curr.GetNamespaceMode(),
+		ToNamespace:    pair.Curr.GetNamespace(),
+	}}}}
+}
+
+func namespaceChanged(prev, curr *irpb.Table) bool {
+	return prev.GetNamespaceMode() != curr.GetNamespaceMode() ||
+		prev.GetNamespace() != curr.GetNamespace()
 }
 
 // tableCommentChanges returns SetTableComment ops for `both` pairs

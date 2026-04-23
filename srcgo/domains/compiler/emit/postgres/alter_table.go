@@ -94,6 +94,108 @@ func (e Emitter) emitRenameTable(rt *planpb.RenameTable) (string, string, error)
 	return up, down, nil
 }
 
+// emitSetTableNamespace renders the move-table-between-namespaces
+// strategy per the iter-2 alter-strategies table:
+//
+//	SCHEMA ↔ SCHEMA (same name): ALTER TABLE <from_qual> SET SCHEMA <to_ns>
+//	PREFIX ↔ PREFIX:             ALTER TABLE <from_name> RENAME TO <to_name>
+//	NONE → SCHEMA:               ALTER TABLE <from_name> SET SCHEMA <to_ns>
+//	SCHEMA → NONE:               ALTER TABLE <from_qual> SET SCHEMA public
+//	NONE → PREFIX:               RENAME (with prefix-baked new name)
+//	PREFIX → NONE:               RENAME (to bare name)
+//	SCHEMA ↔ PREFIX (cross-mode): chain SET SCHEMA + RENAME
+//
+// Down inverts. PG metadata-only operations, data-preserving in
+// all cases.
+func (e Emitter) emitSetTableNamespace(stn *planpb.SetTableNamespace) (string, string, error) {
+	from, to := stn.GetFromMode(), stn.GetToMode()
+	fromName, toName := stn.GetTableNameFrom(), stn.GetTableNameTo()
+	fromNs, toNs := stn.GetFromNamespace(), stn.GetToNamespace()
+
+	fromQual := qualifyName(from, fromNs, fromName)
+	toQual := qualifyName(to, toNs, toName)
+
+	// Pure RENAME (any time the namespace mode is PREFIX-or-NONE on
+	// both sides and the schema slot doesn't apply).
+	if !modeUsesSchema(from) && !modeUsesSchema(to) {
+		if fromName == toName {
+			return "", "", fmt.Errorf("postgres: SetTableNamespace produced no-op RENAME (from=%q to=%q)", fromName, toName)
+		}
+		up := fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", fromName, toName)
+		down := fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", toName, fromName)
+		return up, down, nil
+	}
+
+	// Pure SET SCHEMA (both sides SCHEMA OR one side NONE/PREFIX
+	// with same SQL identifier).
+	if modeUsesSchema(from) && modeUsesSchema(to) && fromName == toName {
+		// Inline qualifier (PG syntax: ALTER TABLE <schema>.<name> SET SCHEMA <new_schema>).
+		// to_ns is the new schema; from_qual carries the old schema.
+		up := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", fromQual, toNs)
+		down := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", toQual, fromNs)
+		return up, down, nil
+	}
+	if modeUsesSchema(from) && !modeUsesSchema(to) && fromName == toName {
+		// SCHEMA → NONE/PREFIX (same identifier). SET SCHEMA public.
+		up := fmt.Sprintf("ALTER TABLE %s SET SCHEMA public;", fromQual)
+		down := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", toName, fromNs)
+		return up, down, nil
+	}
+	if !modeUsesSchema(from) && modeUsesSchema(to) && fromName == toName {
+		// NONE/PREFIX → SCHEMA (same identifier).
+		up := fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", fromName, toNs)
+		down := fmt.Sprintf("ALTER TABLE %s SET SCHEMA public;", toQual)
+		return up, down, nil
+	}
+
+	// Combined: schema move + rename (PREFIX with prefix change crossing
+	// SCHEMA mode, etc.). Two-statement chain. Down inverts both.
+	up := schemaMoveRenameChain(from, fromName, fromNs, to, toName, toNs)
+	down := schemaMoveRenameChain(to, toName, toNs, from, fromName, fromNs)
+	return up, down, nil
+}
+
+// schemaMoveRenameChain handles the "schema changed AND name changed"
+// transitions by chaining SET SCHEMA + RENAME TO (or vice versa).
+// Order: rename first to a temp identifier in the source namespace,
+// then SET SCHEMA, then rename to the final identifier — but in
+// practice for the common case PG accepts a single statement: when
+// the source and destination are both schema-qualified (same name
+// across schemas) we can just SET SCHEMA, then RENAME if needed.
+func schemaMoveRenameChain(fromMode irpb.NamespaceMode, fromName, fromNs string,
+	toMode irpb.NamespaceMode, toName, toNs string) string {
+	fromQual := qualifyName(fromMode, fromNs, fromName)
+	stmts := []string{}
+	if modeUsesSchema(fromMode) && modeUsesSchema(toMode) {
+		// Two SCHEMAs + name change: SET SCHEMA then RENAME.
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", fromQual, toNs))
+		intermediateQual := qualifyName(toMode, toNs, fromName)
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", intermediateQual, toName))
+		return strings.Join(stmts, "\n")
+	}
+	if modeUsesSchema(fromMode) {
+		// SCHEMA → NONE/PREFIX with name change: SET SCHEMA public + RENAME.
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s SET SCHEMA public;", fromQual))
+		stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", fromName, toName))
+		return strings.Join(stmts, "\n")
+	}
+	// NONE/PREFIX → SCHEMA with name change: RENAME + SET SCHEMA.
+	stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s RENAME TO %s;", fromName, toName))
+	stmts = append(stmts, fmt.Sprintf("ALTER TABLE %s SET SCHEMA %s;", toName, toNs))
+	return strings.Join(stmts, "\n")
+}
+
+func modeUsesSchema(m irpb.NamespaceMode) bool {
+	return m == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA
+}
+
+func qualifyName(mode irpb.NamespaceMode, ns, name string) string {
+	if mode == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA && ns != "" {
+		return ns + "." + name
+	}
+	return name
+}
+
 // emitSetTableComment renders COMMENT ON TABLE ... IS '<text>';.
 // Empty `to` drops the comment via `IS NULL`. Symmetric: down
 // restores the prev value (also via `IS NULL` if prev was empty).

@@ -36,6 +36,8 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitDropTable(v.DropTable.GetTable())
 	case *planpb.Op_RenameTable:
 		return e.emitRenameTable(v.RenameTable)
+	case *planpb.Op_SetTableNamespace:
+		return e.emitSetTableNamespace(v.SetTableNamespace)
 	case *planpb.Op_SetTableComment:
 		return e.emitSetTableComment(v.SetTableComment)
 	case *planpb.Op_AddColumn:
