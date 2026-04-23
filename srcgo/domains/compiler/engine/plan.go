@@ -96,7 +96,14 @@ func planBucket(
 		return nil, nil, err
 	}
 
-	unresolved, applied := splitByResolution(result.Findings, resolutionsByID)
+	unresolved, applied, resolvedPairs := splitByResolution(result.Findings, resolutionsByID)
+
+	// Splice author-provided CUSTOM_MIGRATION SQL into the Migration
+	// body before AC #1's empty-diff check — CUSTOM_MIGRATION may be
+	// the only change the migration carries (carrier-change-only
+	// alter where the emitter omits its Op + user supplies the SQL
+	// by hand).
+	up, down = spliceCustomMigrations(up, down, resolvedPairs)
 
 	// AC #1: no-op diff writes nothing + carries no findings → skip
 	// the whole bucket. When findings exist but no SQL, keep the
@@ -115,12 +122,55 @@ func planBucket(
 	}, unresolved, nil
 }
 
-// splitByResolution partitions findings into (unresolved, applied)
-// based on which have a matching Resolution by ID.
+// resolvedPair bundles a ReviewFinding with its matching Resolution.
+// Used to splice CustomSQL into the Migration envelope — the Finding
+// carries axis + column info the splice comment uses, the Resolution
+// carries the SQL body.
+type resolvedPair struct {
+	Finding    *planpb.ReviewFinding
+	Resolution *planpb.Resolution
+}
+
+// spliceCustomMigrations walks resolved CUSTOM_MIGRATION pairs and
+// prepends their CustomSQL to UpSql (with an attribution comment),
+// appends a rollback marker to DownSql (author's responsibility,
+// since CUSTOM_MIGRATION has no automatic reverse).
+//
+// Multiple CUSTOM_MIGRATION resolutions splice in Finding ID-sorted
+// order for determinism. DROP_AND_CREATE + other strategies pass
+// through untouched — they flow via Op emission (future work) or
+// stay as annotations.
+func spliceCustomMigrations(up, down string, pairs []resolvedPair) (string, string) {
+	for _, p := range pairs {
+		if p.Resolution.GetStrategy() != planpb.Strategy_CUSTOM_MIGRATION {
+			continue
+		}
+		if p.Resolution.GetCustomSql() == "" {
+			continue
+		}
+		header := fmt.Sprintf("-- CUSTOM_MIGRATION: %s.%s (%s)\n",
+			p.Finding.GetColumn().GetTableName(),
+			p.Finding.GetColumn().GetColumnName(),
+			p.Finding.GetAxis())
+		footer := "-- END CUSTOM_MIGRATION\n"
+		up = header + p.Resolution.GetCustomSql() + "\n" + footer + up
+		down = down + fmt.Sprintf("-- NOTE: CUSTOM_MIGRATION applied for %s.%s (%s); author owns rollback SQL for this change.\n",
+			p.Finding.GetColumn().GetTableName(),
+			p.Finding.GetColumn().GetColumnName(),
+			p.Finding.GetAxis())
+	}
+	return up, down
+}
+
+// splitByResolution partitions findings into (unresolved, applied,
+// resolvedPairs) based on which have a matching Resolution by ID.
+// Applied drives the Manifest audit trail; resolvedPairs drives
+// downstream CustomSQL splicing (the pair retains the original
+// finding reference for context).
 func splitByResolution(
 	findings []*planpb.ReviewFinding,
 	byID map[string]*planpb.Resolution,
-) (unresolved []*planpb.ReviewFinding, applied []*planpb.AppliedResolution) {
+) (unresolved []*planpb.ReviewFinding, applied []*planpb.AppliedResolution, pairs []resolvedPair) {
 	for _, f := range findings {
 		r, ok := byID[f.GetId()]
 		if !ok {
@@ -134,8 +184,9 @@ func splitByResolution(
 			DecidedAtUnix: r.GetDecidedAtUnix(),
 			CustomSql:     r.GetCustomSql(),
 		})
+		pairs = append(pairs, resolvedPair{Finding: f, Resolution: r})
 	}
-	return unresolved, applied
+	return unresolved, applied, pairs
 }
 
 // buildManifest assembles the Manifest for a Migration. Today only

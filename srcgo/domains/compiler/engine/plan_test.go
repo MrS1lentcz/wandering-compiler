@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/classifier"
@@ -242,5 +243,79 @@ func TestPlan_RequiresEmitterFor(t *testing.T) {
 	_, err := engine.Plan(nil, singleTableSchema(), cls, nil, nil)
 	if err == nil {
 		t.Error("nil emitterFor should error")
+	}
+}
+
+// TestPlan_CustomMigrationSplice — Resolution with Strategy
+// CUSTOM_MIGRATION and a CustomSql body → engine splices the SQL
+// into Migration.UpSql with an attribution comment; DownSql picks
+// up a rollback-note.
+//
+// Test shape: carrier change on a non-PK column in a table that
+// also has an unrelated SAFE column add. The carrier change
+// produces a finding; the SAFE column add produces an AlterColumn
+// emission path. Resolving the carrier-change finding with a
+// CUSTOM_MIGRATION SQL body should splice it into the final
+// Migration.
+func TestPlan_CustomMigrationSplice(t *testing.T) {
+	cls := testClassifier(t)
+	mkSchema := func(carrier irpb.Carrier, withExtra bool) *irpb.Schema {
+		cols := []*irpb.Column{
+			{Name: "id", ProtoName: "id", FieldNumber: 1,
+				Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID,
+				DbType: irpb.DbType_DBT_BIGINT, Pk: true},
+			{Name: "email", ProtoName: "email", FieldNumber: 2,
+				Carrier: carrier, Type: irpb.SemType_SEM_EMAIL,
+				DbType: irpb.DbType_DBT_TEXT},
+		}
+		if withExtra {
+			cols = append(cols, &irpb.Column{
+				Name: "note", ProtoName: "note", FieldNumber: 3,
+				Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT,
+				DbType: irpb.DbType_DBT_TEXT, Nullable: true,
+			})
+		}
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: cols, PrimaryKey: []string{"id"},
+		}}}
+	}
+	prev := mkSchema(irpb.Carrier_CARRIER_STRING, false)
+	curr := mkSchema(irpb.Carrier_CARRIER_INT64, true) // carrier flip + column add
+
+	// Probe to discover finding ID.
+	probe, _ := engine.Plan(prev, curr, cls, nil, pgOnlyEmitter)
+	if len(probe.Findings) != 1 {
+		t.Fatalf("probe findings = %d, want 1", len(probe.Findings))
+	}
+
+	resolutions := []*planpb.Resolution{{
+		FindingId: probe.Findings[0].GetId(),
+		Strategy:  planpb.Strategy_CUSTOM_MIGRATION,
+		CustomSql: "-- user SQL: transform email strings to int ids\nUPDATE users SET email = '0' WHERE email !~ '^[0-9]+$';",
+		Actor:     "test",
+	}}
+	result, err := engine.Plan(prev, curr, cls, resolutions, pgOnlyEmitter)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("expected Findings cleared, got %d", len(result.Findings))
+	}
+	if len(result.Migrations) != 1 {
+		t.Fatalf("len(Migrations) = %d, want 1", len(result.Migrations))
+	}
+	m := result.Migrations[0]
+	if !strings.Contains(m.GetUpSql(), "CUSTOM_MIGRATION: users.email") {
+		t.Errorf("UpSql missing splice header; got %q", m.GetUpSql())
+	}
+	if !strings.Contains(m.GetUpSql(), "UPDATE users SET email") {
+		t.Errorf("UpSql missing custom SQL body")
+	}
+	if !strings.Contains(m.GetUpSql(), "END CUSTOM_MIGRATION") {
+		t.Errorf("UpSql missing footer")
+	}
+	if !strings.Contains(m.GetDownSql(), "author owns rollback SQL") {
+		t.Errorf("DownSql missing rollback note; got %q", m.GetDownSql())
 	}
 }
