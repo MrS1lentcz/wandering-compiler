@@ -1,0 +1,17 @@
+syntax = "proto3";
+package altertest;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+message User {
+  option (w17.db.table) = { name: "users" };
+
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // Widen + loosen nullability + add default + add comment — four
+  // fact axes at once exercise the multi-FactChange path.
+  string name = 2 [
+    (w17.field)     = { type: CHAR, max_len: 200, null: true, default_string: "anonymous" },
+    (w17.db.column) = { comment: "display name; blank = anonymous" }
+  ];
+}

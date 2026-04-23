@@ -53,6 +53,7 @@ test-apply:
 		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS hstore;" >/dev/null; \
 		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS citext;" >/dev/null; \
 		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm;" >/dev/null; \
+		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS reporting;" >/dev/null; \
 		echo "  prev.up"; \
 		rm -rf /tmp/wc-apply-$$name; \
 		(cd srcgo && go run ./domains/compiler/cmd/cli generate --iteration-1 --no-applied-state -I "$$(pwd)/../proto" -o "/tmp/wc-apply-$$name" "$$(pwd)/../$${dir}prev.proto") >/dev/null; \

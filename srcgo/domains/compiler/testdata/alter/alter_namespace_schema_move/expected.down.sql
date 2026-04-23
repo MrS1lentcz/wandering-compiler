@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE events SET SCHEMA reporting;
+
+COMMIT;

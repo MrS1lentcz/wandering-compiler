@@ -1,0 +1,10 @@
+BEGIN;
+
+ALTER TABLE users ALTER COLUMN name DROP NOT NULL;
+ALTER TABLE users ALTER COLUMN name SET DEFAULT 'anonymous';
+ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(200);
+COMMENT ON COLUMN users.name IS 'display name; blank = anonymous';
+
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_name_blank;
+
+COMMIT;
