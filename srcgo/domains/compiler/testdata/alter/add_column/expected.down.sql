@@ -1,0 +1,7 @@
+BEGIN;
+
+DROP INDEX IF EXISTS users_email_uidx;
+
+ALTER TABLE users DROP COLUMN email;
+
+COMMIT;

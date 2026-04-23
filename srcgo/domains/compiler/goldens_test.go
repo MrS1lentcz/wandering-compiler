@@ -90,6 +90,12 @@ func discoverCases(root string) ([]string, error) {
 		if !e.IsDir() {
 			continue
 		}
+		// Skip alter-diff fixture roots — they have a different
+		// shape (prev.proto + curr.proto, not input.proto) and
+		// are owned by goldens_alter_test's discovery pass.
+		if e.Name() == "alter" || e.Name() == "alter_refuse" {
+			continue
+		}
 		names = append(names, e.Name())
 	}
 	return names, nil
