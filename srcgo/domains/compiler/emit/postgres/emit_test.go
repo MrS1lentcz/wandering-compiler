@@ -618,12 +618,24 @@ func TestEmitAlterColumnUniqueAdd(t *testing.T) {
 }
 
 // TestEmitAlterColumnGeneratedExprAdd — adding GENERATED needs
-// drop+add (PG can't ALTER existing columns into generated). Down
-// drops the now-generated column to revert to no-column state.
+// drop+add (PG can't ALTER existing columns into generated). The
+// column snapshot supplies the column type (VARCHAR(200) below).
+// Down drops the now-generated column to revert to no-column state.
 func TestEmitAlterColumnGeneratedExprAdd(t *testing.T) {
+	col := &irpb.Column{
+		Name: "full_name", ProtoName: "full_name", FieldNumber: 4,
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 200,
+		GeneratedExpr: "first_name || ' ' || last_name",
+	}
+	prev := &irpb.Column{
+		Name: "full_name", ProtoName: "full_name", FieldNumber: 4,
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 200,
+	}
 	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
 		Ctx:        &planpb.TableCtx{TableName: "products"},
 		ColumnName: "full_name",
+		Column:     col,
+		PrevColumn: prev,
 		Changes: []*planpb.FactChange{
 			{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
 				From: "", To: "first_name || ' ' || last_name",
@@ -635,7 +647,7 @@ func TestEmitAlterColumnGeneratedExprAdd(t *testing.T) {
 		t.Fatalf("EmitOp: %v", err)
 	}
 	mustContain(t, up, "ALTER TABLE products DROP COLUMN full_name;")
-	mustContain(t, up, "GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED;")
+	mustContain(t, up, "VARCHAR(200) GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED;")
 }
 
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;

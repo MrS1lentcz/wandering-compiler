@@ -230,6 +230,8 @@ func columnAlters(pair TablePair) ([]*planpb.Op, error) {
 			FieldNumber: currCol.GetFieldNumber(),
 			ColumnName:  currCol.GetName(),
 			Changes:     changes,
+			Column:      currCol,
+			PrevColumn:  prevCol,
 		}}})
 	}
 	if len(refusals) > 0 {
@@ -294,11 +296,10 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*pla
 			From: prev.GetDbType(), To: curr.GetDbType(),
 		}}})
 	}
-	if prev.GetUnique() != curr.GetUnique() {
-		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_Unique{Unique: &planpb.UniqueChange{
-			From: prev.GetUnique(), To: curr.GetUnique(),
-		}}})
-	}
+	// Unique flag changes ride on the Index bucket — iter-1 synthesises
+	// a UNIQUE INDEX into Table.Indexes at IR build time, so a flag
+	// flip surfaces as an Index add/drop there. Emitting a UniqueChange
+	// here too would double-add / double-drop the same constraint.
 	if prev.GetGeneratedExpr() != curr.GetGeneratedExpr() {
 		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
 			From: prev.GetGeneratedExpr(), To: curr.GetGeneratedExpr(),

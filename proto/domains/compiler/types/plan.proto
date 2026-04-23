@@ -158,6 +158,14 @@ message AlterColumn {
   int32  field_number = 2;
   string column_name = 3;
   repeated FactChange changes = 4;
+  // Post-change Column state. Emitter consults when a FactChange
+  // needs the rendered column type (e.g. GeneratedExpr add → the
+  // `ADD COLUMN` needs the type before GENERATED ALWAYS AS; DbType
+  // transitions when prev was UNSPECIFIED → derive the effective
+  // type via columnType(column)).
+  w17.compiler.ir.Column column = 5;
+  // Pre-change Column state — symmetric counterpart for down SQL.
+  w17.compiler.ir.Column prev_column = 6;
 }
 
 // FactChange is the per-fact delta inside an AlterColumn. Each variant

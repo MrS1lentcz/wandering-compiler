@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TYPE posts_status ADD VALUE 'ARCHIVED';
+
+COMMIT;

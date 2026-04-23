@@ -249,7 +249,7 @@ func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn) (string, string, error)
 
 	var ups, downs []string
 	for _, fc := range ac.GetChanges() {
-		up, down, err := renderFactChange(qual, colName, fc)
+		up, down, err := renderFactChange(qual, colName, fc, ac.GetColumn(), ac.GetPrevColumn())
 		if err != nil {
 			return "", "", fmt.Errorf("postgres: AlterColumn %s.%s: %w", ac.GetCtx().GetTableName(), colName, err)
 		}
@@ -269,10 +269,11 @@ func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn) (string, string, error)
 
 // renderFactChange dispatches one FactChange variant to its emit.
 // Each branch returns (up, down) statements as fully-terminated SQL.
-// Variants whose strategy is DIRECT use plain ALTER COLUMN; variants
-// covered by sub-clauses inside a single ALTER TABLE coalesce in a
-// future optimisation pass (one ALTER TABLE per fact today).
-func renderFactChange(qualTable, colName string, fc *planpb.FactChange) (string, string, error) {
+// `column` + `prevColumn` supply the full post-/pre-change IR Column
+// for variants that need richer context than their own from/to values
+// (GeneratedExpr's column-type prefix, DbType's effective-type
+// derivation when the other side is UNSPECIFIED).
+func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, prevColumn *irpb.Column) (string, string, error) {
 	switch v := fc.GetVariant().(type) {
 	case *planpb.FactChange_Nullable:
 		up, down := renderNullableChange(qualTable, colName, v.Nullable)
@@ -286,14 +287,12 @@ func renderFactChange(qualTable, colName string, fc *planpb.FactChange) (string,
 		up, down := renderNumericPrecisionChange(qualTable, colName, v.NumericPrecision)
 		return up, down, nil
 	case *planpb.FactChange_DbType:
-		up, down := renderDbTypeChange(qualTable, colName, v.DbType)
-		return up, down, nil
+		return renderDbTypeChange(qualTable, colName, v.DbType, column, prevColumn)
 	case *planpb.FactChange_Unique:
 		up, down := renderUniqueChange(qualTable, colName, v.Unique)
 		return up, down, nil
 	case *planpb.FactChange_GeneratedExpr:
-		up, down := renderGeneratedExprChange(qualTable, colName, v.GeneratedExpr)
-		return up, down, nil
+		return renderGeneratedExprChange(qualTable, colName, v.GeneratedExpr, column, prevColumn)
 	case *planpb.FactChange_Comment:
 		up, down := renderColumnCommentChange(qualTable, colName, v.Comment)
 		return up, down, nil
@@ -405,16 +404,35 @@ func numericTypeSQL(precision int32, scale *int32) string {
 }
 
 // renderDbTypeChange — USING. ALTER COLUMN TYPE <new> USING col::<new>.
-// PG fails apply if the cast doesn't apply to live rows. Compatible
-// pairs (TEXT↔VARCHAR / JSON↔JSONB / etc.) cast cleanly; incompatible
-// pairs (INTEGER → TEXT) fail at apply time which is the right
-// outcome — deploy client + UI surface the data issue per platform
-// contract.
-func renderDbTypeChange(qual, col string, ch *planpb.DbTypeChange) (string, string) {
-	toType := dbTypeKeyword(ch.GetTo())
-	fromType := dbTypeKeyword(ch.GetFrom())
+// When the FactChange carries DBT_UNSPECIFIED on one side (preset
+// storage default), derive the effective type from the column snapshot
+// via columnType() so both sides of the ALTER carry real SQL types.
+func renderDbTypeChange(qual, col string, ch *planpb.DbTypeChange, curr, prev *irpb.Column) (string, string, error) {
+	toType, err := dbTypeOrEffective(ch.GetTo(), curr, qualToTable(qual))
+	if err != nil {
+		return "", "", fmt.Errorf("DbType to: %w", err)
+	}
+	fromType, err := dbTypeOrEffective(ch.GetFrom(), prev, qualToTable(qual))
+	if err != nil {
+		return "", "", fmt.Errorf("DbType from: %w", err)
+	}
 	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;", qual, col, toType, col, toType),
-		fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;", qual, col, fromType, col, fromType)
+		fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::%s;", qual, col, fromType, col, fromType), nil
+}
+
+// dbTypeOrEffective returns the bare dialect keyword for a DbType
+// when explicit; falls back to columnType() on the Column snapshot
+// when the enum is UNSPECIFIED (preset storage). Keeps the ALTER
+// TYPE clause well-formed across all (UNSPECIFIED↔explicit) and
+// (explicit↔explicit) transitions.
+func dbTypeOrEffective(t irpb.DbType, col *irpb.Column, tableName string) (string, error) {
+	if t != irpb.DbType_DB_TYPE_UNSPECIFIED {
+		return dbTypeKeyword(t), nil
+	}
+	if col == nil {
+		return "", fmt.Errorf("UNSPECIFIED DbType with no column snapshot")
+	}
+	return columnType(tableName, col)
 }
 
 // dbTypeKeyword renders the bare PG type keyword for a DbType enum
@@ -533,29 +551,41 @@ func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange) (stri
 }
 
 // renderGeneratedExprChange — DROP+ADD when add or change. DIRECT
-// (DROP EXPRESSION on PG 13+) when remove. Iter-2 M1 supports all
-// three since the iter-1 IR carries the prev-side expression for
-// reconstruction.
-func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange) (string, string) {
+// (DROP EXPRESSION on PG 13+) when remove. Column snapshots supply
+// the column type (prefix before GENERATED ALWAYS AS).
+func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange, curr, prev *irpb.Column) (string, string, error) {
 	from, to := ch.GetFrom(), ch.GetTo()
+	tableName := qualToTable(qual)
 	switch {
 	case from == "" && to != "":
-		// Add: PG can't add GENERATED to existing column. Drop+add.
-		return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s GENERATED ALWAYS AS (%s) STORED;",
-				qual, col, qual, col, to),
-			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", qual, col)
+		toType, err := columnType(tableName, curr)
+		if err != nil {
+			return "", "", fmt.Errorf("GeneratedExpr add: column type: %w", err)
+		}
+		return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s %s GENERATED ALWAYS AS (%s) STORED;",
+				qual, col, qual, col, toType, to),
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", qual, col), nil
 	case from != "" && to == "":
-		// Remove: DROP EXPRESSION (PG 13+).
+		fromType, err := columnType(tableName, prev)
+		if err != nil {
+			return "", "", fmt.Errorf("GeneratedExpr remove: column type: %w", err)
+		}
 		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP EXPRESSION;", qual, col),
-			// Down restores via drop+re-add (no inverse for DROP EXPRESSION).
-			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s GENERATED ALWAYS AS (%s) STORED;",
-				qual, col, qual, col, from)
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s %s GENERATED ALWAYS AS (%s) STORED;",
+				qual, col, qual, col, fromType, from), nil
 	default:
-		// Change: drop+add the column with the new expression.
-		return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s GENERATED ALWAYS AS (%s) STORED;",
-				qual, col, qual, col, to),
-			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s GENERATED ALWAYS AS (%s) STORED;",
-				qual, col, qual, col, from)
+		toType, err := columnType(tableName, curr)
+		if err != nil {
+			return "", "", fmt.Errorf("GeneratedExpr change: column type curr: %w", err)
+		}
+		fromType, err := columnType(tableName, prev)
+		if err != nil {
+			return "", "", fmt.Errorf("GeneratedExpr change: column type prev: %w", err)
+		}
+		return fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s %s GENERATED ALWAYS AS (%s) STORED;",
+				qual, col, qual, col, toType, to),
+			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s %s GENERATED ALWAYS AS (%s) STORED;",
+				qual, col, qual, col, fromType, from), nil
 	}
 }
 

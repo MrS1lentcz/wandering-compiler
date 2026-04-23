@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE configs ALTER COLUMN label TYPE TEXT USING label::TEXT;
+
+COMMIT;
