@@ -307,3 +307,168 @@ message WcMigrationsInsert {
   string timestamp = 1;
   bytes  content_sha256 = 2;
 }
+
+// --- D30 — Engine envelope -------------------------------------------------
+//
+// Plan is the top-level return of the pure engine function
+//
+//     func Plan(prev, curr *ir.Schema, resolutions []Resolution) (*Plan, error)
+//
+// It wraps the artifacts the engine produces (one Migration per target
+// Connection) plus any decisions the engine couldn't auto-resolve
+// (ReviewFindings, matched to Resolutions by deterministic ID).
+//
+// Storage, approval workflows, resolution delivery — all sit outside
+// this envelope in Sink + ResolutionSource adapters per D30.
+message Plan {
+  repeated Migration migrations = 1;
+  repeated ReviewFinding findings = 2;
+}
+
+// Migration — everything the compiler produces for one Connection on
+// one `wc generate` run. Down-stream Sinks serialise whichever subset
+// they want (SQL files, manifest JSON, check files, registry push).
+message Migration {
+  w17.compiler.ir.Connection connection = 1;
+  // Ops — structured intermediate; the diff output MigrationPlan.
+  MigrationPlan plan = 2;
+  // up_sql / down_sql — final rendered SQL for this migration pair.
+  // Empty for connections where the diff was a no-op (AC #1: no files
+  // written when prev == curr; Sink gets the signal via empty strings).
+  string up_sql = 3;
+  string down_sql = 4;
+  // Checks — pre-apply validation queries, one per NEEDS_CONFIRM cell
+  // the classifier emitted. Each links back to its ReviewFinding.
+  repeated NamedSQL checks = 5;
+  Manifest manifest = 6;
+}
+
+// NamedSQL — a check.sql body with a stable identifier + finding
+// back-reference. Sink decides file naming / location; engine just
+// provides the strings.
+message NamedSQL {
+  string name = 1;                  // e.g. "check_users_email_not_null"
+  string sql = 2;
+  string finding_id = 3;            // links to ReviewFinding that produced it
+  string rationale = 4;             // human-readable "what this guards against"
+}
+
+// Manifest — M4 deliverable surfaced early in the envelope. Lists the
+// capabilities this migration used (D16 catalog IDs), required PG
+// extensions, and the resolutions applied during this run.
+message Manifest {
+  repeated string required_extensions = 1;       // CREATE EXTENSION prerequisites
+  repeated string capabilities = 2;              // D16 cap IDs touched
+  repeated AppliedResolution applied_resolutions = 3;
+}
+
+// AppliedResolution — the subset of input resolutions that matched a
+// finding in this run. Embedded in the manifest so deploy-time auditors
+// can reconstruct the decision history without re-consulting the CLI
+// flag stream or platform API.
+message AppliedResolution {
+  string finding_id = 1;
+  Strategy strategy = 2;
+  string actor = 3;
+  int64  decided_at_unix = 4;
+  string custom_sql = 5;            // populated when strategy == CUSTOM_MIGRATION
+}
+
+// ReviewFinding — a decision point the classifier can't auto-resolve.
+// Emitted by the engine whenever a FactChange lands in a strategy the
+// rule says requires user opt-in (DROP_AND_CREATE / CUSTOM_MIGRATION
+// by default; NEEDS_CONFIRM when classifier can't synthesise a clean
+// check.sql).
+//
+// ID is a deterministic hash of (column fqn, axis, prev fact snapshot,
+// curr fact snapshot) — same inputs → same ID → resolutions survive
+// re-runs idempotently.
+message ReviewFinding {
+  string id = 1;
+  ColumnRef column = 2;
+  string axis = 3;                  // D28 axis identifier (e.g. "carrier_change")
+  Strategy proposed = 4;            // classifier default
+  repeated Strategy options = 5;    // set --decide can pick from (always includes proposed)
+  string rationale = 6;             // why compiler won't auto
+  FindingContext context = 7;
+  Severity severity = 8;
+}
+
+// ColumnRef — where in the schema the finding anchors. Uses proto
+// identity (MessageFqn + field number) per D10 so IDs stay stable
+// across renames.
+message ColumnRef {
+  string table_fqn = 1;             // proto MessageFqn (iter-2 D24 table identity)
+  string table_name = 2;            // SQL-qualified name at curr time
+  int32  field_number = 3;
+  string column_name = 4;           // SQL column name at curr time (post-rename)
+}
+
+// FindingContext — the prev + curr snapshots that make the finding
+// reviewable. `oneof kind` dispatches per axis family so the payload
+// matches the decision shape (column-axis alterations carry
+// ColumnContext, FK-add carries FKContext, etc.).
+message FindingContext {
+  oneof kind {
+    ColumnContext column  = 1;
+    FKContext     fk      = 2;
+    CheckContext  check   = 3;
+    IndexContext  index   = 4;
+    TableContext  table   = 5;
+  }
+  // Human-readable one-liners for UI / CLI printing. Derived
+  // deterministically from the context — not independently set.
+  string prev_summary = 10;
+  string curr_summary = 11;
+}
+
+message ColumnContext { w17.compiler.ir.Column     prev = 1; w17.compiler.ir.Column     curr = 2; }
+message FKContext     { w17.compiler.ir.ForeignKey prev = 1; w17.compiler.ir.ForeignKey curr = 2; }
+message CheckContext  { w17.compiler.ir.Check      prev = 1; w17.compiler.ir.Check      curr = 2; }
+message IndexContext  { w17.compiler.ir.Index      prev = 1; w17.compiler.ir.Index      curr = 2; }
+message TableContext  { w17.compiler.ir.Table      prev = 1; w17.compiler.ir.Table      curr = 2; }
+
+// Resolution — a caller's decision on a ReviewFinding. Supplied to
+// `Plan()` via a ResolutionSource adapter (CLI flags, file, platform
+// API, test map). The engine never reads these directly from I/O —
+// they're passed as the third argument.
+message Resolution {
+  string    finding_id = 1;
+  Strategy  strategy = 2;
+  // When strategy == CUSTOM_MIGRATION: the author's SQL. Wrapped by
+  // the engine in a managed transaction at emit time; engine never
+  // persists the SQL itself (see D30 + D29 — custom SQL stays in
+  // CLI input or platform UI, never in git).
+  string    custom_sql = 3;
+  // Audit trail. Populated by the ResolutionSource (who decided, when).
+  string    actor = 4;
+  int64     decided_at_unix = 5;
+}
+
+// Strategy — the five D28 classification outcomes. Ordering matches
+// strictness rank for the multi-axis fold (strictest wins):
+//   SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE < CUSTOM_MIGRATION
+enum Strategy {
+  STRATEGY_UNSPECIFIED = 0;
+  SAFE                 = 1;
+  LOSSLESS_USING       = 2;
+  NEEDS_CONFIRM        = 3;
+  DROP_AND_CREATE      = 4;
+  CUSTOM_MIGRATION     = 5;
+}
+
+// Severity — how much a ReviewFinding blocks downstream processing.
+// Engine sets per axis; caller policy (CLI / platform) decides what
+// to do. Today's main use: proto wire-compat warnings on carrier
+// change ship as `WARNING` not `BLOCK` (D28 Q2 lean — warn, don't
+// force).
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  // INFO    — just FYI; migration proceeds regardless.
+  INFO                 = 1;
+  // WARNING — surface loudly; migration proceeds if resolved.
+  WARNING              = 2;
+  // BLOCK   — migration MUST NOT emit SQL until a matching Resolution
+  //           lands. Default for DROP_AND_CREATE / CUSTOM_MIGRATION.
+  BLOCK                = 3;
+}
