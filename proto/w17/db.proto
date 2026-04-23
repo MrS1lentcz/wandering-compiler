@@ -110,6 +110,11 @@ enum Dialect {
   POSTGRES = 1;
   MYSQL = 2;
   SQLITE = 3;
+  // Redis (or other whole-model KV stores). Field-level schema is
+  // not enforced at the storage layer; wc generates the typed gRPC
+  // wrapper and emits a descriptive migration stream (#-comments +
+  // applied-state ZADDs).
+  REDIS = 10;
 }
 
 message Table {

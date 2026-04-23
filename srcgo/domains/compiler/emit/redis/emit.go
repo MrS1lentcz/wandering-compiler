@@ -48,6 +48,11 @@ type Emitter struct{}
 // Name returns the stable dialect identifier.
 func (Emitter) Name() string { return "redis" }
 
+// Transactional reports false — Redis has no transactional DDL. The
+// emit-level Transactional optional interface suppresses the BEGIN /
+// COMMIT wrapper Emit adds by default for SQL dialects.
+func (Emitter) Transactional() bool { return false }
+
 // EmitOp dispatches on the Op variant. Every output line is a
 // Redis CLI command or a `#` comment (the Redis CLI treats leading
 // `#` as a comment in `redis-cli < file` input).

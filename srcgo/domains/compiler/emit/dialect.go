@@ -31,6 +31,16 @@ type DialectEmitter interface {
 	EmitOp(op *planpb.Op) (up string, down string, err error)
 }
 
+// Transactional is an optional capability marker: emitters whose
+// dialect has no transactional DDL (Redis and other whole-model KV
+// stores, most notably) implement this interface and return false to
+// suppress the BEGIN / COMMIT wrapper Emit adds by default. SQL
+// emitters (postgres, mysql, sqlite) don't need to implement it —
+// the zero-value absence is read as "transactional = true".
+type Transactional interface {
+	Transactional() bool
+}
+
 // Emit orchestrates a whole plan: forward-order up SQL, reverse-order down
 // SQL (so rollback applies in the inverse direction of migration). Op blocks
 // are separated by one blank line and wrapped in `BEGIN; … COMMIT;` so the
@@ -41,6 +51,9 @@ type DialectEmitter interface {
 // makes this safe for every op iter-1 emits (AddTable today, AlterTable
 // variants later — non-transactional exceptions like CREATE INDEX
 // CONCURRENTLY arrive as opt-outs when iter-2 surfaces them).
+//
+// Non-transactional emitters (Redis) opt out of the wrapper via the
+// Transactional interface, returning false.
 //
 // The final output carries a trailing newline so file-diff tools behave.
 func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string, err error) {
@@ -66,6 +79,9 @@ func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string,
 		downs[i], downs[j] = downs[j], downs[i]
 	}
 
+	if t, ok := e.(Transactional); ok && !t.Transactional() {
+		return joinBlocks(ups), joinBlocks(downs), nil
+	}
 	return wrapTransaction(ups), wrapTransaction(downs), nil
 }
 
@@ -77,4 +93,14 @@ func wrapTransaction(blocks []string) string {
 		return ""
 	}
 	return "BEGIN;\n\n" + strings.Join(blocks, "\n\n") + "\n\nCOMMIT;\n"
+}
+
+// joinBlocks joins non-empty blocks with blank lines for non-
+// transactional dialects (Redis). Trailing newline kept so file
+// diffs stay clean.
+func joinBlocks(blocks []string) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	return strings.Join(blocks, "\n\n") + "\n"
 }

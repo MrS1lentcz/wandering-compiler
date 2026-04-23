@@ -50,6 +50,10 @@ enum Dialect {
   POSTGRES = 1;
   MYSQL = 2;
   SQLITE = 3;
+  // Redis (or other whole-model KV stores). Schema-less at the field
+  // level — the compiler emits descriptive comments + thin applied-
+  // state bookkeeping via a `wc:migrations` sorted set. See emit/redis.
+  REDIS = 10;
 }
 
 // NamespaceMode — which strategy the module picked (D19). Mirrors the

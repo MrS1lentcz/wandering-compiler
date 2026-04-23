@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/application"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/postgres"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/redis"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/sqlite"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
@@ -74,15 +76,6 @@ func (c *GenerateCmd) Run() error {
 	if err != nil {
 		return err
 	}
-
-	// Per-connection output subdir (D26). When the module declares a
-	// (w17.db.module).connection, migrations land in
-	// <out>/migrations/<dialect>-<version>/. Absent → bare
-	// <out>/migrations/ (iter-1 layout).
-	migrationsDir := filepath.Join(outRoot, "migrations")
-	if conn := currSchema.GetConnection(); conn != nil {
-		migrationsDir = filepath.Join(outRoot, "migrations", connectionDirKey(conn))
-	}
 	var prevSchema *irpb.Schema
 	if len(c.PrevSet) > 0 {
 		prevSchema, err = loadSchemaSet(ctx, c.PrevSet, c.Imports)
@@ -96,36 +89,117 @@ func (c *GenerateCmd) Run() error {
 		}
 	}
 
-	p, err := plan.Diff(prevSchema, currSchema)
-	if err != nil {
-		return err
-	}
-	dialect, err := pickEmitter(currSchema.GetConnection())
-	if err != nil {
-		return err
-	}
-	up, down, err := emit.Emit(dialect, p)
-	if err != nil {
-		return err
-	}
-
-	// Empty plan = skip emit entirely (Open Question #1, resolved SKIP).
-	if up == "" && down == "" {
-		fmt.Println("wc generate: no changes — nothing to write")
+	// Bucket tables by effective connection (D26). Each bucket
+	// produces one migration stream emitted by that dialect's emitter
+	// to `<out>/migrations/<dialect>-<version>/`. Tables without an
+	// explicit connection go to the default bucket (iter-1 layout:
+	// bare `<out>/migrations/` + postgres emitter).
+	buckets, order := bucketByConnection(prevSchema, currSchema)
+	if len(buckets) == 0 {
+		fmt.Println("wc generate: no tables to process")
 		return nil
 	}
 
 	basename := naming.Name(time.Now().UTC())
-	if !c.NoAppliedState {
-		isInitial := prevSchema == nil
-		up, down = wrapAppliedState(up, down, basename, isInitial)
+	wroteAny := false
+	for _, key := range order {
+		bkt := buckets[key]
+		p, err := plan.Diff(bkt.prev, bkt.curr)
+		if err != nil {
+			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
+		}
+		emitter, err := pickEmitter(bkt.conn)
+		if err != nil {
+			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
+		}
+		up, down, err := emit.Emit(emitter, p)
+		if err != nil {
+			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
+		}
+		if up == "" && down == "" {
+			fmt.Printf("wc generate [%s]: no changes — skipping\n", key)
+			continue
+		}
+		if !c.NoAppliedState && bkt.conn != nil && bkt.conn.GetDialect() == irpb.Dialect_POSTGRES {
+			// Applied-state tracking is PG-only for now; other
+			// dialects (Redis, SQLite) have their own bookkeeping
+			// shape or skip entirely (Redis does lazy ZADD).
+			isInitial := bkt.prev == nil
+			up, down = wrapAppliedState(up, down, basename, isInitial)
+		}
+		dir := filepath.Join(outRoot, "migrations")
+		if bkt.conn != nil {
+			dir = filepath.Join(dir, connectionDirKey(bkt.conn))
+		}
+		upPath, downPath, err := writer.Write(dir, basename, up, down)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("wrote [%s]:\n  %s\n  %s\n", key, upPath, downPath)
+		wroteAny = true
 	}
-	upPath, downPath, err := writer.Write(migrationsDir, basename, up, down)
-	if err != nil {
-		return err
+	if !wroteAny {
+		fmt.Println("wc generate: no changes — nothing written")
 	}
-	fmt.Printf("wrote:\n  %s\n  %s\n", upPath, downPath)
 	return nil
+}
+
+// bucket carries one per-connection slice of the prev/curr schema.
+type bucket struct {
+	conn *irpb.Connection // nil = default (iter-1 compat path)
+	prev *irpb.Schema
+	curr *irpb.Schema
+}
+
+// bucketByConnection groups tables from prev + curr by their
+// effective connection. Returns (buckets, orderedKeys) — ordered keys
+// are deterministic: default ("") first, then alpha on
+// `<dialect>-<version>`.
+func bucketByConnection(prev, curr *irpb.Schema) (map[string]*bucket, []string) {
+	buckets := map[string]*bucket{}
+	keyOf := func(t *irpb.Table) (string, *irpb.Connection) {
+		c := t.GetConnection()
+		if c == nil {
+			return "", nil
+		}
+		return connectionDirKey(c), c
+	}
+	addTable := func(side string, t *irpb.Table) {
+		key, conn := keyOf(t)
+		b, ok := buckets[key]
+		if !ok {
+			b = &bucket{conn: conn, prev: &irpb.Schema{}, curr: &irpb.Schema{}}
+			buckets[key] = b
+		}
+		switch side {
+		case "prev":
+			b.prev.Tables = append(b.prev.Tables, t)
+		case "curr":
+			b.curr.Tables = append(b.curr.Tables, t)
+		}
+	}
+	for _, t := range prev.GetTables() {
+		addTable("prev", t)
+	}
+	for _, t := range curr.GetTables() {
+		addTable("curr", t)
+	}
+	// prev=nil means initial migration — every bucket's prev stays
+	// zero-value *irpb.Schema{}, which plan.Diff compares as no prev.
+	// But we need the nil sentinel to trigger the initial path.
+	if prev == nil {
+		for _, b := range buckets {
+			b.prev = nil
+		}
+	}
+	// Empty-curr buckets are also valid (full teardown of a dialect).
+	// If a bucket exists only on prev side, curr stays zero-valued.
+	keys := make([]string, 0, len(buckets))
+	for k := range buckets {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return buckets, keys
 }
 
 // connectionDirKey derives the `<dialect>-<version>` directory name
@@ -149,6 +223,8 @@ func pickEmitter(conn *irpb.Connection) (emit.DialectEmitter, error) {
 		return nil, fmt.Errorf("wc generate: dialect MYSQL is not yet implemented (tracked as iter-2 M4)")
 	case irpb.Dialect_SQLITE:
 		return sqlite.Emitter{}, nil
+	case irpb.Dialect_REDIS:
+		return redis.Emitter{}, nil
 	}
 	return nil, fmt.Errorf("wc generate: unknown connection dialect %v", conn.GetDialect())
 }

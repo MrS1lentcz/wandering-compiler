@@ -54,12 +54,38 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 	schema := &irpb.Schema{}
 	var allErrs []error
 
-	// Track the merged msg-by-name so resolveFKs can hand diagnostics
-	// the source descriptor from whichever file declared the owning
-	// table.
+	// Pre-pass: build the domain-level connection registry. Every
+	// module's (w17.db.module).connection lands in `connByName` keyed
+	// by the logical name; per-table overrides (next pass) resolve
+	// through this registry.
+	connByName := map[string]*irpb.Connection{}
+	for _, lf := range files {
+		if lf.Module == nil || lf.Module.GetConnection() == nil {
+			continue
+		}
+		src := lf.Module.GetConnection()
+		if src.GetDialect() == dbpb.Dialect_DIALECT_UNSPECIFIED || src.GetVersion() == "" {
+			continue // per-file validation emits the error already
+		}
+		if src.GetName() != "" {
+			connByName[src.GetName()] = &irpb.Connection{
+				Name:    src.GetName(),
+				Dialect: dialectToIR(src.GetDialect()),
+				Version: src.GetVersion(),
+			}
+		}
+	}
+
+	// Per-file build pass. buildTable reads per-table
+	// (w17.db.table).connection overrides through the shared
+	// connection registry.
 	builders := make([]*builder, 0, len(files))
 	for _, lf := range files {
-		b := &builder{lf: lf, msgByTable: map[string]*loader.LoadedMessage{}}
+		b := &builder{
+			lf:          lf,
+			msgByTable:  map[string]*loader.LoadedMessage{},
+			connByName:  connByName,
+		}
 		fileSchema := &irpb.Schema{}
 		b.resolveNamespace(fileSchema)
 		b.resolveConnection(fileSchema)
@@ -191,7 +217,7 @@ func (b *builder) resolveConnection(schema *irpb.Schema) {
 	if dialect == irpb.Dialect_DIALECT_UNSPECIFIED {
 		b.err(diag.Atf(b.lf.File, "(w17.db.module).connection.dialect is required").
 			WithWhy("wc picks the emitter + output path from (dialect, version); leaving dialect unspecified leaves both ambiguous").
-			WithFix("set dialect to one of: POSTGRES, MYSQL, SQLITE"))
+			WithFix("set dialect to one of: POSTGRES, MYSQL, SQLITE, REDIS"))
 		return
 	}
 	if src.GetVersion() == "" {
@@ -218,6 +244,8 @@ func dialectToIR(d dbpb.Dialect) irpb.Dialect {
 		return irpb.Dialect_MYSQL
 	case dbpb.Dialect_SQLITE:
 		return irpb.Dialect_SQLITE
+	case dbpb.Dialect_REDIS:
+		return irpb.Dialect_REDIS
 	}
 	return irpb.Dialect_DIALECT_UNSPECIFIED
 }
@@ -302,6 +330,11 @@ type builder struct {
 	// via (w17.db.table).connection is applied in buildTable after
 	// this is set.
 	fileConnection *irpb.Connection
+	// connByName — domain-level connection registry (built in
+	// BuildMany's pre-pass). Keyed by the logical name declared on
+	// `(w17.db.module).connection.name`; consulted by buildTable for
+	// per-table `(w17.db.table).connection` overrides.
+	connByName map[string]*irpb.Connection
 }
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
@@ -380,11 +413,31 @@ func (b *builder) newTableFrame(msg *loader.LoadedMessage) (*irpb.Table, bool) {
 		// override wins, else proto message's leading comment, else
 		// empty. Emitter emits COMMENT ON TABLE iff non-empty.
 		Comment: resolveComment(msg.Table.GetComment(), msg.Desc),
-		// D26 — per-table effective connection. Module-level for now;
-		// `(w17.db.table).connection` override + cross-module registry
-		// lookup follows. Nil when no module declared a connection.
-		Connection: b.fileConnection,
+		// D26 — per-table effective connection. Override via
+		// `(w17.db.table).connection` names another module's
+		// connection (same domain); unset = inherit the module's
+		// own declaration.
+		Connection: b.resolveTableConnection(msg),
 	}, true
+}
+
+// resolveTableConnection applies the per-table
+// (w17.db.table).connection override if present; otherwise inherits
+// from the module. An override that doesn't resolve against the
+// domain-level registry surfaces a diag error and returns the
+// module's connection so downstream code sees a consistent shape.
+func (b *builder) resolveTableConnection(msg *loader.LoadedMessage) *irpb.Connection {
+	override := msg.Table.GetConnection()
+	if override == "" {
+		return b.fileConnection
+	}
+	if c, ok := b.connByName[override]; ok {
+		return c
+	}
+	b.err(diag.Atf(msg.Desc, "(w17.db.table).connection %q does not resolve to a connection declared in this domain", override).
+		WithWhy("per-table connection overrides target a connection registered by some `(w17.db.module).connection` in the same compilation batch; unknown names would silently fall back to the module default, hiding the bug").
+		WithFix(`ensure a module in the compilation batch declares (w17.db.module).connection = { name: "` + override + `", dialect: <D>, version: "<V>" }`))
+	return b.fileConnection
 }
 
 // addTableColumns runs buildColumn for each proto field on the message and
