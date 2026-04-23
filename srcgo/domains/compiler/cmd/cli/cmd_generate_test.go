@@ -49,19 +49,19 @@ func TestGenerateCmd_RequireIterationFlag(t *testing.T) {
 	}
 }
 
-// TestGenerateCmd_MultiProtoRejected — iter-1 compiles exactly one
-// proto per run. Multi-file lands in iter-2.
-func TestGenerateCmd_MultiProtoRejected(t *testing.T) {
+// TestGenerateCmd_NoProtoRejected — empty input still rejected
+// (multi-file is fine; zero files isn't).
+func TestGenerateCmd_NoProtoRejected(t *testing.T) {
 	cmd := &GenerateCmd{
 		Iteration1: true,
-		Protos:     []string{"a.proto", "b.proto"},
+		Protos:     nil,
 	}
 	err := cmd.Run()
 	if err == nil {
-		t.Fatal("expected error on multi-proto input, got nil")
+		t.Fatal("expected error on empty proto input, got nil")
 	}
-	if !strings.Contains(err.Error(), "exactly one .proto") {
-		t.Errorf("error %q missing multi-file guard", err.Error())
+	if !strings.Contains(err.Error(), "at least one .proto") {
+		t.Errorf("error %q missing zero-input guard", err.Error())
 	}
 }
 

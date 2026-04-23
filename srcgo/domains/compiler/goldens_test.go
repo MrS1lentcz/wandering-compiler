@@ -27,6 +27,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/plan"
+	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 )
 
 // -update regenerates expected.{up,down}.sql for every case. Kept
@@ -103,6 +104,17 @@ func discoverCases(root string) ([]string, error) {
 
 func runPipeline(t *testing.T, caseDir string) (up, down string) {
 	t.Helper()
+	// Single-file convention: testdata/<name>/input.proto. Multi-file
+	// convention (M2): the directory contains any number of *.proto
+	// files (no input.proto sentinel) — BuildMany merges them.
+	if _, err := os.Stat(filepath.Join(caseDir, "input.proto")); err == nil {
+		return runSinglePipeline(t, caseDir)
+	}
+	return runMultiPipeline(t, caseDir)
+}
+
+func runSinglePipeline(t *testing.T, caseDir string) (string, string) {
+	t.Helper()
 	lf, err := loader.Load(context.Background(), "input.proto", []string{caseDir, protoImportRoot})
 	if err != nil {
 		t.Fatalf("loader.Load: %v", err)
@@ -111,6 +123,38 @@ func runPipeline(t *testing.T, caseDir string) (up, down string) {
 	if err != nil {
 		t.Fatalf("ir.Build: %v", err)
 	}
+	return runFromSchema(t, schema)
+}
+
+func runMultiPipeline(t *testing.T, caseDir string) (string, string) {
+	t.Helper()
+	entries, err := os.ReadDir(caseDir)
+	if err != nil {
+		t.Fatalf("read dir %s: %v", caseDir, err)
+	}
+	var paths []string
+	for _, e := range entries {
+		n := e.Name()
+		if !e.IsDir() && strings.HasSuffix(n, ".proto") {
+			paths = append(paths, n)
+		}
+	}
+	if len(paths) == 0 {
+		t.Fatalf("no .proto files in %s", caseDir)
+	}
+	files, err := loader.LoadMany(context.Background(), paths, []string{caseDir, protoImportRoot})
+	if err != nil {
+		t.Fatalf("loader.LoadMany: %v", err)
+	}
+	schema, err := ir.BuildMany(files)
+	if err != nil {
+		t.Fatalf("ir.BuildMany: %v", err)
+	}
+	return runFromSchema(t, schema)
+}
+
+func runFromSchema(t *testing.T, schema *irpb.Schema) (up, down string) {
+	t.Helper()
 	p, err := plan.Diff(nil, schema)
 	if err != nil {
 		t.Fatalf("plan.Diff: %v", err)

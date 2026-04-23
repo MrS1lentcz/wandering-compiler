@@ -36,7 +36,8 @@ type GenerateCmd struct {
 	Out     string   `short:"o" name:"out" placeholder:"DIR" help:"Output root. Migrations are written to <out>/migrations/. Overrides COMPILER_OUTPUT_DIR; defaults to the Config value (./out)."`
 	Imports []string `short:"I" name:"import" placeholder:"DIR" help:"Additional proto import path — repeatable. The input file's directory is always included; this flag is how you point at the w17/*.proto vocabulary and any user-local shared proto trees."`
 
-	Prev string `name:"prev" placeholder:"PROTO" help:"Path to the previous-revision .proto. When set, the differ computes prev → curr and emits an ALTER migration; absent → initial-migration path (iter-1 behaviour)."`
+	Prev    string   `name:"prev" placeholder:"PROTO" help:"Path to the previous-revision .proto. When set, the differ computes prev → curr and emits an ALTER migration; absent → initial-migration path (iter-1 behaviour)."`
+	PrevSet []string `name:"prev-set" placeholder:"PROTO" help:"Repeatable. Multi-file previous-revision set — one entry per prev-side .proto. Takes precedence over --prev when both are set."`
 
 	NoAppliedState bool `name:"no-applied-state" hidden:"" help:"Skip emitting the wc_migrations bookkeeping (D27). For one-off scratch DBs only."`
 
@@ -51,8 +52,8 @@ func (c *GenerateCmd) Run() error {
 	if !c.Iteration1 {
 		return fmt.Errorf("wc generate: --iteration-1 is required in this build")
 	}
-	if len(c.Protos) != 1 {
-		return fmt.Errorf("wc generate: iteration-1 compiles exactly one .proto per run (got %d); multi-file support lands in iteration-2 M2", len(c.Protos))
+	if len(c.Protos) == 0 {
+		return fmt.Errorf("wc generate: at least one .proto path is required")
 	}
 
 	cfg := compiler.NewConfigFromEnv()
@@ -69,13 +70,18 @@ func (c *GenerateCmd) Run() error {
 	migrationsDir := filepath.Join(outRoot, "migrations")
 
 	ctx := context.Background()
-	currSchema, err := loadSchema(ctx, c.Protos[0], c.Imports)
+	currSchema, err := loadSchemaSet(ctx, c.Protos, c.Imports)
 	if err != nil {
 		return err
 	}
 	var prevSchema *irpb.Schema
-	if c.Prev != "" {
-		prevSchema, err = loadSchema(ctx, c.Prev, c.Imports)
+	if len(c.PrevSet) > 0 {
+		prevSchema, err = loadSchemaSet(ctx, c.PrevSet, c.Imports)
+		if err != nil {
+			return fmt.Errorf("wc generate: --prev load: %w", err)
+		}
+	} else if c.Prev != "" {
+		prevSchema, err = loadSchemaSet(ctx, []string{c.Prev}, c.Imports)
 		if err != nil {
 			return fmt.Errorf("wc generate: --prev load: %w", err)
 		}
@@ -109,22 +115,42 @@ func (c *GenerateCmd) Run() error {
 	return nil
 }
 
-// loadSchema runs the loader → ir.Build pipeline for one proto file.
-func loadSchema(ctx context.Context, path string, imports []string) (*irpb.Schema, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", path, err)
+// loadSchemaSet runs loader.LoadMany → ir.BuildMany over a proto set.
+// The first file's directory seeds the import paths so single-file
+// callers keep working unchanged; each additional file contributes its
+// own directory to the import set as well.
+func loadSchemaSet(ctx context.Context, paths, imports []string) (*irpb.Schema, error) {
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no proto paths given")
 	}
-	if _, err := os.Stat(abs); err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	absPaths := make([]string, 0, len(paths))
+	seenDirs := map[string]bool{}
+	importPaths := append([]string{}, imports...)
+	for _, p := range paths {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", p, err)
+		}
+		if _, err := os.Stat(abs); err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		dir, _ := filepath.Split(abs)
+		if !seenDirs[dir] {
+			importPaths = append([]string{dir}, importPaths...)
+			seenDirs[dir] = true
+		}
+		absPaths = append(absPaths, abs)
 	}
-	dir, base := filepath.Split(abs)
-	importPaths := append([]string{dir}, imports...)
-	lf, err := loader.Load(ctx, base, importPaths)
+	bases := make([]string, 0, len(absPaths))
+	for _, abs := range absPaths {
+		_, base := filepath.Split(abs)
+		bases = append(bases, base)
+	}
+	files, err := loader.LoadMany(ctx, bases, importPaths)
 	if err != nil {
 		return nil, err
 	}
-	return ir.Build(lf)
+	return ir.BuildMany(files)
 }
 
 // wrapAppliedState injects the wc_migrations CREATE/INSERT (up) and

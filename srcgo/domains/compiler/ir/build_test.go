@@ -201,7 +201,7 @@ func TestBuildErrors(t *testing.T) {
 				`fk_target_missing.proto:`,
 				`fk target table "parents"`,
 				`why:`,
-				`iter-2`,
+				`compiled proto set`,
 				`fix:`,
 				`(w17.db.table).name = "parents"`,
 			},

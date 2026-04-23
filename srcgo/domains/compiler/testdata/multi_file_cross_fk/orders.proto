@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package ir.multi_file_cross_fk;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// File B — orders table with an FK into customers (defined in
+// customers.proto). Cross-file FK resolution is M2's job; same-
+// import-path-set means the compiled batch sees both files.
+message Order {
+  option (w17.db.table) = { name: "orders" };
+
+  int64  id          = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  int64  customer_id = 2 [
+    (w17.field)     = { type: ID },
+    (w17.db.column) = { fk: "customers.id", deletion_rule: BLOCK }
+  ];
+  string total       = 3 [(w17.field) = { type: DECIMAL, precision: 19, scale: 4 }];
+}

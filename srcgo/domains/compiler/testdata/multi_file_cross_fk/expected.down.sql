@@ -1,0 +1,8 @@
+BEGIN;
+
+DROP TABLE IF EXISTS orders;
+
+DROP INDEX IF EXISTS customers_email_uidx;
+DROP TABLE IF EXISTS customers;
+
+COMMIT;

@@ -53,6 +53,27 @@ type LoadedField struct {
 	PgField *pgpb.PgField
 }
 
+// LoadMany parses a set of .proto files sharing an import path set.
+// Used for multi-file schemas (iter-2 M2) — ir.BuildMany composes
+// per-file builds into one merged *irpb.Schema with cross-file FK
+// resolution.
+//
+// Order is preserved, so downstream error aggregation reports
+// failures in input order. Any single-file parse error aborts the
+// batch — partial success would leak half-formed state into the
+// differ.
+func LoadMany(ctx context.Context, paths, importPaths []string) ([]*LoadedFile, error) {
+	out := make([]*LoadedFile, 0, len(paths))
+	for _, p := range paths {
+		lf, err := Load(ctx, p, importPaths)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, lf)
+	}
+	return out, nil
+}
+
 // Load parses one .proto file. importPaths are passed verbatim to
 // protocompile; callers are expected to include at least a path that
 // resolves the w17/*.proto vocabulary (typically the repo's ./proto

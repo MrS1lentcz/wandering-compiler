@@ -32,40 +32,108 @@ import (
 
 // Build converts a loaded .proto into a validated *irpb.Schema.
 func Build(lf *loader.LoadedFile) (*irpb.Schema, error) {
-	b := &builder{lf: lf, msgByTable: map[string]*loader.LoadedMessage{}}
+	return BuildMany([]*loader.LoadedFile{lf})
+}
+
+// BuildMany merges a set of loaded protos into one validated
+// *irpb.Schema with cross-file FK resolution (iter-2 M2). Each file
+// contributes its own tables (stamped with the file's module-level
+// namespace per D19); the combined Schema's top-level namespace
+// reflects the first file's (later files can have their own — the
+// per-Table namespace is the authoritative qualifier for every
+// downstream emit site).
+//
+// Duplicate table names across files are rejected up-front; cross-
+// file FK targets resolve through the combined table registry, so
+// "<other_table>.<column>" references across modules just work.
+func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
+	if len(files) == 0 {
+		return &irpb.Schema{}, nil
+	}
+
 	schema := &irpb.Schema{}
-	b.resolveNamespace(schema)
-	if len(b.errs) > 0 {
-		// Namespace errors are fatal (every downstream identifier
-		// validation runs against the effective name); bail before
-		// buildTable sees a half-populated state.
-		return nil, errors.Join(b.errs...)
-	}
-	b.namespaceMode = schema.GetNamespaceMode()
-	b.namespace = schema.GetNamespace()
-	if b.namespaceMode == irpb.NamespaceMode_NAMESPACE_MODE_PREFIX {
-		b.prefix = b.namespace
-	}
-	for _, msg := range lf.Messages {
-		if msg.Table == nil {
-			// Messages without (w17.db.table) aren't compiler inputs in
-			// iteration-1. (Enums and helper types live in the same file.)
+	var allErrs []error
+
+	// Track the merged msg-by-name so resolveFKs can hand diagnostics
+	// the source descriptor from whichever file declared the owning
+	// table.
+	builders := make([]*builder, 0, len(files))
+	for _, lf := range files {
+		b := &builder{lf: lf, msgByTable: map[string]*loader.LoadedMessage{}}
+		fileSchema := &irpb.Schema{}
+		b.resolveNamespace(fileSchema)
+		if len(b.errs) > 0 {
+			allErrs = append(allErrs, b.errs...)
 			continue
 		}
-		tbl := b.buildTable(msg)
-		if tbl != nil {
+		b.namespaceMode = fileSchema.GetNamespaceMode()
+		b.namespace = fileSchema.GetNamespace()
+		if b.namespaceMode == irpb.NamespaceMode_NAMESPACE_MODE_PREFIX {
+			b.prefix = b.namespace
+		}
+		for _, msg := range lf.Messages {
+			if msg.Table == nil {
+				continue
+			}
+			tbl := b.buildTable(msg)
+			if tbl == nil {
+				continue
+			}
+			if _, dup := duplicateTableName(schema, tbl.GetName()); dup {
+				b.err(diag.Atf(msg.Desc, "table %q already defined in another file (duplicate across multi-file set)", tbl.GetName()).
+					WithWhy("wc merges every .proto in a `wc generate` batch into one Schema; two tables sharing a SQL identifier would collide at apply time").
+					WithFix("rename one of the messages, override the SQL name via (w17.db.table).name, or split the schema into separate namespaces via (w17.db.module)"))
+				continue
+			}
 			schema.Tables = append(schema.Tables, tbl)
 			b.msgByTable[tbl.GetName()] = msg
 		}
+		allErrs = append(allErrs, b.errs...)
+		builders = append(builders, b)
 	}
-	if len(b.errs) > 0 {
-		return nil, errors.Join(b.errs...)
+
+	// Top-level Schema namespace = first file's. Per-Table namespaces
+	// are already stamped by per-file buildTable, so emit picks the
+	// right qualifier from Table.Namespace[Mode] regardless of what
+	// Schema-level carries.
+	if len(files) > 0 {
+		firstSchema := &irpb.Schema{}
+		firstB := &builder{lf: files[0]}
+		firstB.resolveNamespace(firstSchema)
+		schema.NamespaceMode = firstSchema.GetNamespaceMode()
+		schema.Namespace = firstSchema.GetNamespace()
 	}
-	b.resolveFKs(schema)
-	if len(b.errs) > 0 {
-		return nil, errors.Join(b.errs...)
+
+	if len(allErrs) > 0 {
+		return nil, errors.Join(allErrs...)
+	}
+
+	// Unified FK resolution: merge every builder's msgByTable into one
+	// registry, then walk the combined schema once. Keeps diagnostics
+	// attached to the right source file via the merged lookup.
+	merged := &builder{lf: files[0], msgByTable: map[string]*loader.LoadedMessage{}}
+	for _, b := range builders {
+		for k, v := range b.msgByTable {
+			merged.msgByTable[k] = v
+		}
+	}
+	merged.resolveFKs(schema)
+	if len(merged.errs) > 0 {
+		allErrs = append(allErrs, merged.errs...)
+		return nil, errors.Join(allErrs...)
 	}
 	return schema, nil
+}
+
+// duplicateTableName returns the existing Table + true when `name`
+// is already present in `schema`.
+func duplicateTableName(schema *irpb.Schema, name string) (*irpb.Table, bool) {
+	for _, t := range schema.GetTables() {
+		if t.GetName() == name {
+			return t, true
+		}
+	}
+	return nil, false
 }
 
 // resolveNamespace reads (w17.db.module) off the loader, validates it,
@@ -1441,9 +1509,9 @@ func (b *builder) resolveFKs(schema *irpb.Schema) {
 			}
 			target, ok := byName[fk.GetTargetTable()]
 			if !ok {
-				b.err(diag.Atf(desc, "field %q: fk target table %q not defined in this file", fk.GetColumn(), fk.GetTargetTable()).
-					WithWhy("iteration-1 resolves fk references within the single compiled proto — cross-file fk resolution lands in iter-2").
-					WithFix(fmt.Sprintf("add a message annotated with (w17.db.table).name = %q to this file, or correct the fk reference", fk.GetTargetTable())))
+				b.err(diag.Atf(desc, "field %q: fk target table %q not found in the compiled proto set", fk.GetColumn(), fk.GetTargetTable()).
+					WithWhy("wc resolves fk references across every .proto passed to one `wc generate` invocation; the target table isn't present in that set").
+					WithFix(fmt.Sprintf("add a message annotated with (w17.db.table).name = %q to one of the input files, or correct the fk reference", fk.GetTargetTable())))
 				continue
 			}
 			if !hasColumn(target, fk.GetTargetColumn()) {
