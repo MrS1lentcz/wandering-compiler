@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_name_len;
+
+COMMIT;

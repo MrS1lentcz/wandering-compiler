@@ -1,0 +1,5 @@
+BEGIN;
+
+ALTER TABLE accounts RENAME TO users;
+
+COMMIT;
