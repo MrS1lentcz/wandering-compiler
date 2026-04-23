@@ -121,3 +121,50 @@ func TestEmitEmptyOpErrors(t *testing.T) {
 		t.Fatal("empty Op accepted; want error")
 	}
 }
+
+// TestEmitWcMigrationsCreate — lazy-init comment; down DEL.
+func TestEmitWcMigrationsCreate(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsCreate{WcMigrationsCreate: &planpb.WcMigrationsCreate{}}}
+	up, down, err := redis.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if !strings.Contains(up, "lazily on first ZADD") {
+		t.Errorf("up = %q", up)
+	}
+	if !strings.Contains(down, "rollback") {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAddTableEmptyName — defensive.
+func TestEmitAddTableEmptyName(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: &irpb.Table{}}}}
+	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty table name accepted; want error")
+	}
+}
+
+// TestEmitDropTableEmptyName — defensive.
+func TestEmitDropTableEmptyName(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: &irpb.Table{}}}}
+	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty table name accepted; want error")
+	}
+}
+
+// TestEmitRenameTableEmptyNames — defensive.
+func TestEmitRenameTableEmptyNames(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{FromName: "a"}}}
+	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty to accepted; want error")
+	}
+}
+
+// TestEmitWcMigrationsInsertEmptyTimestamp — defensive.
+func TestEmitWcMigrationsInsertEmptyTimestamp(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsInsert{WcMigrationsInsert: &planpb.WcMigrationsInsert{}}}
+	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty timestamp accepted; want error")
+	}
+}

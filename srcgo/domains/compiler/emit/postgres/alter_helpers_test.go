@@ -170,3 +170,80 @@ func TestResolveSqlColNameMissing(t *testing.T) {
 		t.Errorf("error doesn't name missing column: %v", err)
 	}
 }
+
+// TestRenderRawIndexShape — CREATE INDEX / CREATE UNIQUE INDEX
+// both branches of the keyword dispatch.
+func TestRenderRawIndexShape(t *testing.T) {
+	tbl := &irpb.Table{Name: "posts"}
+	nonUnique := renderRawIndex(tbl, &irpb.RawIndex{Name: "idx1", Body: "(title)"})
+	if nonUnique != "CREATE INDEX idx1 ON posts (title);" {
+		t.Errorf("non-unique = %q", nonUnique)
+	}
+	unique := renderRawIndex(tbl, &irpb.RawIndex{Name: "idx2", Body: "(email)", Unique: true})
+	if unique != "CREATE UNIQUE INDEX idx2 ON posts (email);" {
+		t.Errorf("unique = %q", unique)
+	}
+}
+
+// TestRenderWcMigrationsCreate covers the exported public renderer
+// (used directly by the CLI wrapper path). Asserts the schema lines
+// match the D27 contract.
+func TestRenderWcMigrationsCreate(t *testing.T) {
+	got := RenderWcMigrationsCreate()
+	for _, expect := range []string{
+		"CREATE TABLE wc_migrations",
+		"timestamp      TIMESTAMPTZ PRIMARY KEY",
+		"applied_at     TIMESTAMPTZ NOT NULL DEFAULT now()",
+		"content_sha256 BYTEA NOT NULL",
+	} {
+		if !strings.Contains(got, expect) {
+			t.Errorf("missing %q in:\n%s", expect, got)
+		}
+	}
+}
+
+// TestRenderWcMigrationsDrop — DROP TABLE IF EXISTS sentinel.
+func TestRenderWcMigrationsDrop(t *testing.T) {
+	if got := RenderWcMigrationsDrop(); got != "DROP TABLE IF EXISTS wc_migrations;" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestRenderWcMigrationsInsertHexHash — hash renders as PG `\x<hex>`
+// bytea literal.
+func TestRenderWcMigrationsInsertHexHash(t *testing.T) {
+	hash := []byte{0xde, 0xad, 0xbe, 0xef}
+	got := RenderWcMigrationsInsert("20260423T120000Z", hash)
+	if !strings.Contains(got, `'\xdeadbeef'`) {
+		t.Errorf("hash hex not rendered: %q", got)
+	}
+	if !strings.Contains(got, "INSERT INTO wc_migrations") {
+		t.Errorf("missing INSERT: %q", got)
+	}
+}
+
+// TestRenderWcMigrationsDelete — symmetric DELETE by timestamp PK.
+func TestRenderWcMigrationsDelete(t *testing.T) {
+	got := RenderWcMigrationsDelete("20260423T120000Z")
+	if got != "DELETE FROM wc_migrations WHERE timestamp = '20260423T120000Z';" {
+		t.Errorf("got %q", got)
+	}
+}
+
+// TestEmitWcMigrationsCreateDispatch — covers the Op_WcMigrationsCreate
+// EmitOp branch (otherwise 0% because the CLI path calls
+// RenderWcMigrationsCreate directly; the Op variant only comes into
+// play when a pre-built Plan carries the Op itself).
+func TestEmitWcMigrationsCreateDispatch(t *testing.T) {
+	e := Emitter{}
+	up, down, err := e.emitWcMigrationsCreate(nil)
+	if err != nil {
+		t.Fatalf("emitWcMigrationsCreate: %v", err)
+	}
+	if !strings.Contains(up, "CREATE TABLE wc_migrations") {
+		t.Errorf("up missing CREATE: %q", up)
+	}
+	if down != "DROP TABLE IF EXISTS wc_migrations;" {
+		t.Errorf("down = %q", down)
+	}
+}
