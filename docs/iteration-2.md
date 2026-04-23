@@ -899,10 +899,12 @@ D28 is the foundation of an exhaustive table-driven test matrix:
 **Open questions:**
 
 - ~~Should NEEDS_CONFIRM auto-generate check.sql even without user
-  decision, so reviewer can preview risk?~~ — **deferred 2026-04-23**
-  per user: "migration file + check.sql storage location is not
-  yet decided." Revisit when platform (D29) + deploy-client
-  contract firms up.
+  decision, so reviewer can preview risk?~~ — **resolved 2026-04-23
+  via D30.** Engine always produces check.sql strings as part of
+  `Migration.Checks[]`; no gating on user decision. Where/whether
+  to persist them is `Sink`'s policy, not the engine's. The
+  "storage location" concern that earlier deferred this question
+  is now outside the engine layer entirely.
 - **DROP_AND_CREATE proto-side semantics** — two workflows co-exist
   for a type change on an existing column:
     1. **Keep the proto field number, change the type.** D10 sees
@@ -1721,6 +1723,191 @@ goes (local `out/` vs tool API). This separation means:
 - Every architectural decision between now and then is
   measured against D29: does it make tool integration easier
   or harder?
+
+### D30 — Engine isolation: pure `Plan()` + Sink / ResolutionSource adapters (added 2026-04-23)
+
+**Status: locked.** Draws the layering boundary between the
+compiler engine (pure, stateless function) and everything outside
+it (storage, resolution delivery, approval workflows). Makes D29
+tool integration an adapter choice instead of an engine concern,
+and dissolves D28 Open Question #1 (migration file storage) as
+not-this-layer's-problem.
+
+**Principle.** The engine takes `(prev IR, curr IR, resolutions)`
+and returns `(migrations, findings)`. It writes no files, reads
+no registry, waits on no user input. Every side effect — file I/O,
+HTTP calls, UI prompts, re-run coordination — lives in an adapter.
+
+**Engine public API.**
+
+```go
+// Single entry point. Pure, idempotent, stateless. Safe to call
+// concurrently with different inputs.
+func Plan(prev, curr *ir.Schema, resolutions []Resolution) (*Plan, error)
+```
+
+**Plan shape** (proto message in `plan.proto`; Go types shown for
+brevity):
+
+```go
+type Plan struct {
+    Migrations []Migration     // one per target Connection
+    Findings   []ReviewFinding // blocked decisions, if any
+}
+
+type Migration struct {
+    Connection Connection
+    UpSQL      string
+    DownSQL    string
+    Checks     []NamedSQL      // NEEDS_CONFIRM pre-apply queries
+    Manifest   Manifest        // caps, extensions, D28 decisions applied
+}
+
+type ReviewFinding struct {
+    ID        string           // deterministic hash of the decision point
+    Column    ColumnRef        // table.column + proto field number
+    Axis      string           // "carrier_change" / "generated_expr" / …
+    Proposed  Strategy         // classifier default (e.g. CUSTOM_MIGRATION)
+    Options   []Strategy       // set --decide can pick from
+    Rationale string           // human-readable why
+    Context   FindingContext   // prev + curr fact snapshots
+}
+
+type Resolution struct {
+    FindingID string
+    Strategy  Strategy  // SAFE / USING / NEEDS_CONFIRM / DROP_AND_CREATE / CUSTOM_MIGRATION
+    CustomSQL string    // only when Strategy == CUSTOM_MIGRATION
+    DecidedAt time.Time
+    Actor     string    // free-form ("jdubansky@email" / "platform-bot" / "cli")
+}
+```
+
+**Adapter interfaces** (not part of engine; live in separate Go
+packages so engine tests never touch them):
+
+```go
+// ResolutionSource — supplies resolutions to the engine. Impls:
+//   - MemorySource   (tests)
+//   - CLISource      (parses --decide flags + --decisions YAML)
+//   - PlatformSource (D29 future; calls hosted tool API)
+type ResolutionSource interface {
+    Lookup(findingID string) (Resolution, bool)
+    All() []Resolution
+}
+
+// Sink — serialises Plan artifacts. Impls:
+//   - MemorySink      (tests; captures Plan in-memory for assertions)
+//   - FilesystemSink  (today's wc generate --out <dir> behavior)
+//   - PlatformSink    (D29 future; pushes to registry)
+type Sink interface {
+    Write(plan *Plan) error
+}
+```
+
+**Finding lifecycle (external policy, engine agnostic).**
+
+1. Caller assembles known resolutions from whatever source.
+2. `Plan(prev, curr, known)` → (migrations, findings).
+3. For each finding with a matching Resolution (by ID): migration
+   is complete; sink writes it.
+4. Findings without matches → returned as-is. Caller decides what
+   to do:
+   - CLI: print as `diag.Error`, exit non-zero.
+   - Platform: surface as approval task in UI.
+   - CI: block the PR.
+5. Caller gathers the missing resolutions and re-calls Plan
+   idempotently. Finding IDs are deterministic hashes of
+   (column fqn, axis, prev fact snapshot, curr fact snapshot),
+   so resolutions survive re-runs as long as the inputs don't
+   change.
+
+**Idempotence rule.** Same `(prev, curr, resolutions)` → byte-
+identical `Plan`. This extends iter-1 AC #4 across resolutions.
+Tests enforce.
+
+**Statelessness rule.** No caches, no globals, no I/O inside the
+engine. Goroutine-safe with different inputs. Each run is a pure
+function evaluation.
+
+**Why this resolves Q1 (migration file storage).**
+
+Q1 asked: "where do migration SQL, check.sql, manifest files live —
+`out/<domain>/...`? platform registry? git-tracked?" Under D30,
+the engine doesn't care. `Plan.Migrations[i].UpSQL` is a string.
+`Plan.Migrations[i].Checks[j].SQL` is a string. Where those strings
+get serialised is Sink's call. Standalone CLI today uses
+`FilesystemSink`; platform mode tomorrow uses `PlatformSink`; both
+consume the same `Plan` struct.
+
+**Why this resolves Q2-like proto-wire concerns gracefully.**
+
+Findings are structured enough to carry a Warning-severity field
+(future: `Severity` enum — Info / Warning / Block). Proto-wire-
+breaking carrier change gets `Severity: Warning` + proposed
+`Strategy: CUSTOM_MIGRATION`; blocking policies (CI, approval UI)
+layer on top.
+
+**Impact on D28 phasing.**
+
+- **Phase 2** (classifier + `diff.go` refactor): implements `Plan()`
+  with `ResolutionSource` injected. Same LOC budget as before
+  (~400-600).
+- **Phase 3** (`--decide` flag): becomes the `CLISource`
+  implementation. ~50 LOC flag parser; trivial.
+- **Phase 4** (check.sql emit): **unblocked.** Engine emits
+  check SQL as `Migration.Checks[]` strings. Storage layout is
+  Sink's concern.
+- **Phase 5** (exhaustive tests): use `MemorySink` + in-memory
+  `ResolutionSource`; assert `Plan` shape directly. No filesystem
+  round-trip in the unit tests; apply-roundtrip fixtures continue
+  to use `FilesystemSink` + `make test-apply`.
+
+**Impact on today's `cmd/cli/`.**
+
+Today's pipeline inlines `os.WriteFile` calls throughout
+`cli+ir+emit`. Refactor under D30:
+
+1. `cli` becomes: parse flags → load prev/curr IR → build
+   `CLISource` → `Plan(prev, curr, source.All())` → pass result
+   into `FilesystemSink.Write(plan)`.
+2. `emit/postgres` stops writing files; returns strings +
+   manifest structs upstream.
+3. `FilesystemSink` lands in a new package
+   (`srcgo/domains/compiler/sink/filesystem/`) with the file-layout
+   logic extracted from `emit` + `cli`.
+
+~150 LOC code motion; no behavior change for the default
+`wc generate --out <dir>` CLI invocation.
+
+**Impact on D29 (future platform integration).**
+
+Adapter story, not engine work. `PlatformResolutionSource` +
+`PlatformSink` slot in as alternate impls. The hosted tool runs
+the same engine binary (or same library linked into the tool);
+only the adapters differ. D29's lock-file / registry / approval
+UI all sit cleanly outside the engine.
+
+**Rationale (user, 2026-04-23):**
+
+> "engine by mel generovat veci, ale neresit kam. Kdyz diff ma
+> problem, melo by to byt review finding s resolution objektem,
+> na ktery se ceka. Odkud se vezmou resolutions neni vec engine.
+> Ted pro testovani si vystup muzeme davat kam potrebujeme,
+> tzn implementujeme nejaky dummy connector na to, ale realne
+> by to vlastne melo mit jen interni rozhrani."
+
+Clean separation: compiler = deterministic function; storage +
+approval = policy layers outside.
+
+**Open sub-question (non-blocking).**
+
+- **Where does the `Plan` proto live?** Likely `plan.proto` gets
+  new top-level messages (Plan, Migration, ReviewFinding,
+  Resolution) alongside the existing Ops. Alternative:
+  `engine.proto` as a fresh file to keep Plan-the-envelope
+  separate from Op-the-atom. Lean: extend `plan.proto` — they're
+  the same conceptual domain, and a fresh file just to separate
+  "Plan-wrapper" from "Plan-Ops" is ceremony without payoff.
 
 ## Acceptance criteria for M1
 
