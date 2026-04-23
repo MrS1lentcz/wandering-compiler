@@ -44,6 +44,8 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitDropColumn(v.DropColumn)
 	case *planpb.Op_RenameColumn:
 		return e.emitRenameColumn(v.RenameColumn)
+	case *planpb.Op_AlterColumn:
+		return e.emitAlterColumn(v.AlterColumn)
 	case *planpb.Op_AddIndex:
 		return e.emitAddIndex(v.AddIndex)
 	case *planpb.Op_DropIndex:

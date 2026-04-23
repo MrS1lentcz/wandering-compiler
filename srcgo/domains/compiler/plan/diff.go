@@ -22,6 +22,7 @@
 package plan
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -102,6 +103,20 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	for _, pair := range both {
 		ops = append(ops, columnRenames(pair)...)
 	}
+	// AlterColumn after rename — the alter ctx uses the post-rename
+	// name. REFUSE-strategy fact changes propagate as errors.
+	var alterErrs []error
+	for _, pair := range both {
+		alters, err := columnAlters(pair)
+		if err != nil {
+			alterErrs = append(alterErrs, err)
+			continue
+		}
+		ops = append(ops, alters...)
+	}
+	if len(alterErrs) > 0 {
+		return nil, fmt.Errorf("plan: column-alter refusals: %w", errors.Join(alterErrs...))
+	}
 	// Index drops + replaces + adds. Indexes can reference columns
 	// added in this same migration (column adds emitted earlier),
 	// so this block follows column adds.
@@ -176,6 +191,102 @@ func columnDrops(pair TablePair) []*planpb.Op {
 		})
 	}
 	return ops
+}
+
+// columnAlters returns AlterColumn ops for both-present columns
+// whose facts differ. Identity = proto field number (D10); name
+// changes are handled separately by columnRenames. Each emitted
+// AlterColumn carries the FactChange list the emitter walks to
+// produce ALTER TABLE statements per the iteration-2 strategy
+// table.
+//
+// REFUSE-strategy facts (carrier, pk, custom_type, element_*,
+// generated_expr — only when the change is structural) trigger
+// a *diag.Error returned to the caller. Caller (Diff) accumulates
+// + returns; emit never sees a refusal.
+func columnAlters(pair TablePair) ([]*planpb.Op, error) {
+	prevByNum := numberMap(pair.Prev.GetColumns())
+	ctx := tableCtxOf(pair.Curr)
+	var ops []*planpb.Op
+	var refusals []error
+	for _, currCol := range pair.Curr.GetColumns() {
+		prevCol, both := prevByNum[currCol.GetFieldNumber()]
+		if !both {
+			continue
+		}
+		changes, err := buildFactChanges(pair.Curr, prevCol, currCol)
+		if err != nil {
+			refusals = append(refusals, err)
+			continue
+		}
+		if len(changes) == 0 {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+			Ctx:         ctx,
+			FieldNumber: currCol.GetFieldNumber(),
+			ColumnName:  currCol.GetName(),
+			Changes:     changes,
+		}}})
+	}
+	if len(refusals) > 0 {
+		return nil, errors.Join(refusals...)
+	}
+	return ops, nil
+}
+
+// buildFactChanges walks every fact axis on a Column pair and
+// emits a FactChange entry per axis whose value differs. Returns
+// an error for REFUSE-strategy axes per iteration-2 alter-strategies
+// (carrier change, pk flip, element_* reshape, pg.custom_type change).
+// Ordering in the returned slice is fact-class declaration order
+// here so emit produces deterministic SQL.
+func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*planpb.FactChange, error) {
+	if prev.GetCarrier() != curr.GetCarrier() {
+		return nil, fmt.Errorf("column %q (#%d): proto carrier change %v→%v is REFUSE-strategy (drop the field and add a new one with a fresh number)",
+			curr.GetName(), curr.GetFieldNumber(), prev.GetCarrier(), curr.GetCarrier())
+	}
+	if prev.GetPk() != curr.GetPk() {
+		return nil, fmt.Errorf("column %q (#%d): primary-key flip is REFUSE-strategy (PK change is table-rebuild territory; author writes an explicit migration)",
+			curr.GetName(), curr.GetFieldNumber())
+	}
+	if prev.GetElementCarrier() != curr.GetElementCarrier() ||
+		prev.GetElementIsMessage() != curr.GetElementIsMessage() {
+		return nil, fmt.Errorf("column %q (#%d): collection element reshape is REFUSE-strategy",
+			curr.GetName(), curr.GetFieldNumber())
+	}
+	prevPgCT := prev.GetPg().GetCustomType()
+	currPgCT := curr.GetPg().GetCustomType()
+	if prevPgCT != currPgCT {
+		return nil, fmt.Errorf("column %q (#%d): (w17.pg.field).custom_type change %q→%q is REFUSE-strategy (custom_type is author-owned)",
+			curr.GetName(), curr.GetFieldNumber(), prevPgCT, currPgCT)
+	}
+
+	var out []*planpb.FactChange
+	if prev.GetNullable() != curr.GetNullable() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_Nullable{Nullable: &planpb.NullableChange{
+			From: prev.GetNullable(), To: curr.GetNullable(),
+		}}})
+	}
+	if !proto.Equal(prev.GetDefault(), curr.GetDefault()) {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_DefaultValue{DefaultValue: &planpb.DefaultChange{
+			From: prev.GetDefault(), To: curr.GetDefault(),
+		}}})
+	}
+	if prev.GetMaxLen() != curr.GetMaxLen() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{
+			From: prev.GetMaxLen(), To: curr.GetMaxLen(),
+		}}})
+	}
+	if prev.GetComment() != curr.GetComment() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_Comment{Comment: &planpb.CommentChange{
+			From: prev.GetComment(), To: curr.GetComment(),
+		}}})
+	}
+	// Numeric precision / scale, db_type, generated_expr, enum_values,
+	// allowed_extensions, unique change variants land in the
+	// follow-up commit that wires their emit branches.
+	return out, nil
 }
 
 // columnRenames returns RenameColumn ops for both-present columns

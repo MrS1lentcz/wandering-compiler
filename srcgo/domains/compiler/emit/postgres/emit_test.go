@@ -496,6 +496,81 @@ func TestEmitAddRawCheck(t *testing.T) {
 	}
 }
 
+// TestEmitAlterColumnNullable — DIRECT-strategy nullability flip.
+// Up SET NOT NULL when `to` is false, DROP NOT NULL when true.
+// Down inverts symmetrically.
+func TestEmitAlterColumnNullable(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "users"},
+		ColumnName: "email",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_Nullable{Nullable: &planpb.NullableChange{From: false, To: true}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE users ALTER COLUMN email DROP NOT NULL;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE users ALTER COLUMN email SET NOT NULL;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAlterColumnMaxLen — DIRECT widen + narrow both render
+// ALTER ... TYPE VARCHAR(N). PG gates narrow at apply time if data
+// doesn't fit.
+func TestEmitAlterColumnMaxLen(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "users"},
+		ColumnName: "name",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{From: 64, To: 200}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(200);" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE users ALTER COLUMN name TYPE VARCHAR(64);" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAlterColumnMultipleFacts — multiple FactChanges in one
+// AlterColumn op render as multiple ALTER TABLE statements.
+// Down reverses order so rollback unwinds in the order applied.
+func TestEmitAlterColumnMultipleFacts(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "users"},
+		ColumnName: "name",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_Nullable{Nullable: &planpb.NullableChange{From: false, To: true}}},
+			{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{From: 64, To: 200}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	upLines := strings.Split(up, "\n")
+	downLines := strings.Split(down, "\n")
+	if len(upLines) != 2 || len(downLines) != 2 {
+		t.Fatalf("expected 2 lines each; up=%d down=%d", len(upLines), len(downLines))
+	}
+	if !strings.Contains(upLines[0], "DROP NOT NULL") || !strings.Contains(upLines[1], "VARCHAR(200)") {
+		t.Errorf("up order wrong:\n%s", up)
+	}
+	if !strings.Contains(downLines[0], "VARCHAR(64)") || !strings.Contains(downLines[1], "SET NOT NULL") {
+		t.Errorf("down should reverse order:\n%s", down)
+	}
+}
+
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
 // DropColumn.down = AddColumn.up for the same column. Confirms the
 // emitter's symmetry contract for column-axis ops.

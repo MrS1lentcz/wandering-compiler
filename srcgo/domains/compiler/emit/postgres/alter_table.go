@@ -133,6 +133,129 @@ func (e Emitter) emitRenameColumn(rc *planpb.RenameColumn) (string, string, erro
 	return up, down, nil
 }
 
+// emitAlterColumn walks the FactChange list and renders one ALTER
+// TABLE statement per fact, separated by newlines. Down inverts the
+// list: each FactChange's symmetric inverse, in REVERSE order so a
+// down rollback unwinds in the order applied.
+func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn) (string, string, error) {
+	if ac.GetColumnName() == "" {
+		return "", "", fmt.Errorf("postgres: AlterColumn with empty column_name")
+	}
+	tbl := tableShellFromCtx(ac.GetCtx(), nil)
+	qual := qualifiedTable(tbl)
+	colName := ac.GetColumnName()
+
+	var ups, downs []string
+	for _, fc := range ac.GetChanges() {
+		up, down, err := renderFactChange(qual, colName, fc)
+		if err != nil {
+			return "", "", fmt.Errorf("postgres: AlterColumn %s.%s: %w", ac.GetCtx().GetTableName(), colName, err)
+		}
+		if up != "" {
+			ups = append(ups, up)
+		}
+		if down != "" {
+			downs = append(downs, down)
+		}
+	}
+	// Reverse downs so rollback unwinds in apply-reverse order.
+	for i, j := 0, len(downs)-1; i < j; i, j = i+1, j-1 {
+		downs[i], downs[j] = downs[j], downs[i]
+	}
+	return strings.Join(ups, "\n"), strings.Join(downs, "\n"), nil
+}
+
+// renderFactChange dispatches one FactChange variant to its emit.
+// Each branch returns (up, down) statements as fully-terminated SQL.
+// Variants whose strategy is DIRECT use plain ALTER COLUMN; variants
+// covered by sub-clauses inside a single ALTER TABLE coalesce in a
+// future optimisation pass (one ALTER TABLE per fact today).
+func renderFactChange(qualTable, colName string, fc *planpb.FactChange) (string, string, error) {
+	switch v := fc.GetVariant().(type) {
+	case *planpb.FactChange_Nullable:
+		up, down := renderNullableChange(qualTable, colName, v.Nullable)
+		return up, down, nil
+	case *planpb.FactChange_DefaultValue:
+		return renderDefaultChange(qualTable, colName, v.DefaultValue)
+	case *planpb.FactChange_MaxLen:
+		up, down := renderMaxLenChange(qualTable, colName, v.MaxLen)
+		return up, down, nil
+	case *planpb.FactChange_Comment:
+		up, down := renderColumnCommentChange(qualTable, colName, v.Comment)
+		return up, down, nil
+	}
+	return "", "", fmt.Errorf("FactChange variant %T not yet implemented", fc.GetVariant())
+}
+
+// renderNullableChange — DIRECT strategy. SET / DROP NOT NULL.
+// Down inverts. PG fails the SET NOT NULL apply if any row is NULL
+// (deploy client pre-checks per the platform contract).
+func renderNullableChange(qual, col string, ch *planpb.NullableChange) (string, string) {
+	if ch.GetTo() {
+		// to = nullable → DROP NOT NULL. Down restores NOT NULL.
+		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;", qual, col),
+			fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;", qual, col)
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL;", qual, col),
+		fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP NOT NULL;", qual, col)
+}
+
+// renderDefaultChange — DIRECT strategy. SET / DROP DEFAULT. The
+// default expression rendering re-uses iter-1's defaultExpr against
+// a synthetic Column carrying the relevant fields. Returns an error
+// if defaultExpr refuses (defensive against IR slip).
+func renderDefaultChange(qual, col string, ch *planpb.DefaultChange) (string, string, error) {
+	upStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetTo())
+	if err != nil {
+		return "", "", err
+	}
+	downStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetFrom())
+	if err != nil {
+		return "", "", err
+	}
+	if upStmt == "" {
+		// to = unset → DROP DEFAULT
+		upStmt = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;", qual, col)
+	}
+	if downStmt == "" {
+		downStmt = fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s DROP DEFAULT;", qual, col)
+	}
+	return upStmt, downStmt, nil
+}
+
+// defaultStmt builds one `ALTER TABLE … ALTER COLUMN … SET DEFAULT
+// <expr>;` for a non-nil Default; returns "" for nil so caller can
+// substitute DROP DEFAULT.
+func defaultStmt(qual, col, action string, def *irpb.Default) (string, error) {
+	if def == nil || def.GetVariant() == nil {
+		return "", nil
+	}
+	synthetic := &irpb.Column{Name: col}
+	expr, err := defaultExpr(synthetic, def)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s %s %s;", qual, col, action, expr), nil
+}
+
+// renderMaxLenChange — DIRECT strategy. ALTER COLUMN TYPE VARCHAR(N)
+// works for both widen and narrow; PG rejects narrow at apply if any
+// row exceeds N. Down restores the previous width.
+func renderMaxLenChange(qual, col string, ch *planpb.MaxLenChange) (string, string) {
+	to := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE VARCHAR(%d);", qual, col, ch.GetTo())
+	from := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE VARCHAR(%d);", qual, col, ch.GetFrom())
+	return to, from
+}
+
+// renderColumnCommentChange — DIRECT strategy. COMMENT ON COLUMN …
+// IS …; empty values render as IS NULL (PG sentinel for "no
+// comment"). Down restores prev.
+func renderColumnCommentChange(qual, col string, ch *planpb.CommentChange) (string, string) {
+	up := fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", qual, col, commentLiteral(ch.GetTo()))
+	down := fmt.Sprintf("COMMENT ON COLUMN %s.%s IS %s;", qual, col, commentLiteral(ch.GetFrom()))
+	return up, down
+}
+
 // emitDropColumn renders ALTER TABLE ... DROP COLUMN ...; (+ DROP TYPE
 // for ENUMs). Down is the inverse — re-creates the column the same way
 // emitAddColumn would.

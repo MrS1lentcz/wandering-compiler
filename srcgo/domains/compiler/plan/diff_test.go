@@ -427,6 +427,59 @@ func TestDiffIndexReplace(t *testing.T) {
 	}
 }
 
+// TestDiffAlterColumnNullable — both-present column with nullability
+// flip → AlterColumn op carrying one NullableChange.
+func TestDiffAlterColumnNullable(t *testing.T) {
+	mk := func(nullable bool) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+				{Name: "email", ProtoName: "email", FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255, Nullable: nullable},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk(false), mk(true))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	ac := ops[0].GetAlterColumn()
+	if ac == nil {
+		t.Fatalf("ops[0] = %T, want *Op_AlterColumn", ops[0].GetVariant())
+	}
+	if len(ac.GetChanges()) != 1 {
+		t.Fatalf("changes len = %d, want 1", len(ac.GetChanges()))
+	}
+	nc := ac.GetChanges()[0].GetNullable()
+	if nc == nil || nc.GetFrom() || !nc.GetTo() {
+		t.Errorf("change variant = %T, want NullableChange{from:false to:true}", ac.GetChanges()[0].GetVariant())
+	}
+}
+
+// TestDiffAlterColumnRefuseCarrierChange — proto carrier change is
+// REFUSE per strategy table; differ surfaces an error rather than
+// emitting drop+add or silent SQL.
+func TestDiffAlterColumnRefuseCarrierChange(t *testing.T) {
+	mk := func(carrier irpb.Carrier) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: carrier, Type: irpb.SemType_SEM_ID, Pk: true},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	_, err := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING))
+	if err == nil {
+		t.Fatal("Diff accepted carrier change; want REFUSE error")
+	}
+}
+
 // TestDiffMessageRenameIsDropPlusAdd — D24: changing the proto message
 // name (= changing FQN) is semantically a destroy + create, not an
 // in-place rename. Even if the SQL `name` is identical, FQN difference
