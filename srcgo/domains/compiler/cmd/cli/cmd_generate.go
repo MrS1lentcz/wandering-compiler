@@ -17,6 +17,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/redis"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/sqlite"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine"
+	cliresolve "github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/cli"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/filesystem"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
@@ -44,6 +45,8 @@ type GenerateCmd struct {
 	PrevSet []string `name:"prev-set" placeholder:"PROTO" help:"Repeatable. Multi-file previous-revision set — one entry per prev-side .proto. Takes precedence over --prev when both are set."`
 
 	NoAppliedState bool `name:"no-applied-state" hidden:"" help:"Skip emitting the wc_migrations bookkeeping (D27). For one-off scratch DBs only."`
+
+	Decide []string `name:"decide" placeholder:"TABLE.COL=STRATEGY" help:"Repeatable. Resolve a decision-required axis on a column. Syntax: <table>.<column>[:<axis>]=<strategy> or <table>.<column>[:<axis>]=custom:<sql-file>. Strategies: safe, lossless_using (alias using), needs_confirm (alias confirm), drop_and_create (alias drop)."`
 
 	Protos []string `arg:"" name:"proto" required:"" help:"Path(s) to .proto schema file(s). Iteration-1 accepts exactly one."`
 }
@@ -98,10 +101,25 @@ func (c *GenerateCmd) Run() error {
 		}
 	}
 
-	// engine.Plan orchestrates bucketing + diff + emit internally.
-	// Resolutions are empty here (--decide plumbing lands in step 7);
-	// findings on decision-required axes surface as error below.
-	result, err := engine.Plan(prevSchema, currSchema, cls, nil, pickEmitter)
+	// Parse --decide flags (may be empty). Deferred loading of custom
+	// SQL files happens here — if a flag references a missing file,
+	// we surface the error before the expensive pipeline runs.
+	decisions, err := cliresolve.Parse(c.Decide, cliresolve.DefaultSQLLoader)
+	if err != nil {
+		return fmt.Errorf("wc generate: --decide: %w", err)
+	}
+
+	// Probe Plan to discover decision-required findings. Always runs
+	// even when --decide is empty so the error path can show findings.
+	probe, err := engine.Plan(prevSchema, currSchema, cls, nil, pickEmitter)
+	if err != nil {
+		return fmt.Errorf("wc generate: %w", err)
+	}
+	resolutions := decisions.ResolveAll(probe.Findings)
+
+	// Final Plan with applied resolutions. If decisions covered every
+	// finding, Plan.Findings will be empty.
+	result, err := engine.Plan(prevSchema, currSchema, cls, resolutions, pickEmitter)
 	if err != nil {
 		return fmt.Errorf("wc generate: %w", err)
 	}

@@ -110,11 +110,8 @@ func planBucket(
 		Plan:       result.Plan,
 		UpSql:      up,
 		DownSql:    down,
-		// Checks: []NamedSQL — Phase 4 work (check.sql emit pipeline).
-		// The strings live on classifier.Cell today; wiring them into
-		// NamedSQL + per-finding metadata is the next step after this
-		// commit.
-		Manifest: buildManifest(applied),
+		Checks:     collectChecks(result.Plan, cls),
+		Manifest:   buildManifest(applied),
 	}, unresolved, nil
 }
 
