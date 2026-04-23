@@ -6,22 +6,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/application"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/classifier"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/postgres"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/redis"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/sqlite"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/filesystem"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/naming"
-	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/plan"
-	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/writer"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
+	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
 // GenerateCmd implements `wc generate`. The --iteration-1 flag is
@@ -48,9 +49,12 @@ type GenerateCmd struct {
 }
 
 // Run wires the compiler pipeline end-to-end: loader → ir.Build →
-// plan.Diff → emit (Postgres) → applied-state wrap → naming → writer.
-// Every stage surfaces *diag.Error untouched so file:line:col + why/fix
-// survive the round trip to the user's terminal.
+// engine.Plan (classifier + differ + emit) → applied-state wrap →
+// FilesystemSink. Every stage surfaces *diag.Error untouched so
+// file:line:col + why/fix survive the round trip to the user's
+// terminal. Decision-required axes (carrier change / pk flip / enum
+// remove / …) now produce ReviewFindings the user resolves via
+// --decide (step 7 work; for now they error with a helpful list).
 func (c *GenerateCmd) Run() error {
 	if !c.Iteration1 {
 		return fmt.Errorf("wc generate: --iteration-1 is required in this build")
@@ -71,6 +75,11 @@ func (c *GenerateCmd) Run() error {
 		outRoot = app.OutputDir()
 	}
 
+	cls, err := classifier.Load(cfg.ClassificationDir)
+	if err != nil {
+		return fmt.Errorf("wc generate: load classifier from %s: %w", cfg.ClassificationDir, err)
+	}
+
 	ctx := context.Background()
 	currSchema, err := loadSchemaSet(ctx, c.Protos, c.Imports)
 	if err != nil {
@@ -89,127 +98,72 @@ func (c *GenerateCmd) Run() error {
 		}
 	}
 
-	// Bucket tables by effective connection (D26). Each bucket
-	// produces one migration stream emitted by that dialect's emitter
-	// to `<out>/migrations/<dialect>-<version>/`. Tables without an
-	// explicit connection go to the default bucket (iter-1 layout:
-	// bare `<out>/migrations/` + postgres emitter).
-	buckets, order := bucketByConnection(prevSchema, currSchema)
-	if len(buckets) == 0 {
-		fmt.Println("wc generate: no tables to process")
+	// engine.Plan orchestrates bucketing + diff + emit internally.
+	// Resolutions are empty here (--decide plumbing lands in step 7);
+	// findings on decision-required axes surface as error below.
+	result, err := engine.Plan(prevSchema, currSchema, cls, nil, pickEmitter)
+	if err != nil {
+		return fmt.Errorf("wc generate: %w", err)
+	}
+	if len(result.Findings) > 0 {
+		printFindings(result.Findings)
+		return fmt.Errorf("wc generate: %d unresolved decision(s); see above", len(result.Findings))
+	}
+	if len(result.Migrations) == 0 {
+		fmt.Println("wc generate: no changes — nothing to write")
 		return nil
 	}
 
+	// Post-process: wrap wc_migrations applied-state (D27) on every
+	// Postgres migration. Iter-1 default-bucket (nil Connection)
+	// historically skipped this; preserved here for byte-compat with
+	// existing goldens.
 	basename := naming.Name(time.Now().UTC())
-	wroteAny := false
-	for _, key := range order {
-		bkt := buckets[key]
-		// Classifier wired at step 6 (engine.Plan top-level); for now
-		// pass nil — Diff falls back to plain-error behaviour on
-		// REFUSE axes, preserving pre-D30 CLI UX until Resolution
-		// source wiring lands.
-		result, err := plan.Diff(bkt.prev, bkt.curr, nil)
-		if err != nil {
-			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
-		}
-		emitter, err := pickEmitter(bkt.conn)
-		if err != nil {
-			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
-		}
-		up, down, err := emit.Emit(emitter, result.Plan)
-		if err != nil {
-			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
-		}
-		if up == "" && down == "" {
-			fmt.Printf("wc generate [%s]: no changes — skipping\n", key)
+	isInitial := prevSchema == nil
+	for _, m := range result.Migrations {
+		if c.NoAppliedState {
 			continue
 		}
-		if !c.NoAppliedState && bkt.conn != nil && bkt.conn.GetDialect() == irpb.Dialect_POSTGRES {
-			// Applied-state tracking is PG-only for now; other
-			// dialects (Redis, SQLite) have their own bookkeeping
-			// shape or skip entirely (Redis does lazy ZADD).
-			isInitial := bkt.prev == nil
-			up, down = wrapAppliedState(up, down, basename, isInitial)
+		if m.GetConnection() == nil || m.GetConnection().GetDialect() != irpb.Dialect_POSTGRES {
+			continue
 		}
-		dir := filepath.Join(outRoot, "migrations")
-		if bkt.conn != nil {
-			dir = filepath.Join(dir, connectionDirKey(bkt.conn))
-		}
-		upPath, downPath, err := writer.Write(dir, basename, up, down)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("wrote [%s]:\n  %s\n  %s\n", key, upPath, downPath)
-		wroteAny = true
+		up, down := wrapAppliedState(m.GetUpSql(), m.GetDownSql(), basename, isInitial)
+		m.UpSql = up
+		m.DownSql = down
 	}
-	if !wroteAny {
-		fmt.Println("wc generate: no changes — nothing written")
+
+	sink := &filesystem.Sink{OutRoot: outRoot, Basename: basename}
+	if err := sink.Write(result); err != nil {
+		return fmt.Errorf("wc generate: write: %w", err)
+	}
+	for _, m := range result.Migrations {
+		key := ""
+		if m.GetConnection() != nil {
+			key = strings.ToLower(m.GetConnection().GetDialect().String()) + "-" + m.GetConnection().GetVersion()
+		}
+		fmt.Printf("wrote [%s]\n", key)
 	}
 	return nil
 }
 
-// bucket carries one per-connection slice of the prev/curr schema.
-type bucket struct {
-	conn *irpb.Connection // nil = default (iter-1 compat path)
-	prev *irpb.Schema
-	curr *irpb.Schema
-}
-
-// bucketByConnection groups tables from prev + curr by their
-// effective connection. Returns (buckets, orderedKeys) — ordered keys
-// are deterministic: default ("") first, then alpha on
-// `<dialect>-<version>`.
-func bucketByConnection(prev, curr *irpb.Schema) (map[string]*bucket, []string) {
-	buckets := map[string]*bucket{}
-	keyOf := func(t *irpb.Table) (string, *irpb.Connection) {
-		c := t.GetConnection()
-		if c == nil {
-			return "", nil
+// printFindings writes a helpful decision-needed message for every
+// unresolved finding. Format: one stanza per finding with axis, column
+// reference, proposed strategy, rationale, and the --decide snippet
+// that would unblock it.
+func printFindings(findings []*planpb.ReviewFinding) {
+	fmt.Fprintln(os.Stderr, "wc generate: migration blocked on pending decisions:")
+	for _, f := range findings {
+		col := f.GetColumn()
+		fmt.Fprintf(os.Stderr, "\n  %s.%s (#%d) — %s\n",
+			col.GetTableName(), col.GetColumnName(), col.GetFieldNumber(), f.GetAxis())
+		fmt.Fprintf(os.Stderr, "    proposed: %s\n", f.GetProposed())
+		if f.GetRationale() != "" {
+			fmt.Fprintf(os.Stderr, "    why: %s\n", f.GetRationale())
 		}
-		return connectionDirKey(c), c
+		fmt.Fprintf(os.Stderr, "    resolve: --decide %s.%s=<strategy>  (see `wc generate --help`)\n",
+			col.GetTableName(), col.GetColumnName())
 	}
-	addTable := func(side string, t *irpb.Table) {
-		key, conn := keyOf(t)
-		b, ok := buckets[key]
-		if !ok {
-			b = &bucket{conn: conn, prev: &irpb.Schema{}, curr: &irpb.Schema{}}
-			buckets[key] = b
-		}
-		switch side {
-		case "prev":
-			b.prev.Tables = append(b.prev.Tables, t)
-		case "curr":
-			b.curr.Tables = append(b.curr.Tables, t)
-		}
-	}
-	for _, t := range prev.GetTables() {
-		addTable("prev", t)
-	}
-	for _, t := range curr.GetTables() {
-		addTable("curr", t)
-	}
-	// prev=nil means initial migration — every bucket's prev stays
-	// zero-value *irpb.Schema{}, which plan.Diff compares as no prev.
-	// But we need the nil sentinel to trigger the initial path.
-	if prev == nil {
-		for _, b := range buckets {
-			b.prev = nil
-		}
-	}
-	// Empty-curr buckets are also valid (full teardown of a dialect).
-	// If a bucket exists only on prev side, curr stays zero-valued.
-	keys := make([]string, 0, len(buckets))
-	for k := range buckets {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return buckets, keys
-}
-
-// connectionDirKey derives the `<dialect>-<version>` directory name
-// for the output path per D26. Lower-kebab on the dialect enum name.
-func connectionDirKey(c *irpb.Connection) string {
-	return strings.ToLower(c.GetDialect().String()) + "-" + c.GetVersion()
+	fmt.Fprintln(os.Stderr)
 }
 
 // pickEmitter selects the emit.DialectEmitter for the connection's

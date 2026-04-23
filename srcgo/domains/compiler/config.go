@@ -19,6 +19,12 @@ type Config struct {
 	// generated proto, …) when the caller does not override with a
 	// per-run flag. Relative paths are resolved against the CLI's cwd.
 	OutputDir string `env:"COMPILER_OUTPUT_DIR" envDefault:"./out"`
+
+	// ClassificationDir is where the classifier loads D28 matrix YAMLs
+	// from at startup. Defaults to the repo-root docs/classification
+	// tree; override when running the binary outside the repo (copy
+	// the YAMLs somewhere stable + point here).
+	ClassificationDir string `env:"COMPILER_CLASSIFICATION_DIR" envDefault:"./docs/classification"`
 }
 
 // NewConfigFromEnv parses the process environment into a Config. Fatal on

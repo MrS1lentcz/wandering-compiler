@@ -2,9 +2,23 @@ package main
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// setClassificationEnv points COMPILER_CLASSIFICATION_DIR at the real
+// docs/classification tree. Tests run from srcgo/domains/compiler/cmd/cli/
+// so the relative default "./docs/classification" doesn't resolve;
+// runtime.Caller + walk gives the absolute path.
+func setClassificationEnv(t *testing.T) {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	// file = srcgo/domains/compiler/cmd/cli/cmd_generate_test.go
+	// repo root = up 5 dirs.
+	dir := filepath.Join(filepath.Dir(file), "..", "..", "..", "..", "..", "docs", "classification")
+	t.Setenv("COMPILER_CLASSIFICATION_DIR", dir)
+}
 
 // TestGenerateCmd_RunHappy wires the full CLI pipeline end-to-end
 // (loader → ir.Build → plan.Diff → emit.Emit(postgres) → naming →
@@ -15,6 +29,7 @@ import (
 func TestGenerateCmd_RunHappy(t *testing.T) {
 	outDir := t.TempDir()
 	t.Setenv("COMPILER_OUTPUT_DIR", outDir)
+	setClassificationEnv(t)
 
 	cmd := &GenerateCmd{
 		Iteration1: true,
@@ -71,6 +86,7 @@ func TestGenerateCmd_NoProtoRejected(t *testing.T) {
 func TestGenerateCmd_MissingFile(t *testing.T) {
 	outDir := t.TempDir()
 	t.Setenv("COMPILER_OUTPUT_DIR", outDir)
+	setClassificationEnv(t)
 
 	cmd := &GenerateCmd{
 		Iteration1: true,
@@ -93,6 +109,7 @@ func TestGenerateCmd_ExplicitOutOverridesDefault(t *testing.T) {
 	defaultDir := t.TempDir()
 	explicitDir := t.TempDir()
 	t.Setenv("COMPILER_OUTPUT_DIR", defaultDir)
+	setClassificationEnv(t)
 
 	cmd := &GenerateCmd{
 		Iteration1: true,

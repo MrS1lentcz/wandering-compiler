@@ -56,7 +56,7 @@ test-apply:
 		docker exec $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 -c "CREATE SCHEMA IF NOT EXISTS reporting;" >/dev/null; \
 		echo "  prev.up"; \
 		rm -rf /tmp/wc-apply-$$name; \
-		(cd srcgo && go run ./domains/compiler/cmd/cli generate --iteration-1 --no-applied-state -I "$$(pwd)/../proto" -o "/tmp/wc-apply-$$name" "$$(pwd)/../$${dir}prev.proto") >/dev/null; \
+		(cd srcgo && COMPILER_CLASSIFICATION_DIR=../docs/classification go run ./domains/compiler/cmd/cli generate --iteration-1 --no-applied-state -I "$$(pwd)/../proto" -o "/tmp/wc-apply-$$name" "$$(pwd)/../$${dir}prev.proto") >/dev/null; \
 		PREV_UP=$$(ls /tmp/wc-apply-$$name/migrations/*.up.sql); \
 		PREV_DOWN=$$(ls /tmp/wc-apply-$$name/migrations/*.down.sql); \
 		docker exec -i $$CID psql -U postgres -d $$db -v ON_ERROR_STOP=1 < "$$PREV_UP" >/dev/null; \
