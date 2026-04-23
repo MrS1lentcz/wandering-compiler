@@ -93,8 +93,8 @@ Biggest iter-2 block.
 ### Multi-connection per domain (DB-per-domain + per-table override)
 
 > **Pinned 2026-04-23 as D26 in `iteration-2.md`. Actual
-> implementation lands as M6.** Design decided, implementation
-> follows once M1–M5 (alter-diff + multi-file) stabilise the
+> implementation lands as M3.** Design decided, implementation
+> follows once M1–M2 (alter-diff + multi-file) stabilise the
 > differ + loader infrastructure it extends.
 
 **Why.** A single project often needs a main relational DB plus a
@@ -132,7 +132,7 @@ value proposition even when the DB underneath doesn't offer it.
   - **2PC out of scope.** Saga / outbox is an application pattern,
     not a compiler feature.
 
-**Preconditions.** M1–M5 (differ infrastructure + multi-file loader).
+**Preconditions.** M1–M2 (differ infrastructure + multi-file loader).
 MySQL / SQLite dialect emitters when those connections are declared
 (iter-2 backlog "Additional dialects").
 
