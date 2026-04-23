@@ -278,15 +278,70 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*pla
 			From: prev.GetMaxLen(), To: curr.GetMaxLen(),
 		}}})
 	}
+	if numericChanged(prev, curr) {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_NumericPrecision{NumericPrecision: &planpb.NumericPrecisionChange{
+			FromPrecision: prev.GetPrecision(),
+			FromScale:     scalePtr(prev),
+			ToPrecision:   curr.GetPrecision(),
+			ToScale:       scalePtr(curr),
+		}}})
+	}
+	if prev.GetDbType() != curr.GetDbType() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_DbType{DbType: &planpb.DbTypeChange{
+			From: prev.GetDbType(), To: curr.GetDbType(),
+		}}})
+	}
+	if prev.GetUnique() != curr.GetUnique() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_Unique{Unique: &planpb.UniqueChange{
+			From: prev.GetUnique(), To: curr.GetUnique(),
+		}}})
+	}
+	if prev.GetGeneratedExpr() != curr.GetGeneratedExpr() {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
+			From: prev.GetGeneratedExpr(), To: curr.GetGeneratedExpr(),
+		}}})
+	}
 	if prev.GetComment() != curr.GetComment() {
 		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_Comment{Comment: &planpb.CommentChange{
 			From: prev.GetComment(), To: curr.GetComment(),
 		}}})
 	}
-	// Numeric precision / scale, db_type, generated_expr, enum_values,
-	// allowed_extensions, unique change variants land in the
-	// follow-up commit that wires their emit branches.
+	// EnumValues / AllowedExtensions / PgOptions changes land in the
+	// follow-up commit covering ENUM-type evolution + extension
+	// manifest tracking.
 	return out, nil
+}
+
+// numericChanged returns true when precision or scale differs.
+// Precision-only IR fields use int32 + optional int32 (proto3
+// optional); compare via the wrapper-aware getter.
+func numericChanged(prev, curr *irpb.Column) bool {
+	if prev.GetPrecision() != curr.GetPrecision() {
+		return true
+	}
+	pP, pPok := scaleOf(prev)
+	cP, cPok := scaleOf(curr)
+	if pPok != cPok {
+		return true
+	}
+	return pP != cP
+}
+
+func scaleOf(c *irpb.Column) (int32, bool) {
+	if c.Scale == nil {
+		return 0, false
+	}
+	return c.GetScale(), true
+}
+
+// scalePtr returns *int32 ready to attach to NumericPrecisionChange's
+// optional fields. Mirrors the proto3 optional-field convention.
+func scalePtr(c *irpb.Column) *int32 {
+	if c.Scale == nil {
+		return nil
+	}
+	v := c.GetScale()
+	return &v
 }
 
 // columnRenames returns RenameColumn ops for both-present columns

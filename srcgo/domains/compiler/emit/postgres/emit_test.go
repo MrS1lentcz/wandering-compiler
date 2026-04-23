@@ -571,6 +571,73 @@ func TestEmitAlterColumnMultipleFacts(t *testing.T) {
 	}
 }
 
+// TestEmitAlterColumnDbTypeUsing — DbType change emits TYPE … USING
+// col::<new>. Down inverts.
+func TestEmitAlterColumnDbTypeUsing(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "configs"},
+		ColumnName: "payload",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_DbType{DbType: &planpb.DbTypeChange{
+				From: irpb.DbType_DBT_JSON, To: irpb.DbType_DBT_JSONB,
+			}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE configs ALTER COLUMN payload TYPE JSONB USING payload::JSONB;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE configs ALTER COLUMN payload TYPE JSON USING payload::JSON;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAlterColumnUniqueAdd — DROP+ADD strategy. Add path emits
+// ADD CONSTRAINT … UNIQUE (col); down drops by derived name.
+func TestEmitAlterColumnUniqueAdd(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "users"},
+		ColumnName: "email",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_Unique{Unique: &planpb.UniqueChange{From: false, To: true}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE users ADD CONSTRAINT users_email_uidx UNIQUE (email);" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_uidx;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAlterColumnGeneratedExprAdd — adding GENERATED needs
+// drop+add (PG can't ALTER existing columns into generated). Down
+// drops the now-generated column to revert to no-column state.
+func TestEmitAlterColumnGeneratedExprAdd(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "products"},
+		ColumnName: "full_name",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
+				From: "", To: "first_name || ' ' || last_name",
+			}}},
+		},
+	}}}
+	up, _, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "ALTER TABLE products DROP COLUMN full_name;")
+	mustContain(t, up, "GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED;")
+}
+
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
 // DropColumn.down = AddColumn.up for the same column. Confirms the
 // emitter's symmetry contract for column-axis ops.
