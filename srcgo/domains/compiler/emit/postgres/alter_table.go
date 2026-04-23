@@ -34,6 +34,18 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 	// renderColumn is designed for CREATE TABLE body and pads with
 	// leading spaces; ALTER TABLE ADD COLUMN takes the bare line.
 	colLine = strings.TrimLeft(colLine, " \t")
+	// SEM_ENUM on a string carrier produces a column line referencing
+	// the derived type name (`<table>_<col>`) bare. Under SCHEMA
+	// namespace the type lives in the same schema as the table;
+	// substitute the schema-qualified form so ALTER TABLE in a session
+	// without `<namespace>` on search_path still resolves the type.
+	if col.GetType() == irpb.SemType_SEM_ENUM && col.GetCarrier() == irpb.Carrier_CARRIER_STRING &&
+		tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA && tbl.GetNamespace() != "" {
+		bare := pgEnumTypeName(tbl.GetName(), col.GetName())
+		qualified := tbl.GetNamespace() + "." + bare
+		colLine = strings.Replace(colLine, " "+bare+" ", " "+qualified+" ", 1)
+		colLine = strings.Replace(colLine, " "+bare+";", " "+qualified+";", 1)
+	}
 
 	enumCreate, enumDrop := renderEnumTypeStatements(tbl, col)
 

@@ -1,0 +1,24 @@
+syntax = "proto3";
+package altertest;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+enum StatusA {
+  STATUS_A_UNSPECIFIED = 0;
+  DRAFT_A = 1;
+  PUBLISHED_A = 2;
+}
+
+enum StatusB {
+  STATUS_B_UNSPECIFIED = 0;
+  ACTIVE = 1;
+  DELETED = 2;
+}
+
+message Post {
+  option (w17.db.table) = { name: "posts" };
+
+  int64  id     = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string status = 2 [(w17.field) = { type: ENUM, choices: "altertest.StatusA" }];
+}

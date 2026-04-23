@@ -1,0 +1,16 @@
+syntax = "proto3";
+package altertest;
+
+import "w17/db.proto";
+import "w17/field.proto";
+import "w17/pg/field.proto";
+
+message Doc {
+  option (w17.db.table) = { name: "docs" };
+
+  int64  id      = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string payload = 2 [
+    (w17.field)    = { type: TEXT },
+    (w17.pg.field) = { custom_type: "my_text_v1" }
+  ];
+}

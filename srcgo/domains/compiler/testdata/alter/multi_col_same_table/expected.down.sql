@@ -1,0 +1,16 @@
+BEGIN;
+
+COMMENT ON TABLE users IS NULL;
+
+ALTER TABLE users ALTER COLUMN email TYPE VARCHAR(255);
+
+ALTER TABLE users ALTER COLUMN display_name TYPE VARCHAR(120);
+
+ALTER TABLE users RENAME COLUMN display_name TO name;
+
+ALTER TABLE users DROP COLUMN website;
+
+ALTER TABLE users ADD COLUMN phone VARCHAR(30) NOT NULL;
+ALTER TABLE users ADD CONSTRAINT users_phone_blank CHECK (phone <> '');
+
+COMMIT;
