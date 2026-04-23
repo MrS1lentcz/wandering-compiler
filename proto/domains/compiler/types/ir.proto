@@ -131,6 +131,16 @@ message Column {
   string proto_name = 2;  // original proto field name (for indexes / FK refs)
   SourceLocation location = 3;
 
+  // Proto field number — the inviolable contract iter-2 alter-diff
+  // uses as the column identity key (D10). Required: every IR column
+  // is built from a real proto field, so this is always > 0. Two
+  // columns within the same table can never share a number (proto
+  // itself enforces); two columns across (prev, curr) sharing a
+  // number ARE the same column even if the name / type / nullability
+  // differ — the differ emits AlterColumn rather than DropColumn +
+  // AddColumn for that case.
+  int32 field_number = 4;
+
   Carrier carrier = 10;
   SemType type = 11;
   bool nullable = 12;

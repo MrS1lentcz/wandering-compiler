@@ -45,7 +45,7 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	prevTables := tablesOf(prev)
 	currTables := tablesOf(curr)
 
-	onlyPrev, onlyCurr, _ := bucketByFqn(prevTables, currTables)
+	onlyPrev, onlyCurr, both := bucketByFqn(prevTables, currTables)
 
 	dropOrdered, err := topoSortByFK(onlyPrev)
 	if err != nil {
@@ -61,24 +61,103 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 		return nil, fmt.Errorf("plan: add-order: %w", err)
 	}
 
-	ops := make([]*planpb.Op, 0, len(dropOrdered)+len(addOrdered))
+	// Per-table column bucketing for carried-over tables. Sorted by
+	// curr's name so the column-level Op stream is deterministic.
+	sort.Slice(both, func(i, j int) bool {
+		return both[i].Curr.GetName() < both[j].Curr.GetName()
+	})
+
+	ops := make([]*planpb.Op, 0, len(dropOrdered)+len(addOrdered)+len(both)*2)
 	for _, t := range dropOrdered {
 		ops = append(ops, &planpb.Op{
 			Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: t}},
 		})
+	}
+	// Column drops first across all carried-over tables, then adds.
+	// Inside one table we drop before add per the M1 ordering rule
+	// (renumbered replacements work cleanly; rename detection in a
+	// later commit will collapse matching pairs).
+	for _, pair := range both {
+		ops = append(ops, columnDrops(pair)...)
 	}
 	for _, t := range addOrdered {
 		ops = append(ops, &planpb.Op{
 			Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: t}},
 		})
 	}
-	// Carried-over tables (FQN in both prev and curr): fact + column +
-	// index / FK / CHECK diffing happens here in subsequent commits.
-	// For now the `both` bucket is intentionally unused — table-fact
-	// equality is asserted by the differ's table-level pass landing
-	// in the next commit.
+	for _, pair := range both {
+		ops = append(ops, columnAdds(pair)...)
+	}
+	// Table-fact (rename / namespace / comment) and column-fact
+	// (AlterColumn / RenameColumn) + index / FK / CHECK diffs land
+	// in subsequent commits.
 
 	return &planpb.MigrationPlan{Ops: ops}, nil
+}
+
+// columnAdds returns AddColumn ops for columns whose proto field
+// number appears in curr but not prev. Order = curr's declaration
+// order (preserves D10 stability — number, not slot).
+func columnAdds(pair TablePair) []*planpb.Op {
+	prevByNum := numberMap(pair.Prev.GetColumns())
+	ctx := tableCtxOf(pair.Curr)
+	var ops []*planpb.Op
+	for _, c := range pair.Curr.GetColumns() {
+		if _, ok := prevByNum[c.GetFieldNumber()]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{
+			Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+				Ctx:    ctx,
+				Column: c,
+			}},
+		})
+	}
+	return ops
+}
+
+// columnDrops returns DropColumn ops for columns whose proto field
+// number appears in prev but not curr. Carries the prev-side Column
+// so down can re-create it. Uses curr's table context (the live
+// shape during the migration; the table itself isn't being dropped).
+func columnDrops(pair TablePair) []*planpb.Op {
+	currByNum := numberMap(pair.Curr.GetColumns())
+	ctx := tableCtxOf(pair.Curr)
+	var ops []*planpb.Op
+	for _, c := range pair.Prev.GetColumns() {
+		if _, ok := currByNum[c.GetFieldNumber()]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{
+			Variant: &planpb.Op_DropColumn{DropColumn: &planpb.DropColumn{
+				Ctx:    ctx,
+				Column: c,
+			}},
+		})
+	}
+	return ops
+}
+
+// numberMap indexes columns by their proto field number. Returns an
+// empty map for an empty input — D10 identity collapses naturally.
+func numberMap(cols []*irpb.Column) map[int32]*irpb.Column {
+	out := make(map[int32]*irpb.Column, len(cols))
+	for _, c := range cols {
+		out[c.GetFieldNumber()] = c
+	}
+	return out
+}
+
+// tableCtxOf builds the qualifier-fact bundle every column-level /
+// index / FK / CHECK op needs. Pulls FQN, name, namespace mode +
+// value off the table; emit consumes it without touching Schema.
+func tableCtxOf(t *irpb.Table) *planpb.TableCtx {
+	return &planpb.TableCtx{
+		MessageFqn:     t.GetMessageFqn(),
+		TableName:      t.GetName(),
+		NamespaceMode:  t.GetNamespaceMode(),
+		Namespace:      t.GetNamespace(),
+	}
 }
 
 // tablesOf returns the schema's tables, or nil for a nil schema. Single

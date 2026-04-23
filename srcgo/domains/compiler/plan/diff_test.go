@@ -158,6 +158,118 @@ func TestDiffDropAndAddCombined(t *testing.T) {
 	}
 }
 
+// TestDiffAddColumn — proto field number present in curr but not prev
+// becomes an AddColumn op carrying the curr-side column + table ctx.
+func TestDiffAddColumn(t *testing.T) {
+	prev := &irpb.Schema{Tables: []*irpb.Table{{
+		Name:       "users",
+		MessageFqn: "shop.User",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		},
+		PrimaryKey: []string{"id"},
+	}}}
+	curr := &irpb.Schema{Tables: []*irpb.Table{{
+		Name:       "users",
+		MessageFqn: "shop.User",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+			{Name: "email", ProtoName: "email", FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+		},
+		PrimaryKey: []string{"id"},
+	}}}
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	ac := ops[0].GetAddColumn()
+	if ac == nil {
+		t.Fatalf("ops[0] = %T, want *Op_AddColumn", ops[0].GetVariant())
+	}
+	if ac.GetCtx().GetMessageFqn() != "shop.User" {
+		t.Errorf("ctx.MessageFqn = %q, want shop.User", ac.GetCtx().GetMessageFqn())
+	}
+	if ac.GetColumn().GetName() != "email" {
+		t.Errorf("column.Name = %q, want email", ac.GetColumn().GetName())
+	}
+}
+
+// TestDiffDropColumn — proto field number present in prev but not curr
+// becomes a DropColumn op carrying the prev-side column.
+func TestDiffDropColumn(t *testing.T) {
+	prev := &irpb.Schema{Tables: []*irpb.Table{{
+		Name:       "users",
+		MessageFqn: "shop.User",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+			{Name: "legacy_token", ProtoName: "legacy_token", FieldNumber: 5, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT},
+		},
+		PrimaryKey: []string{"id"},
+	}}}
+	curr := &irpb.Schema{Tables: []*irpb.Table{{
+		Name:       "users",
+		MessageFqn: "shop.User",
+		Columns: []*irpb.Column{
+			{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		},
+		PrimaryKey: []string{"id"},
+	}}}
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	dc := ops[0].GetDropColumn()
+	if dc == nil {
+		t.Fatalf("ops[0] = %T, want *Op_DropColumn", ops[0].GetVariant())
+	}
+	if dc.GetColumn().GetName() != "legacy_token" {
+		t.Errorf("dropped column = %q, want legacy_token", dc.GetColumn().GetName())
+	}
+}
+
+// TestDiffColumnDropBeforeAddOrder — within carried-over tables, drops
+// emit before adds (so renumbered replacements don't fight). Across
+// tables, drops still come before adds.
+func TestDiffColumnDropBeforeAddOrder(t *testing.T) {
+	mk := func(cols []*irpb.Column) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "t", MessageFqn: "x.T",
+			Columns:    cols,
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	prev := mk([]*irpb.Column{
+		{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		{Name: "old", ProtoName: "old", FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT},
+	})
+	curr := mk([]*irpb.Column{
+		{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+		{Name: "new", ProtoName: "new", FieldNumber: 3, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT},
+	})
+	got, err := plan.Diff(prev, curr)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 2 {
+		t.Fatalf("len(ops) = %d, want 2", len(ops))
+	}
+	if ops[0].GetDropColumn() == nil {
+		t.Errorf("ops[0] = %T, want DropColumn", ops[0].GetVariant())
+	}
+	if ops[1].GetAddColumn() == nil {
+		t.Errorf("ops[1] = %T, want AddColumn", ops[1].GetVariant())
+	}
+}
+
 // TestDiffMessageRenameIsDropPlusAdd — D24: changing the proto message
 // name (= changing FQN) is semantically a destroy + create, not an
 // in-place rename. Even if the SQL `name` is identical, FQN difference

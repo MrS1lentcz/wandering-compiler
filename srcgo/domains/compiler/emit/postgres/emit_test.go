@@ -206,6 +206,116 @@ func TestDropTableEmptyNameErrors(t *testing.T) {
 	}
 }
 
+// TestEmitAddColumnPlain — plain VARCHAR column. Up: ALTER TABLE …
+// ADD COLUMN. Down: ALTER TABLE … DROP COLUMN. Schema namespace is
+// honoured by the qualifier helper.
+func TestEmitAddColumnPlain(t *testing.T) {
+	col := &irpb.Column{
+		Name: "email", ProtoName: "email", FieldNumber: 2,
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255,
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+		Ctx: &planpb.TableCtx{
+			MessageFqn: "shop.User", TableName: "users",
+			NamespaceMode: irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+			Namespace:     "auth",
+		},
+		Column: col,
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "ALTER TABLE auth.users ADD COLUMN email VARCHAR(255) NOT NULL")
+	mustContain(t, down, "ALTER TABLE auth.users DROP COLUMN email;")
+}
+
+// TestEmitAddColumnWithCheck — a column carrying a structured CHECK
+// emits the constraint as a separate ALTER TABLE ADD CONSTRAINT after
+// the ADD COLUMN statement.
+func TestEmitAddColumnWithCheck(t *testing.T) {
+	col := &irpb.Column{
+		Name: "name", ProtoName: "name", FieldNumber: 2,
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 64,
+		Checks: []*irpb.Check{
+			{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}},
+		},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+		Ctx:    &planpb.TableCtx{TableName: "users"},
+		Column: col,
+	}}}
+	up, _, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "ALTER TABLE users ADD COLUMN name VARCHAR(64) NOT NULL;")
+	mustContain(t, up, "ALTER TABLE users ADD CONSTRAINT users_name_blank CHECK (name <> '');")
+}
+
+// TestEmitAddColumnEnum — string carrier + SEM_ENUM. ADD COLUMN must be
+// preceded by CREATE TYPE; DROP COLUMN followed by DROP TYPE.
+func TestEmitAddColumnEnum(t *testing.T) {
+	col := &irpb.Column{
+		Name: "status", ProtoName: "status", FieldNumber: 3,
+		Carrier:     irpb.Carrier_CARRIER_STRING,
+		Type:        irpb.SemType_SEM_ENUM,
+		EnumFqn:     "shop.PostStatus",
+		EnumNames:   []string{"DRAFT", "PUBLISHED"},
+		EnumNumbers: []int64{1, 2},
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+		Ctx: &planpb.TableCtx{
+			MessageFqn: "shop.Post", TableName: "posts",
+		},
+		Column: col,
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	iCT := strings.Index(up, "CREATE TYPE posts_status AS ENUM ('DRAFT', 'PUBLISHED');")
+	iAdd := strings.Index(up, "ALTER TABLE posts ADD COLUMN status posts_status NOT NULL;")
+	if iCT < 0 || iAdd < 0 || iCT >= iAdd {
+		t.Fatalf("ENUM ADD COLUMN order broken (CT@%d ADD@%d):\n%s", iCT, iAdd, up)
+	}
+	iDrop := strings.Index(down, "ALTER TABLE posts DROP COLUMN status;")
+	iDT := strings.Index(down, "DROP TYPE IF EXISTS posts_status;")
+	if iDrop < 0 || iDT < 0 || iDrop >= iDT {
+		t.Fatalf("ENUM DROP order broken (DROP@%d DT@%d):\n%s", iDrop, iDT, down)
+	}
+}
+
+// TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
+// DropColumn.down = AddColumn.up for the same column. Confirms the
+// emitter's symmetry contract for column-axis ops.
+func TestEmitDropColumnRoundtrip(t *testing.T) {
+	col := &irpb.Column{
+		Name: "legacy", ProtoName: "legacy", FieldNumber: 5,
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT,
+	}
+	addOp := &planpb.Op{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+		Ctx:    &planpb.TableCtx{TableName: "users"},
+		Column: col,
+	}}}
+	dropOp := &planpb.Op{Variant: &planpb.Op_DropColumn{DropColumn: &planpb.DropColumn{
+		Ctx:    &planpb.TableCtx{TableName: "users"},
+		Column: col,
+	}}}
+	addUp, _, err := postgres.Emitter{}.EmitOp(addOp)
+	if err != nil {
+		t.Fatalf("AddColumn: %v", err)
+	}
+	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp)
+	if err != nil {
+		t.Fatalf("DropColumn: %v", err)
+	}
+	mustContain(t, dropUp, "ALTER TABLE users DROP COLUMN legacy;")
+	if dropDown != addUp {
+		t.Errorf("DropColumn.down != AddColumn.up:\n--- down ---\n%s\n--- add up ---\n%s", dropDown, addUp)
+	}
+}
+
 // TestAddTableEmptyNameErrors — emitAddTable refuses a table with no
 // name. Defensive branch against an ir.Build invariant violation.
 func TestAddTableEmptyNameErrors(t *testing.T) {

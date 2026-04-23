@@ -604,10 +604,11 @@ func (b *builder) initColumnFrame(lf *loader.LoadedField) (*irpb.Column, irpb.Ca
 		return nil, carrier, false
 	}
 	return &irpb.Column{
-		Name:      protoName,
-		ProtoName: protoName,
-		Location:  sourceLocation(desc),
-		Carrier:   carrier,
+		Name:        protoName,
+		ProtoName:   protoName,
+		Location:    sourceLocation(desc),
+		FieldNumber: int32(desc.Number()),
+		Carrier:     carrier,
 	}, carrier, true
 }
 
