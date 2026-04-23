@@ -855,6 +855,586 @@ D28 is the foundation of an exhaustive table-driven test matrix:
   decisions YAML? (Lean: decisions YAML; proto is point-in-time-
   decision-free.)
 
+### D28.1 — Classification matrix: column-constraint axes (added 2026-04-23)
+
+**Status: draft, awaiting cell-by-cell sign-off.** Phase 1a of D28 —
+the subset of axes that can change independently of the column's
+carrier + dbType. Carrier-axis (D28.2) and dbType-axis (D28.3) land
+in follow-up turns; they compose with this axis, not redundantly.
+
+Scope: every `Column` fact the IR carries today (see `plan/diff.go`
+`buildFactChanges`) plus table-level axes that diff without column
+context. Each axis is an independent dimension — a single alter may
+touch multiple, and the emitted strategy per alter is the **strictest**
+across axes (SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE
+< CUSTOM_MIGRATION < REFUSE). "Add" / "drop" of a whole column never
+appears here — that's `AddColumn` / `DropColumn`, pre-D28.
+
+Terminology:
+- **widen**: new accepts a superset of old values (VARCHAR(50)→VARCHAR(200), INTEGER→BIGINT).
+- **narrow**: new accepts a subset (VARCHAR(200)→VARCHAR(50)).
+- **Current**: today's binary classifier (for context; asterisk = silent-wrong risk the matrix closes).
+- **check.sql**: pre-apply validation query the differ auto-generates for NEEDS_CONFIRM; D28 open question #1 leans "always emit, regardless of user decision."
+
+#### A1. `nullable`
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| NULL → NULL | — | — | — | No change. |
+| NOT NULL → NOT NULL | — | — | — | No change. |
+| NOT NULL → NULL | **SAFE** | SAFE | — | Relaxing a constraint is always safe; DB accepts everything it accepted before plus NULLs. |
+| NULL → NOT NULL | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> IS NULL LIMIT 1` | Live rows may be NULL; PG refuses `SET NOT NULL` with a rewrite error. If author adds a `default` in the same migration, the differ's emit order handles backfill; without one, user must decide (backfill / skip / REFUSE). |
+
+#### A2. `default`
+
+Applies to all carriers. `Default` proto message variants: literal scalar, `AutoKind` (AUTO_NOW / AUTO_UUID_V4 / etc.), empty JSON array/object, generator. Change classification is value-independent.
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| none → literal/auto | **SAFE** | SAFE | — | Affects only future inserts; existing rows retain prior values. |
+| literal/auto → none | **SAFE** | SAFE | — | Drops the clause; existing rows unaffected. |
+| literal A → literal B | **SAFE** | SAFE | — | Same as above; PG `ALTER COLUMN SET DEFAULT` is instantaneous. |
+| auto (AUTO_NOW) ↔ literal timestamp | **SAFE** | SAFE | — | Default-clause swap; no row rewrite. |
+| AUTO_IDENTITY on → off | **NEEDS_CONFIRM** | SAFE* | — | PG `DROP IDENTITY` is DDL-only, but the author loses the sequence. User confirms intent; down-migration recreates the sequence (value continuity not guaranteed). |
+| off → AUTO_IDENTITY | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> IS NOT NULL LIMIT 1` on an integer column | Turning an existing int column into IDENTITY requires a fresh sequence seeded above `max(col)`; differ needs to emit `ADD GENERATED ... ALWAYS AS IDENTITY` with `RESTART WITH (SELECT COALESCE(MAX(<col>),0)+1 FROM <t>)`. Check.sql verifies no NULL rows (IDENTITY columns are NOT NULL). |
+
+#### A3. `max_len` (string carriers on VARCHAR / CHAR)
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| 0 → N (add bound) | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE char_length(<col>) > N LIMIT 1` | Unbounded→bounded; PG errors on ALTER if any row exceeds N. |
+| N → 0 (remove bound) | **SAFE** | SAFE | — | Unbounding; VARCHAR(N) → TEXT / VARCHAR is a widen. |
+| N → M, M > N (widen) | **SAFE** | SAFE | — | Strict widen; no data at risk. |
+| N → M, M < N (narrow) | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE char_length(<col>) > M LIMIT 1` | PG refuses narrow ALTER if any row > M (actually truncates in very old PG — PG 9.2+ errors). Check lets reviewer see impact before apply. |
+
+#### A4. Numeric `precision` / `scale` (DBT_NUMERIC)
+
+NUMERIC-only; precision / scale on other numeric dbTypes is N/A (raised at IR build).
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| (P,S) → (P',S') with P' ≥ P, S' ≥ S (both widen) | **SAFE** | SAFE | — | Strict widen; no overflow possible. |
+| (P,S) → (P',S') with P' ≥ P, S' < S (scale narrow) | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE scale(<col>) > S' LIMIT 1` (PG `scale()` available PG 13+) | Scale narrow truncates decimals; author decides whether truncation is acceptable. |
+| (P,S) → (P',S') with P' < P (precision narrow) | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> >= 10^(P'-S') OR <col> <= -10^(P'-S') LIMIT 1` | Overflow risk; PG errors on apply. |
+| unbounded → (P,S) (add constraint) | **NEEDS_CONFIRM** | SAFE* | same as precision narrow | Going from unbounded NUMERIC to typed NUMERIC(P,S). |
+| (P,S) → unbounded (drop constraint) | **SAFE** | SAFE | — | Widen to NUMERIC-unbounded. |
+
+#### A5. `unique` flag
+
+Iter-1 IR synthesises `unique:true` into a `UNIQUE INDEX` inside `Table.Indexes`. Alter-diff routes this axis through the Index bucket (see `diff.go` line 299–302), **not** the FactChange stream. Left here for completeness.
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| false → true | **NEEDS_CONFIRM** | (via Index add) | `SELECT <col>, count(*) FROM <t> GROUP BY <col> HAVING count(*) > 1 LIMIT 1` | `CREATE UNIQUE INDEX` errors if duplicates exist; user decides to dedupe or REFUSE. |
+| true → false | **SAFE** | (via Index drop) | — | `DROP INDEX` is always safe. |
+
+#### A6. `pk`
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| false → true | **REFUSE** | REFUSE | — | PK change is table-rebuild territory (PG allows `ADD PRIMARY KEY` only if the column is NOT NULL + UNIQUE; composite PK even trickier). Author writes CUSTOM_MIGRATION. |
+| true → false | **REFUSE** | REFUSE | — | Dropping PK breaks referential integrity for every FK pointing here. CUSTOM_MIGRATION with explicit FK-rewrite plan. |
+
+#### A7. `generated_expr` (GENERATED ALWAYS AS ... STORED)
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| "" → expr (plain → generated) | **REFUSE** | SAFE* | — | PG can't convert a plain column to generated in-place; must drop + add. DROP_AND_CREATE is the escape. |
+| expr → "" (generated → plain) | **NEEDS_CONFIRM** | SAFE* | — | PG 18 supports `ALTER COLUMN DROP EXPRESSION` which materialises current values. User confirms: keep values vs. drop-and-backfill. |
+| expr A → expr B | **REFUSE** | SAFE* | — | PG has no direct "rewrite generated expression"; must drop + add (rewrites the whole column). Surfaced as REFUSE; author picks DROP_AND_CREATE (lose values, recompute from new expr) or CUSTOM_MIGRATION (dual-write pattern). |
+
+#### A8. `comment`
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| any → any | **SAFE** | SAFE | — | `COMMENT ON COLUMN` is metadata-only; instant and reversible. Always SAFE. |
+
+#### A9. `allowed_extensions` (path family)
+
+Applies to SEM_FILE_PATH / SEM_IMAGE_PATH. Emitted as a CHECK regex in iter-1.
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| list A → superset B | **SAFE** | SAFE | — | Widen of allowed extensions; existing rows already pass the old check, pass the new. |
+| list A → subset B | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> !~ '<regex-from-B>' LIMIT 1` | Narrow; rows with a now-forbidden extension exist. Check surfaces count; user decides migration / rejection. |
+| list A → disjoint B | **NEEDS_CONFIRM** | SAFE* | same regex check | Treated as narrow-to-new-set; same mechanics. |
+| any → `[*]` (allow-all wildcard) | **SAFE** | SAFE | — | Maximum widen — drops the CHECK. |
+| `[*]` → list | **NEEDS_CONFIRM** | SAFE* | regex check | Adds a constraint where none existed. |
+
+#### A10. `enum_values` (SEM_ENUM)
+
+EnumFqn swap is REFUSE (already in `diff.go` enumValuesFactChange).
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| names A → A ∪ {new} (add only) | **SAFE** | SAFE | — | Additive; string-backed PG ENUM uses `ALTER TYPE ADD VALUE`, int-backed updates the CHECK IN (…) list. |
+| names A → A \ {removed} (remove only) | **REFUSE** | REFUSE | — | PG can't drop enum values; int-backed CHECK narrow would reject existing rows. CUSTOM_MIGRATION = user rewrites rows first. |
+| names A → B with rename in place (same slot) | **REFUSE** | REFUSE (FQN-level) | — | Rename = remove + add = removal applies. (String-backed PG ENUM has `ALTER TYPE RENAME VALUE` — future SAFE row; out-of-scope M1.) |
+| enum_fqn "pkg.A" → "pkg.B" | **REFUSE** | REFUSE | — | Different enum entirely. DROP_AND_CREATE escape only. |
+
+#### A11. `pg.required_extensions`
+
+Manifest-only impact; no DDL emitted per column (extensions are installed at schema setup per D2.6 / M4 manifest).
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| list A → list B (any change) | **SAFE** | SAFE | — | Manifest consumer (M4) decides whether `CREATE EXTENSION` is needed; column DDL unaffected. |
+
+#### A12. `pg.custom_type`
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| any → any (string change) | **REFUSE** | REFUSE | — | custom_type is author-owned opaque DDL; the compiler doesn't know its cast semantics. Always CUSTOM_MIGRATION. |
+
+#### A13. `element_carrier` / `element_is_message` (repeated / map element)
+
+| From → To | Strategy | Current | check.sql | Rationale |
+|---|---|---|---|---|
+| any change | **REFUSE** | REFUSE | — | Element reshape under a list/map is carrier-axis (see D28.2 carrier matrix); collection evolution needs CUSTOM_MIGRATION (jsonb_array transform). |
+
+#### Table-level axes (diff via non-column ops)
+
+| Axis | From → To | Strategy | Current | Rationale |
+|---|---|---|---|---|
+| `Table.Name` (with namespace unchanged) | any → any | **SAFE** | SAFE (RenameTable) | `ALTER TABLE RENAME TO` is instant; FK + index names PG auto-updates. |
+| `Table.NamespaceMode` + `Table.Namespace` | SCHEMA(a) → SCHEMA(b) | **SAFE** | SAFE | `ALTER TABLE SET SCHEMA` is instant; cross-schema FKs continue working. |
+| | PREFIX(a) → PREFIX(b) | **SAFE** | SAFE | Under the hood = RENAME TO new-prefixed name. |
+| | NONE → SCHEMA | **SAFE** | SAFE | SET SCHEMA on default. |
+| | SCHEMA → NONE | **SAFE** | SAFE | SET SCHEMA to public (default). |
+| | SCHEMA ↔ PREFIX (mode switch) | **SAFE** | SAFE | Chain: SET SCHEMA + RENAME TO. |
+| `Table.Comment` | any → any | **SAFE** | SAFE | `COMMENT ON TABLE`; metadata. |
+| `Table.Indexes` (structured) | add | **NEEDS_CONFIRM** (conditional) | SAFE | Adding a `UNIQUE` index: same as A5 false→true (check for dupes). Adding a non-unique index: SAFE. BRIN/GIN/GIST add: SAFE (no uniqueness). Emit order: check.sql only when `unique:true`. |
+| | drop | **SAFE** | SAFE | `DROP INDEX`. |
+| | replace (internal change: method, partial, opclass, …) | **SAFE** | SAFE | DROP + CREATE; no data change. Uniqueness flip within replace: treat replace as drop + add, apply A5 rules on the add half. |
+| `Table.ForeignKeys` | add | **NEEDS_CONFIRM** | SAFE | `ADD FOREIGN KEY` validates existing data — fails apply if any child row has no parent. Check.sql: `SELECT count(*) FROM <child> WHERE <col> IS NOT NULL AND <col> NOT IN (SELECT <pkcol> FROM <parent>) LIMIT 1`. |
+| | drop | **SAFE** | SAFE | Dropping a constraint is safe. |
+| | replace (target / on_delete) | **NEEDS_CONFIRM** (target change) / **SAFE** (on_delete only) | SAFE | Target change is drop + add; fold to add-half NEEDS_CONFIRM. Pure on_delete change: `ALTER CONSTRAINT` is safe. |
+| `Table.Checks` (structured: len / blank / range / regex / choices) | add | **NEEDS_CONFIRM** | SAFE | `ADD CONSTRAINT CHECK` validates existing rows. Check.sql = the CHECK predicate negated: `SELECT count(*) FROM <t> WHERE NOT (<predicate>) LIMIT 1`. |
+| | drop | **SAFE** | SAFE | Dropping a constraint is always safe. |
+| | replace | **NEEDS_CONFIRM** | SAFE | Fold as drop + add; add-half dominates. |
+| `Table.RawChecks` / `Table.RawIndexes` | add / drop / replace | **NEEDS_CONFIRM** on add/replace, **SAFE** on drop | SAFE | Body is opaque (D11); compiler can't derive check.sql, so add/replace always emit NEEDS_CONFIRM with a stub check (`-- raw_* body is opaque; reviewer must hand-validate`). Drop stays SAFE. |
+
+#### Strictness fold (multi-axis alters)
+
+When one alter touches multiple axes (e.g. `max_len 200 → 50` + `nullable NULL → NOT NULL`), the emitted strategy is the **strictest**:
+
+```
+SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE < CUSTOM_MIGRATION < REFUSE
+```
+
+Check.sql for a NEEDS_CONFIRM multi-axis alter is the AND of all per-axis checks:
+
+```sql
+SELECT count(*) FROM <t>
+WHERE char_length(col) > 50
+   OR col IS NULL
+LIMIT 1;
+```
+
+#### What this axis does NOT cover
+
+Still deferred to follow-up subsections:
+
+- **D28.2 — Carrier × Carrier** (8 × 8 grid). E.g. STRING → INT32 (NEEDS_CONFIRM + USING cast), STRING → MESSAGE (REFUSE), INT32 → INT64 (SAFE widen).
+- **D28.3 — DbType × DbType** (~50 reachable). E.g. VARCHAR → TEXT (SAFE), INTEGER → BIGINT (SAFE widen), TEXT ↔ CITEXT (LOSSLESS_USING), JSON ↔ JSONB (LOSSLESS_USING). Includes cross-family REFUSE cases (TIMESTAMP → JSON).
+- **D28.4 — Sem × Sem within carrier** (~150). E.g. SEM_EMAIL → SEM_URL on string (SAFE — same carrier, regex differs, fold via A9-style CHECK replace), SEM_CHAR → SEM_TEXT (SAFE — maps to dbType change TEXT).
+
+Most Sem changes degenerate into constraint-axis (regex CHECK) + dbType changes, so D28.4 will be short.
+
+### D28.2 — Classification matrix: carrier × carrier transitions (added 2026-04-23)
+
+**Status: draft, awaiting cell-by-cell sign-off.** Phase 1b of D28.
+Today's classifier REFUSEs every carrier change (`plan/diff.go:250`);
+D28.2 opens the grid to SAFE / LOSSLESS_USING / NEEDS_CONFIRM /
+DROP_AND_CREATE / CUSTOM_MIGRATION where PG casts make that viable.
+
+**Identity reminder:** this matrix covers the case where the author
+kept the proto **field number** stable but changed the proto type.
+A carrier change with a renumbered field degenerates to `DropColumn` +
+`AddColumn` (D10 rename-detection sees a new number) and bypasses
+this matrix. The matrix fires only when number is stable and carrier
+differs.
+
+**Meta-rule — escape hatch universality:** every cell's "recommended
+strategy" is the default the differ emits, but author can always
+override to a *more permissive* strategy via `--decide`:
+
+```
+SAFE ← LOSSLESS_USING ← NEEDS_CONFIRM ← DROP_AND_CREATE ← CUSTOM_MIGRATION
+```
+
+REFUSE is the one-way terminator: no override path (author must
+renumber or write CUSTOM_MIGRATION). Matrix shows the *strictest*
+(safest) strategy that a clean default can emit; override-relaxations
+are plumbed at `--decide` parsing time.
+
+**Legend:**
+- `—` no change
+- `S` SAFE (plain `ALTER COLUMN TYPE`, no USING)
+- `U` LOSSLESS_USING (USING cast, deterministic + value-preserving)
+- `N` NEEDS_CONFIRM (USING cast exists but may fail or reshape data; check.sql auto-emitted)
+- `C` CUSTOM_MIGRATION (author writes SQL; differ emits a template)
+- `R` REFUSE (no sensible automated path; author must renumber field)
+
+#### Grid A — scalar × scalar (8 × 8)
+
+Excludes MAP / LIST / MESSAGE (collection carriers covered in Grid B).
+
+| from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES |
+|---|---|---|---|---|---|---|---|---|
+| **BOOL** | — | U | U | U | U | R | R | N |
+| **STRING** | N | — | N | N | N | N | N | N |
+| **INT32** | N | U | — | S | U | N | N | N |
+| **INT64** | N | U | N | — | N | N | N | N |
+| **DOUBLE** | N | U | N | N | — | N | N | N |
+| **TIMESTAMP** | R | U | N | N | N | — | C | N |
+| **DURATION** | R | U | N | N | N | C | — | N |
+| **BYTES** | N | N | N | N | N | N | N | — |
+
+#### Grid A cell details
+
+Only non-trivial cells are annotated. Obvious symmetries collapsed
+(INT64 → INT32 mirrors DOUBLE → INT32 shape — "narrow integer with
+overflow check").
+
+| From | To | Cell | USING expression | check.sql | Rationale |
+|---|---|---|---|---|---|
+| BOOL | STRING | `U` | `col::text` | — | PG emits `'t'`/`'f'`; deterministic, reversible. |
+| BOOL | INT32/INT64 | `U` | `col::int` / `col::bigint` | — | PG maps false→0, true→1; reversible via `<>0`. |
+| BOOL | DOUBLE | `U` | `col::int::double precision` | — | Chains bool→int→double; still lossless. |
+| BOOL | BYTES | `N` | `decode(col::text, 'escape')` | — | Encoding choice ambiguous (hex vs escape); author picks. |
+| BOOL | TIMESTAMP/DURATION | `R` | — | — | Semantically meaningless. Author renumbers. |
+| STRING | BOOL | `N` | `col::boolean` | `SELECT count(*) FROM t WHERE col NOT IN ('t','f','true','false','yes','no','y','n','1','0','TRUE','FALSE','Yes','No','Y','N','True','False') LIMIT 1` | PG accepts a specific set; anything else errors at apply. Check.sql validates pre-apply. |
+| STRING | INT32 | `N` | `col::int` | `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+$' LIMIT 1` | Parse risk; also overflow risk if values exceed INT32. |
+| STRING | INT64 | `N` | `col::bigint` | `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+$' LIMIT 1` | Parse risk only (INT64 range dwarfs typical string-numeric). |
+| STRING | DOUBLE | `N` | `col::double precision` | `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$' LIMIT 1` | Parse risk. |
+| STRING | TIMESTAMP | `N` | `col::timestamptz` | `SELECT count(*) FROM t WHERE col IS NOT NULL AND NOT col ~ '^\d{4}-\d{2}-\d{2}' LIMIT 1` (ISO-8601-ish coarse guard) | PG's timestamp parser accepts many formats; coarse regex catches clearly-broken rows. Pre-apply. |
+| STRING | DURATION | `N` | `col::interval` | coarse guard as above | Interval parser permissive; same pattern. |
+| STRING | BYTES | `N` | `decode(col, 'hex')` OR `col::bytea` (escape form) | encoding-specific | Author must decide encoding; check.sql keyed on chosen encoding. |
+| INT32 | STRING | `U` | `col::text` | — | Canonical decimal; reversible. |
+| INT32 | INT64 | `S` | (implicit; PG accepts plain `ALTER TYPE bigint`) | — | Strict widen. No USING. |
+| INT32 | DOUBLE | `U` | `col::double precision` | — | Fits exactly; INT32 max (~2.1e9) << 2^53. |
+| INT32 | BOOL | `N` | `col::boolean` | — | Works in PG (0=false, nonzero=true); author confirms intent (convention varies — some codebases use -1 for "unknown"). |
+| INT32 | TIMESTAMP | `N` | `to_timestamp(col)` | — | Epoch-seconds assumed; author may have meant milliseconds. |
+| INT32 | DURATION | `N` | `make_interval(secs => col)` | — | Seconds assumed; user confirms unit. |
+| INT32 | BYTES | `N` | `set_bytea_output + int4send(col)` | — | Endianness + byte-order choice; author confirms. |
+| INT64 | INT32 | `N` | `col::int` | `SELECT count(*) FROM t WHERE col > 2147483647 OR col < -2147483648 LIMIT 1` | Overflow risk; check.sql catches. |
+| INT64 | DOUBLE | `N` | `col::double precision` | `SELECT count(*) FROM t WHERE abs(col) > 9007199254740992 LIMIT 1` (2^53) | Above 2^53, doubles lose integer precision. |
+| DOUBLE | INT32/INT64 | `N` | `col::int` / `col::bigint` | `SELECT count(*) FROM t WHERE col <> floor(col) LIMIT 1` + overflow check | Truncation + (for INT32) overflow. |
+| DOUBLE | BOOL | `N` | `col::int::boolean` | `SELECT count(*) FROM t WHERE col <> 0 AND col <> 1 LIMIT 1` | Typical intent is "nonzero → true", but many rows (0.5, 2.3) trigger ambiguity. |
+| TIMESTAMP | STRING | `U` | `col::text` | — | ISO-8601 canonical; reversible. |
+| TIMESTAMP | INT32 | `N` | `extract(epoch from col)::int` | `SELECT count(*) FROM t WHERE extract(epoch from col) > 2147483647 LIMIT 1` | Y2038 risk if times > 2038-01-19 (INT32 epoch overflow). |
+| TIMESTAMP | INT64 | `N` | `extract(epoch from col)::bigint` | — | No overflow but unit ambiguity (s vs. ms vs. μs). |
+| TIMESTAMP | DOUBLE | `N` | `extract(epoch from col)` | — | Precision loss below microseconds; author confirms. |
+| TIMESTAMP | DURATION | `C` | — | — | Timestamp → interval is non-unique (interval relative to what?). Author writes migration. |
+| TIMESTAMP | BYTES | `N` | `convert_to(col::text, 'UTF8')` | — | Text→bytes fallback; reversible if encoding fixed. |
+| TIMESTAMP | BOOL | `R` | — | — | Nonsense. |
+| DURATION | STRING | `U` | `col::text` | — | `'1 day 02:03:04'` canonical; reversible. |
+| DURATION | INT32/INT64 | `N` | `extract(epoch from col)::int` | overflow check | Unit ambiguity + (INT32) overflow risk. |
+| DURATION | TIMESTAMP | `C` | — | — | Same as TIMESTAMP → DURATION: non-unique. |
+| DURATION | BOOL | `R` | — | — | Nonsense. |
+| BYTES | STRING | `N` | `encode(col, 'hex')` OR `convert_from(col, 'UTF8')` | encoding-specific | Author picks encoding. UTF-8 decode may fail on non-text bytea. |
+| BYTES | INT* / DOUBLE / TIMESTAMP / DURATION / BOOL | `N` | custom decoder (`get_byte`, bit-level ops) | custom validator | Byte-level interpretation; user confirms. |
+
+#### Grid B — collection carriers (MAP / LIST / MESSAGE)
+
+Collections ↔ scalar and collections ↔ collections. Most transitions
+are CUSTOM_MIGRATION because data reshape is not automatically
+derivable from schema alone.
+
+| from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES | MAP | LIST | MESSAGE |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **MAP** | R | U | R | R | R | R | R | R | — | C | C |
+| **LIST** | R | U | R | R | R | R | R | R | C | — | C |
+| **MESSAGE** | R | U | R | R | R | R | R | R | C | C | — |
+
+| From | To | Cell | Expression | Rationale |
+|---|---|---|---|---|
+| MAP | STRING | `U` | `col::text` (jsonb serialises canonically) | JSONB cast to text is deterministic; reversible via `col::jsonb` on the reverse migration. |
+| MAP | scalar except STRING | `R` | — | No sensible single-value extraction; author must CUSTOM_MIGRATION a specific key. |
+| MAP | LIST | `C` | `jsonb_agg(value ORDER BY key)` or custom | Drops keys; author picks value-extraction order. |
+| MAP | MESSAGE | `C` | field-by-field extract | Shape change; author maps keys to message fields. |
+| LIST | STRING | `U` | `col::text` | Same as MAP. JSONB array serialises. |
+| LIST | scalar except STRING | `R` | — | Same reasoning as MAP. |
+| LIST | MAP | `C` | `jsonb_object_agg(idx, value)` or custom | Keys must be synthesised; author owns the key scheme. |
+| LIST | MESSAGE | `C` | index-based field extract | Shape change. |
+| MESSAGE | STRING | `U` | `col::text` | Same. |
+| MESSAGE | scalar except STRING | `R` | — | No canonical single-value projection. |
+| MESSAGE | MAP | `C` | field→key,value fold | Author picks fold. |
+| MESSAGE | LIST | `C` | field values in order | Author picks projection. |
+| scalar | MAP/LIST/MESSAGE | `R` | — | Wrapping a scalar into a collection is ambiguous (single-element list? object with what key?); author renumbers or CUSTOM_MIGRATION. |
+
+**Note on MESSAGE carrier:** iter-1 supports a subset — a proto
+`Message` can land in a column either as JSON/JSONB (default, same
+as MAP / LIST) or as a proto-bytes blob via `CARRIER_MESSAGE` +
+custom_type escape. For JSONB-backed MESSAGEs the grid above applies
+directly. For bytes-backed MESSAGEs the cell is `R` across the board
+(opaque to the compiler; author owns the deserialisation path).
+
+#### Common failure modes the matrix steers around
+
+1. **"I'll just flip STRING to INT32, PG will cast."** Today's emit
+   stops at REFUSE, but if it didn't, rows like `"n/a"` would fail
+   at `ALTER TABLE ... ALTER COLUMN col TYPE int USING col::int` —
+   and the migration rolls back mid-way, leaving the table locked.
+   Matrix routes through NEEDS_CONFIRM + check.sql, so the failure
+   surfaces before the lock.
+2. **"Widen INT32 to INT64, that's just SAFE."** True for the type,
+   but downstream app code that reads the column via generated
+   Go / JS may have compile-time assumptions (Go `int32` ≠ `int64`,
+   JS `number` ≠ `bigint`). The differ stays SAFE at the DB layer;
+   the D29 tool surface logs "app code re-gen required" as a
+   companion concern.
+3. **"MAP → LIST is obviously `jsonb_values()`."** PG has
+   `jsonb_each`, `jsonb_object_keys`, `jsonb_array_elements`, but no
+   canonical "values in key-insertion order" — JSONB stores keys
+   sorted lexicographically. CUSTOM_MIGRATION makes the author pick
+   the ordering explicitly.
+
+### D28.3 — Classification matrix: dbType × dbType within carrier (added 2026-04-23)
+
+**Status: draft, awaiting cell-by-cell sign-off.** Phase 1c of D28.
+The `db_type` override lets authors pin a column's physical PG type
+independently of the carrier's default (e.g. `string` carrier but
+`DBT_UUID`, `int64` carrier but `DBT_INTEGER`). Changing the
+override *within* the same carrier is the D28.3 territory; it's
+mostly deterministic PG casts, a handful of NEEDS_CONFIRM cells for
+narrow casts.
+
+Cross-carrier dbType changes degenerate to the D28.2 carrier matrix
+— carrier-axis dominates, dbType-axis folds in as a secondary PG
+`USING` adjustment.
+
+Grids are per-carrier family. Cells not listed are R (no valid
+same-carrier cast between unrelated dbTypes, e.g. UUID ↔ INET).
+
+**Legend:** same as D28.2 (`S` / `U` / `N` / `C` / `R`).
+
+#### Grid C1 — STRING carrier
+
+| from\to | TEXT | VARCHAR | CITEXT | UUID | INET | CIDR | MACADDR | TSVECTOR |
+|---|---|---|---|---|---|---|---|---|
+| **TEXT** | — | S‡ | U | N | N | N | N | U |
+| **VARCHAR** | S | — | U | N | N | N | N | U |
+| **CITEXT** | U | U | — | N | N | N | N | U |
+| **UUID** | U | U | U | — | R | R | R | R |
+| **INET** | U | U | U | R | — | N | R | R |
+| **CIDR** | U | U | U | R | U | — | R | R |
+| **MACADDR** | U | U | U | R | R | R | — | R |
+| **TSVECTOR** | U | U | U | R | R | R | R | — |
+
+‡ TEXT → VARCHAR with an explicit `max_len` narrow triggers the A3 check.
+
+| From | To | Cell | USING / check.sql | Rationale |
+|---|---|---|---|---|
+| TEXT / VARCHAR | CITEXT | `U` | `col::citext` | Data-preserving; changes comparison semantics (case-insensitive) but keeps bytes. Reversible. |
+| TEXT / VARCHAR / CITEXT | UUID | `N` | `col::uuid` + `SELECT count(*) FROM t WHERE col !~ '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$' LIMIT 1` | Cast errors on non-UUID rows; check validates pre-apply. |
+| TEXT / VARCHAR / CITEXT | INET | `N` | `col::inet` + regex check (IPv4 / IPv6 permissive) | Format check needed. |
+| TEXT / VARCHAR / CITEXT | CIDR | `N` | `col::cidr` + regex check (network/mask) | CIDR stricter than INET (host bits must be zero beyond the mask); check.sql enforces. |
+| TEXT / VARCHAR / CITEXT | MACADDR | `N` | `col::macaddr` + regex check | Format check. |
+| TEXT / VARCHAR / CITEXT | TSVECTOR | `U` | `to_tsvector('simple', col)` | Language-config free; reversible via back-to-text (lossless on `simple` config; author should confirm if they need a specific language config — park as follow-up). |
+| UUID / INET / CIDR / MACADDR / TSVECTOR | TEXT / VARCHAR / CITEXT | `U` | `col::text` | PG renders canonical string form; reversible. |
+| INET | CIDR | `N` | `col::cidr` + `SELECT count(*) FROM t WHERE host(col) <> host(network(col)) LIMIT 1` | PG's INET → CIDR cast strips host bits; rows with non-zero host bits lose data silently. Check.sql surfaces them so author can decide (keep host bits = stay INET, or normalize first). |
+| CIDR | INET | `U` | `col::inet` | Relax; always lossless. |
+| UUID / MACADDR / TSVECTOR ↔ network family | `R` | — | No sensible cast between unrelated type families. |
+
+#### Grid C2 — INT32 / INT64 carriers (integer family)
+
+For `int32` carrier: valid dbTypes = SMALLINT, INTEGER.  
+For `int64` carrier: valid dbTypes = INTEGER, BIGINT.
+
+Cross-carrier (INT32 ↔ INT64) is the carrier matrix (D28.2 — SAFE widen / NEEDS_CONFIRM narrow).
+
+| from\to | SMALLINT | INTEGER | BIGINT | NUMERIC |
+|---|---|---|---|---|
+| **SMALLINT** | — | S | S | U |
+| **INTEGER** | N | — | S | U |
+| **BIGINT** | N | N | — | U |
+| **NUMERIC** | N | N | N | — |
+
+| From | To | Cell | check.sql | Rationale |
+|---|---|---|---|---|
+| SMALLINT → INTEGER → BIGINT | `S` | — | Strict widen within integer family; no USING needed. |
+| INTEGER → SMALLINT | `N` | `SELECT count(*) FROM t WHERE col > 32767 OR col < -32768 LIMIT 1` | Overflow check. |
+| BIGINT → INTEGER | `N` | `SELECT count(*) FROM t WHERE col > 2147483647 OR col < -2147483648 LIMIT 1` | Overflow. |
+| BIGINT → SMALLINT | `N` | (range check narrower) | Overflow. |
+| integer → NUMERIC | `U` | — | Always fits; `col::numeric`. |
+| NUMERIC → integer | `N` | `SELECT count(*) FROM t WHERE col <> floor(col) LIMIT 1` + overflow | Truncation + overflow. |
+
+#### Grid C3 — DOUBLE carrier (floating-point family)
+
+Valid dbTypes: REAL, DOUBLE_PRECISION, NUMERIC.
+
+| from\to | REAL | DOUBLE_PRECISION | NUMERIC |
+|---|---|---|---|
+| **REAL** | — | S | U |
+| **DOUBLE_PRECISION** | N | — | U |
+| **NUMERIC** | N | N | — |
+
+| From | To | Cell | check.sql | Rationale |
+|---|---|---|---|---|
+| REAL → DOUBLE_PRECISION | `S` | — | Strict widen (6 digits → 15 digits precision). |
+| DOUBLE_PRECISION → REAL | `N` | `SELECT count(*) FROM t WHERE col::real::double precision <> col LIMIT 1` | Precision loss; check.sql finds rows that can't round-trip. |
+| REAL / DOUBLE → NUMERIC | `U` | — | Data-preserving in both directions of magnitude; `col::numeric`. |
+| NUMERIC → REAL / DOUBLE | `N` | round-trip check | Precision of NUMERIC > 17 digits can't fit in DOUBLE. |
+
+#### Grid C4 — TIMESTAMP carrier (date/time family)
+
+Valid dbTypes: DATE, TIME, TIMESTAMP, TIMESTAMPTZ.
+
+| from\to | DATE | TIME | TIMESTAMP | TIMESTAMPTZ |
+|---|---|---|---|---|
+| **DATE** | — | R | U | U |
+| **TIME** | R | — | R | R |
+| **TIMESTAMP** | N | N | — | N |
+| **TIMESTAMPTZ** | N | N | N | — |
+
+| From | To | Cell | USING / check.sql | Rationale |
+|---|---|---|---|---|
+| DATE → TIMESTAMP / TIMESTAMPTZ | `U` | `col::timestamp` / `col::timestamptz` | Midnight in session timezone; reversible via cast back (may lose tz info on backward). |
+| TIMESTAMP → DATE | `N` | `SELECT count(*) FROM t WHERE col::time <> '00:00:00' LIMIT 1` | Truncates time-of-day; check surfaces rows with non-midnight times. |
+| TIMESTAMP → TIME | `N` | — | Drops date component; check irrelevant (data reshape is the point; user confirms intent). |
+| TIMESTAMP → TIMESTAMPTZ | `N` | — | PG applies session timezone; author must confirm target timezone matches data's assumed tz. |
+| TIMESTAMPTZ → TIMESTAMP | `N` | — | Drops timezone, leaving local-time; ambiguous if data spans multiple tz. |
+| TIME ↔ DATE / TIMESTAMP / TIMESTAMPTZ | `R` | — | TIME has no date; combining requires custom date; not automatic. Author CUSTOM_MIGRATION. |
+
+#### Grid C5 — BYTES carrier
+
+Valid dbTypes: BYTEA (PG), BLOB (MySQL stub).
+
+Single-cell matrix; BYTEA ↔ BLOB is effectively a dialect-axis rename
+(same wire shape). Classification `S` within one dialect isn't
+reachable (you don't change dbType within PG from BYTEA to anything
+else in the same carrier). Cross-dialect moves are M4 territory.
+
+#### Grid C6 — MAP / LIST carrier (JSON family)
+
+Valid dbTypes: JSON, JSONB, HSTORE (HSTORE map-only).
+
+| from\to | JSON | JSONB | HSTORE |
+|---|---|---|---|
+| **JSON** | — | U | N |
+| **JSONB** | U | — | N |
+| **HSTORE** | U | U | — |
+
+| From | To | Cell | USING / check.sql | Rationale |
+|---|---|---|---|---|
+| JSON → JSONB | `U` | `col::jsonb` | Normalises whitespace + key order; semantically equivalent. |
+| JSONB → JSON | `U` | `col::json` | Deterministic text form. |
+| JSON / JSONB → HSTORE | `N` | `SELECT count(*) FROM t WHERE jsonb_typeof(col) <> 'object' OR EXISTS (SELECT 1 FROM jsonb_each(col) WHERE jsonb_typeof(value) <> 'string') LIMIT 1` | HSTORE is string→string only; JSON may nest. Check rejects incompatible shapes. |
+| HSTORE → JSON / JSONB | `U` | `col::jsonb` (via `hstore_to_jsonb(col)` or direct cast) | All HSTORE values are strings by construction → always fits as JSON strings. Lossless. |
+
+#### Grid C7 — BOOL / DURATION carriers (trivial)
+
+Single valid dbType each (BOOLEAN, INTERVAL respectively). No
+intra-carrier dbType transition exists; all moves are carrier-axis
+(D28.2).
+
+#### DbType changes compose with constraint axes
+
+A change like `VARCHAR(200) → TEXT` reduces to (no dbType change in
+family) + (A3 max_len removed). Classification = max-axis strictness,
+which is SAFE per A3 "remove bound". Emitter materialises this as
+one `ALTER COLUMN TYPE text` (PG accepts without USING when both
+are string-family).
+
+### D28.4 — Classification matrix: sem × sem within carrier (added 2026-04-23)
+
+**Status: draft.** Phase 1d of D28 — the final axis. SemType is a
+design-intent label the author puts on a column (`SEM_EMAIL`,
+`SEM_UUID`, `SEM_MONEY`, …); it drives iter-1 dbType selection +
+CHECK synthesis. A sem change within the same carrier decomposes
+into **at most two** lower-level axis changes:
+
+1. **dbType axis** (D28.3) — EMAIL and URL both land on TEXT; CHAR
+   lands on VARCHAR; UUID lands on UUID; IP lands on INET. Changing
+   sem between cells in the same dbType column introduces no
+   dbType-axis change.
+2. **CHECK axis** (D28.1 A13) — EMAIL has a regex CHECK; URL has a
+   different regex; SLUG has another. Changing sem between two with
+   synthesised CHECKs is a `ReplaceCheck` op; add/drop of the CHECK
+   is the Add/Drop variant.
+
+D28.4 introduces **no new strategy codes**. The classifier reduces a
+sem transition to (dbType change if any, CHECK delta) and folds per
+the strictness rule.
+
+#### Reduction table — string carrier (the interesting one)
+
+| From sem | To sem | dbType delta | CHECK delta | Composite strategy |
+|---|---|---|---|---|
+| TEXT | CHAR | TEXT → VARCHAR(n) | none (both unconstrained CHECK-wise) | A3 "0 → N max_len" = **N** |
+| CHAR | TEXT | VARCHAR(n) → TEXT | none | **S** (A3 remove bound) |
+| TEXT / CHAR | EMAIL | none (still TEXT/VARCHAR) | add regex CHECK | A13 add = **N** (NEEDS_CONFIRM with `count(*) WHERE col !~ '<email>' LIMIT 1`) |
+| EMAIL | TEXT | none | drop CHECK | A13 drop = **S** |
+| EMAIL | URL | none | replace CHECK (different regex) | A13 replace = **N** |
+| EMAIL | SLUG | none | replace CHECK | A13 replace = **N** |
+| TEXT | UUID | TEXT → UUID | none | D28.3 C1 = **N** (regex + cast validation) |
+| UUID | TEXT | UUID → TEXT | none | D28.3 C1 = **U** |
+| TEXT | JSON | TEXT → JSON | none | D28.3 C1 cross-family = **N** (`col::json`; parse errors possible) |
+| JSON | TEXT | JSON → TEXT | none | **U** (serialise back) |
+| TEXT | IP | TEXT → INET | none | D28.3 C1 = **N** |
+| TEXT | MAC | TEXT → MACADDR | none | D28.3 C1 = **N** |
+| TEXT | TSEARCH | TEXT → TSVECTOR | none | D28.3 C1 = **U** |
+| SLUG | URL | none | replace CHECK | **N** |
+| POSIX_PATH | FILE_PATH | none | add extension-regex CHECK | A9 `[*]` → list = **N** |
+| FILE_PATH | POSIX_PATH | none | drop CHECK | A9 list → `[*]` = **S** |
+| FILE_PATH | IMAGE_PATH | none | replace CHECK (different extension list) | A9 narrow / reshape = **N** |
+| ENUM | anything non-ENUM | PG ENUM type drop + new dbType | CHECK potentially added | A12 `pg.custom_type` change family ≈ **REFUSE** (string-backed ENUM uses a type that can't be stripped in-place) |
+| anything non-ENUM | ENUM | add PG ENUM type | CHECK for int-backed variant | **N** (validate existing rows against enum set) + requires emitter to emit `CREATE TYPE` before `ALTER TYPE` |
+
+#### Reduction table — int carriers
+
+| From sem | To sem | dbType delta | CHECK delta | Composite |
+|---|---|---|---|---|
+| NUMBER / ID / COUNTER ↔ each other | none | none | none | — (no-op; metadata-only label change) |
+| NUMBER | SMALL_INTEGER | INTEGER → SMALLINT | none | D28.3 C2 narrow = **N** |
+| SMALL_INTEGER | NUMBER | SMALLINT → INTEGER | none | **S** |
+| NUMBER | PERCENTAGE | none (INTEGER) | add `CHECK col BETWEEN 0 AND 100` | A13 add = **N** (auto-check on existing rows) |
+| PERCENTAGE | NUMBER | none | drop CHECK | **S** |
+| NUMBER | MONEY | INTEGER → BIGINT (if needed) | none | **S** widen |
+| NUMBER | DECIMAL | INTEGER → NUMERIC | none | D28.3 C2 = **U** |
+| DECIMAL | NUMBER | NUMERIC → INTEGER | none | **N** truncation |
+| RATIO | any | NUMERIC(P,S) → other | CHECK `col BETWEEN 0 AND 1` drop | fold per axis |
+
+#### Reduction table — date/time carriers
+
+Straightforward 1:1 mapping to dbType; DATE / TIME / DATETIME /
+INTERVAL each pin a single dbType in iter-1. Sem changes here
+collapse to D28.3 C4 cells. No new strategy territory.
+
+| From sem | To sem | Reduces to |
+|---|---|---|
+| DATE ↔ DATETIME | D28.3 C4 DATE ↔ TIMESTAMP |
+| DATETIME ↔ TIME | D28.3 C4 TIMESTAMP ↔ TIME = **R** |
+| TIME ↔ DATE | D28.3 C4 = **R** |
+
+#### SEM_AUTO
+
+`SEM_AUTO` + `AutoKind` is a default-axis decoration (D28.1 A2);
+dropping AUTO is a default remove, adding AUTO is a default add.
+Changing AutoKind (AUTO_NOW ↔ AUTO_UUID_V4) is A2 "default A →
+default B" = **S**.
+
+#### Summary of D28 phase 1
+
+Four matrices together define every column-level transition the
+differ sees. Classifier implementation plan:
+
+```
+classifyFactChange(prev, curr):
+  if carrier(prev) != carrier(curr):
+    return D28.2 cell
+  if dbType(prev) != dbType(curr):
+    return D28.3 cell
+  for each constraint-axis delta in D28.1:
+    collect per-axis strategy
+  return strictest(collected)
+```
+
+No third-axis branching needed; sem is a label, not a separate
+classification target.
+
 ### D29 — Schema source-of-truth: tool + git lock-file model (added 2026-04-23)
 
 **Status: north-star architecture.** Pins the long-term shape of
