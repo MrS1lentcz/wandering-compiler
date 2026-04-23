@@ -63,6 +63,24 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 	return upB.String(), downB.String(), nil
 }
 
+// emitRenameColumn renders ALTER TABLE ... RENAME COLUMN <from> TO
+// <to>. Symmetric: down swaps. PG ALTER ... RENAME COLUMN is a
+// metadata-only operation (no rewrite), data-preserving.
+func (e Emitter) emitRenameColumn(rc *planpb.RenameColumn) (string, string, error) {
+	from, to := rc.GetFromName(), rc.GetToName()
+	if from == "" || to == "" {
+		return "", "", fmt.Errorf("postgres: RenameColumn missing from/to name (from=%q to=%q)", from, to)
+	}
+	if from == to {
+		return "", "", fmt.Errorf("postgres: RenameColumn no-op (from=%q to=%q)", from, to)
+	}
+	tbl := tableShellFromCtx(rc.GetCtx(), nil)
+	qual := qualifiedTable(tbl)
+	up := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;", qual, from, to)
+	down := fmt.Sprintf("ALTER TABLE %s RENAME COLUMN %s TO %s;", qual, to, from)
+	return up, down, nil
+}
+
 // emitDropColumn renders ALTER TABLE ... DROP COLUMN ...; (+ DROP TYPE
 // for ENUMs). Down is the inverse — re-creates the column the same way
 // emitAddColumn would.
@@ -91,19 +109,22 @@ func (e Emitter) emitDropColumn(dc *planpb.DropColumn) (string, string, error) {
 
 // tableShellFromCtx synthesises a minimal *irpb.Table carrying the
 // fields the column / qualifier renderers consult: name, namespace
-// mode + value, and the single Column being operated on. The PK +
-// FK lists are intentionally empty — adding / dropping an FK or
-// participating in PK changes are separate Op variants in the
-// alter-diff plan; this column-axis op only handles the column
-// itself.
+// mode + value, and the single Column being operated on. Pass col=nil
+// for ops that don't operate on a specific column (e.g. RenameColumn,
+// which only needs the table qualifier). The PK + FK lists are
+// intentionally empty — adding / dropping an FK or participating in
+// PK changes are separate Op variants in the alter-diff plan.
 func tableShellFromCtx(ctx *planpb.TableCtx, col *irpb.Column) *irpb.Table {
-	return &irpb.Table{
+	t := &irpb.Table{
 		Name:          ctx.GetTableName(),
 		MessageFqn:    ctx.GetMessageFqn(),
 		NamespaceMode: ctx.GetNamespaceMode(),
 		Namespace:     ctx.GetNamespace(),
-		Columns:       []*irpb.Column{col},
 	}
+	if col != nil {
+		t.Columns = []*irpb.Column{col}
+	}
+	return t
 }
 
 // renderEnumTypeStatements derives the CREATE TYPE / DROP TYPE pair

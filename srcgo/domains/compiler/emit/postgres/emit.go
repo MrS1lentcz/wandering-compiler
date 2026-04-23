@@ -38,6 +38,8 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitAddColumn(v.AddColumn)
 	case *planpb.Op_DropColumn:
 		return e.emitDropColumn(v.DropColumn)
+	case *planpb.Op_RenameColumn:
+		return e.emitRenameColumn(v.RenameColumn)
 	default:
 		return "", "", fmt.Errorf("postgres: unsupported op variant %T (M1 implementation in progress; see iteration-2.md)", op.GetVariant())
 	}

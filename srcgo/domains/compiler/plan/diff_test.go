@@ -270,6 +270,39 @@ func TestDiffColumnDropBeforeAddOrder(t *testing.T) {
 	}
 }
 
+// TestDiffRenameColumn — D10 in action: same field number, different
+// name → RenameColumn op. No DropColumn + AddColumn false positive.
+func TestDiffRenameColumn(t *testing.T) {
+	mk := func(colName string) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+				{Name: colName, ProtoName: colName, FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk("name"), mk("display_name"))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1 (rename, not drop+add)", len(ops))
+	}
+	rc := ops[0].GetRenameColumn()
+	if rc == nil {
+		t.Fatalf("ops[0] = %T, want *Op_RenameColumn", ops[0].GetVariant())
+	}
+	if rc.GetFromName() != "name" || rc.GetToName() != "display_name" {
+		t.Errorf("rename = %q→%q, want name→display_name", rc.GetFromName(), rc.GetToName())
+	}
+	if rc.GetFieldNumber() != 2 {
+		t.Errorf("field_number = %d, want 2", rc.GetFieldNumber())
+	}
+}
+
 // TestDiffMessageRenameIsDropPlusAdd — D24: changing the proto message
 // name (= changing FQN) is semantically a destroy + create, not an
 // in-place rename. Even if the SQL `name` is identical, FQN difference

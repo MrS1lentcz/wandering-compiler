@@ -88,9 +88,16 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	for _, pair := range both {
 		ops = append(ops, columnAdds(pair)...)
 	}
+	// Renames after structural adds — RENAME on a freshly-added
+	// column is meaningless (we'd just have added it under the new
+	// name); RENAME of a column that survived prev → curr happens
+	// here.
+	for _, pair := range both {
+		ops = append(ops, columnRenames(pair)...)
+	}
 	// Table-fact (rename / namespace / comment) and column-fact
-	// (AlterColumn / RenameColumn) + index / FK / CHECK diffs land
-	// in subsequent commits.
+	// (AlterColumn) + index / FK / CHECK diffs land in subsequent
+	// commits.
 
 	return &planpb.MigrationPlan{Ops: ops}, nil
 }
@@ -132,6 +139,37 @@ func columnDrops(pair TablePair) []*planpb.Op {
 			Variant: &planpb.Op_DropColumn{DropColumn: &planpb.DropColumn{
 				Ctx:    ctx,
 				Column: c,
+			}},
+		})
+	}
+	return ops
+}
+
+// columnRenames returns RenameColumn ops for both-present columns
+// whose proto field number is stable but whose `name` (after
+// (w17.db.column).name override) changed. D10 makes this free —
+// the rename collapses what would otherwise be a Drop + Add
+// false positive into one ALTER ... RENAME COLUMN. Order = curr
+// declaration order. Excludes columns whose number isn't on both
+// sides (those flow through columnAdds / columnDrops).
+func columnRenames(pair TablePair) []*planpb.Op {
+	prevByNum := numberMap(pair.Prev.GetColumns())
+	ctx := tableCtxOf(pair.Curr)
+	var ops []*planpb.Op
+	for _, c := range pair.Curr.GetColumns() {
+		prevCol, ok := prevByNum[c.GetFieldNumber()]
+		if !ok {
+			continue
+		}
+		if prevCol.GetName() == c.GetName() {
+			continue
+		}
+		ops = append(ops, &planpb.Op{
+			Variant: &planpb.Op_RenameColumn{RenameColumn: &planpb.RenameColumn{
+				Ctx:         ctx,
+				FieldNumber: c.GetFieldNumber(),
+				FromName:    prevCol.GetName(),
+				ToName:      c.GetName(),
 			}},
 		})
 	}

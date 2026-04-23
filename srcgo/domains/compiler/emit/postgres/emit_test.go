@@ -286,6 +286,43 @@ func TestEmitAddColumnEnum(t *testing.T) {
 	}
 }
 
+// TestEmitRenameColumn — symmetric ALTER ... RENAME COLUMN. Down
+// swaps from/to.
+func TestEmitRenameColumn(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_RenameColumn{RenameColumn: &planpb.RenameColumn{
+		Ctx: &planpb.TableCtx{
+			TableName:     "users",
+			NamespaceMode: irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+			Namespace:     "auth",
+		},
+		FieldNumber: 2,
+		FromName:    "name",
+		ToName:      "display_name",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE auth.users RENAME COLUMN name TO display_name;" {
+		t.Errorf("up = %q, want ALTER TABLE auth.users RENAME COLUMN name TO display_name;", up)
+	}
+	if down != "ALTER TABLE auth.users RENAME COLUMN display_name TO name;" {
+		t.Errorf("down = %q, want reverse rename", down)
+	}
+}
+
+// TestEmitRenameColumnNoOpRefused — refuse from==to which would emit
+// invalid SQL anyway. Defensive against differ malforming the op.
+func TestEmitRenameColumnNoOpRefused(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_RenameColumn{RenameColumn: &planpb.RenameColumn{
+		Ctx: &planpb.TableCtx{TableName: "users"},
+		FromName: "name", ToName: "name",
+	}}}
+	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("RenameColumn from==to accepted, want error")
+	}
+}
+
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
 // DropColumn.down = AddColumn.up for the same column. Confirms the
 // emitter's symmetry contract for column-axis ops.
