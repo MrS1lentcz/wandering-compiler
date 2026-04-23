@@ -56,6 +56,24 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitDropRawIndex(v.DropRawIndex)
 	case *planpb.Op_ReplaceRawIndex:
 		return e.emitReplaceRawIndex(v.ReplaceRawIndex)
+	case *planpb.Op_AddForeignKey:
+		return e.emitAddForeignKey(v.AddForeignKey)
+	case *planpb.Op_DropForeignKey:
+		return e.emitDropForeignKey(v.DropForeignKey)
+	case *planpb.Op_ReplaceForeignKey:
+		return e.emitReplaceForeignKey(v.ReplaceForeignKey)
+	case *planpb.Op_AddCheck:
+		return e.emitAddCheck(v.AddCheck)
+	case *planpb.Op_DropCheck:
+		return e.emitDropCheck(v.DropCheck)
+	case *planpb.Op_ReplaceCheck:
+		return e.emitReplaceCheck(v.ReplaceCheck)
+	case *planpb.Op_AddRawCheck:
+		return e.emitAddRawCheck(v.AddRawCheck)
+	case *planpb.Op_DropRawCheck:
+		return e.emitDropRawCheck(v.DropRawCheck)
+	case *planpb.Op_ReplaceRawCheck:
+		return e.emitReplaceRawCheck(v.ReplaceRawCheck)
 	default:
 		return "", "", fmt.Errorf("postgres: unsupported op variant %T (M1 implementation in progress; see iteration-2.md)", op.GetVariant())
 	}

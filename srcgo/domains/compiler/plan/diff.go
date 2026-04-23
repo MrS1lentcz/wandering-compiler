@@ -111,6 +111,19 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	for _, pair := range both {
 		ops = append(ops, rawIndexOps(pair)...)
 	}
+	// FK ops follow indexes — FKs benefit from indexed columns
+	// (PG checks FK validity faster against indexed targets).
+	for _, pair := range both {
+		ops = append(ops, fkOps(pair)...)
+	}
+	// CHECK ops after FKs (no inter-dependency, but keeps the
+	// constraint family grouped at the tail).
+	for _, pair := range both {
+		ops = append(ops, checkOps(pair)...)
+	}
+	for _, pair := range both {
+		ops = append(ops, rawCheckOps(pair)...)
+	}
 	// Table comments after all structural changes — COMMENT ON
 	// references the post-rename qualifier and post-add columns.
 	for _, pair := range both {
@@ -216,6 +229,204 @@ func tableCtxOf(t *irpb.Table) *planpb.TableCtx {
 		NamespaceMode:  t.GetNamespaceMode(),
 		Namespace:      t.GetNamespace(),
 	}
+}
+
+// checkOps returns Add / Drop / Replace ops for structured CHECKs
+// across both-present columns of one `both` pair. Identity = the
+// CHECK variant kind on a given column (each column carries at
+// most one of each variant kind — len/blank/range/regex/choices —
+// because that's what attachChecks emits in iter-1). Set-diff per
+// (column number, variant kind):
+//   onlyPrev → DropCheck
+//   onlyCurr → AddCheck
+//   both with proto.Equal differences → ReplaceCheck
+//
+// Columns added or dropped at this migration carry their checks
+// with them via AddColumn / DropColumn — they don't surface as
+// separate AddCheck / DropCheck ops.
+func checkOps(pair TablePair) []*planpb.Op {
+	ctx := tableCtxOf(pair.Curr)
+	prevByNum := numberMap(pair.Prev.GetColumns())
+
+	var ops []*planpb.Op
+	for _, currCol := range pair.Curr.GetColumns() {
+		prevCol, both := prevByNum[currCol.GetFieldNumber()]
+		if !both {
+			continue // AddColumn carries the new column's checks
+		}
+		prevByKind := checkMap(prevCol)
+		currByKind := checkMap(currCol)
+		// Drops first.
+		for _, prevCk := range prevCol.GetChecks() {
+			kind := checkVariantKind(prevCk)
+			if _, ok := currByKind[kind]; ok {
+				continue
+			}
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_DropCheck{DropCheck: &planpb.DropCheck{
+				Ctx: ctx, Column: currCol, Check: prevCk,
+			}}})
+		}
+		for _, currCk := range currCol.GetChecks() {
+			kind := checkVariantKind(currCk)
+			prevCk, both := prevByKind[kind]
+			if !both {
+				ops = append(ops, &planpb.Op{Variant: &planpb.Op_AddCheck{AddCheck: &planpb.AddCheck{
+					Ctx: ctx, Column: currCol, Check: currCk,
+				}}})
+				continue
+			}
+			if proto.Equal(prevCk, currCk) {
+				continue
+			}
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_ReplaceCheck{ReplaceCheck: &planpb.ReplaceCheck{
+				Ctx: ctx, Column: currCol, From: prevCk, To: currCk,
+			}}})
+		}
+	}
+	return ops
+}
+
+// rawCheckOps mirrors checkOps for raw_check entries. Identity =
+// RawCheck.Name. Body comparison is byte-equal — opaque (D11).
+func rawCheckOps(pair TablePair) []*planpb.Op {
+	ctx := tableCtxOf(pair.Curr)
+	prevByName := rawCheckMap(pair.Prev.GetRawChecks())
+	currByName := rawCheckMap(pair.Curr.GetRawChecks())
+
+	var ops []*planpb.Op
+	for _, rc := range pair.Prev.GetRawChecks() {
+		if _, ok := currByName[rc.GetName()]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_DropRawCheck{DropRawCheck: &planpb.DropRawCheck{
+			Ctx: ctx, Check: rc,
+		}}})
+	}
+	for _, rc := range pair.Curr.GetRawChecks() {
+		prevRC, both := prevByName[rc.GetName()]
+		if !both {
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_AddRawCheck{AddRawCheck: &planpb.AddRawCheck{
+				Ctx: ctx, Check: rc,
+			}}})
+			continue
+		}
+		if proto.Equal(prevRC, rc) {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_ReplaceRawCheck{ReplaceRawCheck: &planpb.ReplaceRawCheck{
+			Ctx: ctx, From: prevRC, To: rc,
+		}}})
+	}
+	return ops
+}
+
+// checkMap indexes a column's structured checks by their variant
+// kind ("len" / "blank" / "range" / "regex" / "choices") so the
+// per-column set-diff can compare like-with-like.
+func checkMap(col *irpb.Column) map[string]*irpb.Check {
+	out := make(map[string]*irpb.Check, len(col.GetChecks()))
+	for _, ck := range col.GetChecks() {
+		out[checkVariantKind(ck)] = ck
+	}
+	return out
+}
+
+// checkVariantKind returns a stable string name for the Check
+// variant. Keep aligned with renderCheckBody's suffix in the
+// postgres emitter — the suffix names the constraint, so identity
+// must match it.
+func checkVariantKind(ck *irpb.Check) string {
+	switch ck.GetVariant().(type) {
+	case *irpb.Check_Length:
+		return "len"
+	case *irpb.Check_Blank:
+		return "blank"
+	case *irpb.Check_Range:
+		return "range"
+	case *irpb.Check_Regex:
+		return "format"
+	case *irpb.Check_Choices:
+		return "choices"
+	}
+	return ""
+}
+
+func rawCheckMap(rcs []*irpb.RawCheck) map[string]*irpb.RawCheck {
+	out := make(map[string]*irpb.RawCheck, len(rcs))
+	for _, r := range rcs {
+		out[r.GetName()] = r
+	}
+	return out
+}
+
+// fkOps returns AddForeignKey / DropForeignKey / ReplaceForeignKey
+// ops for one `both` pair. Identity = derived constraint name
+// `<table>_<col>_fkey` (matches PG's auto-derived convention so
+// existing alter-diff plans can drop iter-1 inline-FK constraints
+// by their PG-given name). Set-diff over the constraint-name space:
+//   onlyPrev → DropForeignKey
+//   onlyCurr → AddForeignKey
+//   both with proto.Equal differences (target table / column /
+//     deletion_rule changed) → ReplaceForeignKey
+func fkOps(pair TablePair) []*planpb.Op {
+	ctx := tableCtxOf(pair.Curr)
+	prevByName := fkMap(pair.Prev)
+	currByName := fkMap(pair.Curr)
+
+	var ops []*planpb.Op
+	for _, fk := range pair.Prev.GetForeignKeys() {
+		name := fkConstraintName(pair.Prev.GetName(), fk.GetColumn())
+		if _, ok := currByName[name]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_DropForeignKey{DropForeignKey: &planpb.DropForeignKey{
+			Ctx:            ctx,
+			Fk:             fk,
+			ConstraintName: name,
+			Columns:        pair.Prev.GetColumns(),
+		}}})
+	}
+	for _, fk := range pair.Curr.GetForeignKeys() {
+		name := fkConstraintName(pair.Curr.GetName(), fk.GetColumn())
+		prevFK, both := prevByName[name]
+		if !both {
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_AddForeignKey{AddForeignKey: &planpb.AddForeignKey{
+				Ctx:            ctx,
+				Fk:             fk,
+				ConstraintName: name,
+				Columns:        pair.Curr.GetColumns(),
+			}}})
+			continue
+		}
+		if proto.Equal(prevFK, fk) {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_ReplaceForeignKey{ReplaceForeignKey: &planpb.ReplaceForeignKey{
+			Ctx:            ctx,
+			From:           prevFK,
+			To:             fk,
+			ConstraintName: name,
+			Columns:        pair.Curr.GetColumns(),
+		}}})
+	}
+	return ops
+}
+
+// fkMap indexes a table's FKs by their derived constraint name.
+func fkMap(t *irpb.Table) map[string]*irpb.ForeignKey {
+	out := make(map[string]*irpb.ForeignKey, len(t.GetForeignKeys()))
+	for _, fk := range t.GetForeignKeys() {
+		out[fkConstraintName(t.GetName(), fk.GetColumn())] = fk
+	}
+	return out
+}
+
+// fkConstraintName derives the FK constraint name on the convention PG
+// uses when none is explicit: `<table>_<col>_fkey`. Used both for
+// generating alter-diff op identities and for emitting matching
+// CONSTRAINT clauses on AddForeignKey statements.
+func fkConstraintName(table, col string) string {
+	return table + "_" + col + "_fkey"
 }
 
 // indexOps returns AddIndex / DropIndex / ReplaceIndex ops for the

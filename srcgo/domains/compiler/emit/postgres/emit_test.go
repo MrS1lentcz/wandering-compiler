@@ -430,6 +430,72 @@ func TestEmitRawIndexRoundtrip(t *testing.T) {
 	}
 }
 
+// TestEmitAddForeignKey — ALTER TABLE ADD CONSTRAINT FOREIGN KEY
+// shape with ON DELETE clause; down drops by name.
+func TestEmitAddForeignKey(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AddForeignKey{AddForeignKey: &planpb.AddForeignKey{
+		Ctx:            &planpb.TableCtx{TableName: "orders"},
+		Fk:             &irpb.ForeignKey{Column: "customer_id", TargetTable: "customers", TargetColumn: "id", OnDelete: irpb.FKAction_FK_ACTION_SET_NULL},
+		ConstraintName: "orders_customer_id_fkey",
+		Columns: []*irpb.Column{
+			{Name: "customer_id", ProtoName: "customer_id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE orders ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_customer_id_fkey;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAddCheck — ALTER TABLE ADD CONSTRAINT … CHECK (…) using
+// the iter-1 renderCheck output. Down: DROP CONSTRAINT.
+func TestEmitAddCheck(t *testing.T) {
+	col := &irpb.Column{
+		Name: "name", ProtoName: "name",
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 64,
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AddCheck{AddCheck: &planpb.AddCheck{
+		Ctx:    &planpb.TableCtx{TableName: "users"},
+		Column: col,
+		Check:  &irpb.Check{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE users ADD CONSTRAINT users_name_blank CHECK (name <> '');" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_name_blank;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAddRawCheck — opaque body verbatim inside CHECK (…); down
+// drops by author-supplied name.
+func TestEmitAddRawCheck(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AddRawCheck{AddRawCheck: &planpb.AddRawCheck{
+		Ctx:   &planpb.TableCtx{TableName: "orders"},
+		Check: &irpb.RawCheck{Name: "orders_dates_ordered", Expr: "start_date <= end_date"},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE orders ADD CONSTRAINT orders_dates_ordered CHECK (start_date <= end_date);" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_dates_ordered;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
 // DropColumn.down = AddColumn.up for the same column. Confirms the
 // emitter's symmetry contract for column-axis ops.
