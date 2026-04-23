@@ -306,10 +306,94 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*pla
 			From: prev.GetComment(), To: curr.GetComment(),
 		}}})
 	}
-	// EnumValues / AllowedExtensions / PgOptions changes land in the
-	// follow-up commit covering ENUM-type evolution + extension
-	// manifest tracking.
+	enumChange, err := enumValuesFactChange(prev, curr)
+	if err != nil {
+		return nil, err
+	}
+	if enumChange != nil {
+		out = append(out, enumChange)
+	}
+	if !equalStringSlices(prev.GetAllowedExtensions(), curr.GetAllowedExtensions()) {
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_AllowedExtensions{AllowedExtensions: &planpb.AllowedExtensionsChange{
+			From: prev.GetAllowedExtensions(),
+			To:   curr.GetAllowedExtensions(),
+		}}})
+	}
+	if !proto.Equal(prev.GetPg(), curr.GetPg()) {
+		// Custom_type already REFUSE-checked above; only required_extensions
+		// can differ here. Manifest-only impact (no DDL); FactChange carried
+		// for downstream consumers (M4 capability tracking).
+		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_PgOptions{PgOptions: &planpb.PgOptionsChange{
+			From: prev.GetPg(), To: curr.GetPg(),
+		}}})
+	}
 	return out, nil
+}
+
+// enumValuesFactChange handles SEM_ENUM column evolution. Returns
+// nil when the names list is unchanged. REFUSE when names are
+// removed (PG can't drop enum values without recreate) or when the
+// proto enum FQN itself changed (different enum entirely).
+// "Added only" → EnumValuesChange with the added subset.
+func enumValuesFactChange(prev, curr *irpb.Column) (*planpb.FactChange, error) {
+	if curr.GetType() != irpb.SemType_SEM_ENUM || prev.GetType() != irpb.SemType_SEM_ENUM {
+		return nil, nil
+	}
+	if prev.GetEnumFqn() != curr.GetEnumFqn() {
+		return nil, fmt.Errorf("column %q (#%d): enum FQN change %q→%q is REFUSE-strategy (different proto enum entirely; drop the column and re-add)",
+			curr.GetName(), curr.GetFieldNumber(), prev.GetEnumFqn(), curr.GetEnumFqn())
+	}
+	prevSet := stringSet(prev.GetEnumNames())
+	currSet := stringSet(curr.GetEnumNames())
+	var removed []string
+	for n := range prevSet {
+		if _, ok := currSet[n]; !ok {
+			removed = append(removed, n)
+		}
+	}
+	if len(removed) > 0 {
+		sort.Strings(removed)
+		return nil, fmt.Errorf("column %q (#%d): enum value removal %v is REFUSE-strategy (PG can't drop enum values; drop the column or recreate the type)",
+			curr.GetName(), curr.GetFieldNumber(), removed)
+	}
+	var addedNames []string
+	var addedNumbers []int64
+	for i, n := range curr.GetEnumNames() {
+		if _, ok := prevSet[n]; ok {
+			continue
+		}
+		addedNames = append(addedNames, n)
+		if i < len(curr.GetEnumNumbers()) {
+			addedNumbers = append(addedNumbers, curr.GetEnumNumbers()[i])
+		}
+	}
+	if len(addedNames) == 0 {
+		return nil, nil
+	}
+	return &planpb.FactChange{Variant: &planpb.FactChange_EnumValues{EnumValues: &planpb.EnumValuesChange{
+		AddedNames:   addedNames,
+		AddedNumbers: addedNumbers,
+	}}}, nil
+}
+
+func stringSet(ss []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(ss))
+	for _, s := range ss {
+		out[s] = struct{}{}
+	}
+	return out
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // numericChanged returns true when precision or scale differs.

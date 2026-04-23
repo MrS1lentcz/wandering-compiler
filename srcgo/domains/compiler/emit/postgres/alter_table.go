@@ -195,6 +195,23 @@ func renderFactChange(qualTable, colName string, fc *planpb.FactChange) (string,
 	case *planpb.FactChange_Comment:
 		up, down := renderColumnCommentChange(qualTable, colName, v.Comment)
 		return up, down, nil
+	case *planpb.FactChange_EnumValues:
+		up, down := renderEnumValuesChange(qualTable, colName, v.EnumValues)
+		return up, down, nil
+	case *planpb.FactChange_AllowedExtensions:
+		// Path-family allowed-extensions changes ride along the
+		// regex-CHECK on this column. The CHECK regeneration shows
+		// up via the structured ChecksChange path (drop+add the
+		// derived `<table>_<col>_format` constraint). Emit a
+		// no-DDL marker comment so the FactChange isn't lost in
+		// the plan dump.
+		return fmt.Sprintf("-- wc: allowed_extensions on %s changed; CHECK rebuild emitted via ChecksChange", colName),
+			fmt.Sprintf("-- wc: allowed_extensions on %s changed; CHECK rebuild emitted via ChecksChange", colName), nil
+	case *planpb.FactChange_PgOptions:
+		// pg.required_extensions diffs only affect the deploy-side
+		// extension manifest (M4); no DDL impact at the column axis.
+		return fmt.Sprintf("-- wc: pg required_extensions on %s changed; manifest tracking lands in M4", colName),
+			fmt.Sprintf("-- wc: pg required_extensions on %s changed; manifest tracking lands in M4", colName), nil
 	}
 	return "", "", fmt.Errorf("FactChange variant %T not yet implemented", fc.GetVariant())
 }
@@ -387,6 +404,30 @@ func qualToTable(qual string) string {
 		return qual[i+1:]
 	}
 	return qual
+}
+
+// renderEnumValuesChange — ALTER TYPE <enum> ADD VALUE 'NEW' for
+// each added enum value. PG 12+ allows ADD VALUE; removal triggers
+// REFUSE upstream so this branch only sees the additive case. The
+// type name follows iter-1's `<table>_<col>` derivation.
+//
+// Down: PG has no inverse for ADD VALUE that's safe in the same
+// transaction. Emit a comment + the inverse-intent marker; deploy
+// client / platform UI can prompt for manual cleanup if rollback is
+// requested. Aligns with the platform-owns-data-validation stance.
+func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange) (string, string) {
+	typeName := pgEnumTypeName(qualToTable(qual), col)
+	qualType := typeName
+	if i := strings.LastIndex(qual, "."); i >= 0 {
+		qualType = qual[:i+1] + typeName
+	}
+
+	var ups, downs []string
+	for _, name := range ch.GetAddedNames() {
+		ups = append(ups, fmt.Sprintf("ALTER TYPE %s ADD VALUE %s;", qualType, sqlStringLiteral(name)))
+		downs = append(downs, fmt.Sprintf("-- wc: cannot drop ENUM value %s from %s on rollback (PG limitation; manual cleanup required)", sqlStringLiteral(name), qualType))
+	}
+	return strings.Join(ups, "\n"), strings.Join(downs, "\n")
 }
 
 // renderGeneratedExprChange — DROP+ADD when add or change. DIRECT
