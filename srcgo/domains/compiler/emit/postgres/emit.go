@@ -44,6 +44,18 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 		return e.emitDropColumn(v.DropColumn)
 	case *planpb.Op_RenameColumn:
 		return e.emitRenameColumn(v.RenameColumn)
+	case *planpb.Op_AddIndex:
+		return e.emitAddIndex(v.AddIndex)
+	case *planpb.Op_DropIndex:
+		return e.emitDropIndex(v.DropIndex)
+	case *planpb.Op_ReplaceIndex:
+		return e.emitReplaceIndex(v.ReplaceIndex)
+	case *planpb.Op_AddRawIndex:
+		return e.emitAddRawIndex(v.AddRawIndex)
+	case *planpb.Op_DropRawIndex:
+		return e.emitDropRawIndex(v.DropRawIndex)
+	case *planpb.Op_ReplaceRawIndex:
+		return e.emitReplaceRawIndex(v.ReplaceRawIndex)
 	default:
 		return "", "", fmt.Errorf("postgres: unsupported op variant %T (M1 implementation in progress; see iteration-2.md)", op.GetVariant())
 	}

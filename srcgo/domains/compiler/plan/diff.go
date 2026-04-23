@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"sort"
 
+	"google.golang.org/protobuf/proto"
+
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
@@ -100,12 +102,21 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	for _, pair := range both {
 		ops = append(ops, columnRenames(pair)...)
 	}
+	// Index drops + replaces + adds. Indexes can reference columns
+	// added in this same migration (column adds emitted earlier),
+	// so this block follows column adds.
+	for _, pair := range both {
+		ops = append(ops, indexOps(pair)...)
+	}
+	for _, pair := range both {
+		ops = append(ops, rawIndexOps(pair)...)
+	}
 	// Table comments after all structural changes — COMMENT ON
 	// references the post-rename qualifier and post-add columns.
 	for _, pair := range both {
 		ops = append(ops, tableCommentChanges(pair)...)
 	}
-	// Namespace move + AlterColumn + index / FK / CHECK diffs land in
+	// Namespace move + AlterColumn + FK / CHECK diffs land in
 	// subsequent commits.
 
 	return &planpb.MigrationPlan{Ops: ops}, nil
@@ -205,6 +216,111 @@ func tableCtxOf(t *irpb.Table) *planpb.TableCtx {
 		NamespaceMode:  t.GetNamespaceMode(),
 		Namespace:      t.GetNamespace(),
 	}
+}
+
+// indexOps returns AddIndex / DropIndex / ReplaceIndex ops for the
+// structured indexes of one `both` pair. Identity = Index.Name (set
+// by ir.Build's derivation pass; never empty in valid IR). Set-diff
+// over the name space:
+//   onlyPrev → DropIndex   (down recreates via the prev-side Index)
+//   onlyCurr → AddIndex
+//   both     → if proto.Equal(prev, curr) no-op; else ReplaceIndex
+//
+// Raw-index variants use the same shape but compare opaque bodies
+// (D11 escape-hatch identity-on-name).
+func indexOps(pair TablePair) []*planpb.Op {
+	ctx := tableCtxOf(pair.Curr)
+	prevByName := indexMap(pair.Prev.GetIndexes())
+	currByName := indexMap(pair.Curr.GetIndexes())
+
+	var ops []*planpb.Op
+	// Drops first — DROP INDEX before CREATE INDEX of the same name
+	// (in the Replace case the differ emits both).
+	for _, idx := range pair.Prev.GetIndexes() {
+		if _, ok := currByName[idx.GetName()]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_DropIndex{DropIndex: &planpb.DropIndex{
+			Ctx:     ctx,
+			Index:   idx,
+			Columns: pair.Prev.GetColumns(),
+		}}})
+	}
+	for _, idx := range pair.Curr.GetIndexes() {
+		prevIdx, both := prevByName[idx.GetName()]
+		if !both {
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_AddIndex{AddIndex: &planpb.AddIndex{
+				Ctx:     ctx,
+				Index:   idx,
+				Columns: pair.Curr.GetColumns(),
+			}}})
+			continue
+		}
+		if proto.Equal(prevIdx, idx) {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_ReplaceIndex{ReplaceIndex: &planpb.ReplaceIndex{
+			Ctx:     ctx,
+			From:    prevIdx,
+			To:      idx,
+			Columns: pair.Curr.GetColumns(),
+		}}})
+	}
+	return ops
+}
+
+// rawIndexOps mirrors indexOps for raw_index entries. Identity =
+// RawIndex.Name. Body comparison is byte-equal — opaque (D11).
+func rawIndexOps(pair TablePair) []*planpb.Op {
+	ctx := tableCtxOf(pair.Curr)
+	prevByName := rawIndexMap(pair.Prev.GetRawIndexes())
+	currByName := rawIndexMap(pair.Curr.GetRawIndexes())
+
+	var ops []*planpb.Op
+	for _, ri := range pair.Prev.GetRawIndexes() {
+		if _, ok := currByName[ri.GetName()]; ok {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_DropRawIndex{DropRawIndex: &planpb.DropRawIndex{
+			Ctx:   ctx,
+			Index: ri,
+		}}})
+	}
+	for _, ri := range pair.Curr.GetRawIndexes() {
+		prevRI, both := prevByName[ri.GetName()]
+		if !both {
+			ops = append(ops, &planpb.Op{Variant: &planpb.Op_AddRawIndex{AddRawIndex: &planpb.AddRawIndex{
+				Ctx:   ctx,
+				Index: ri,
+			}}})
+			continue
+		}
+		if proto.Equal(prevRI, ri) {
+			continue
+		}
+		ops = append(ops, &planpb.Op{Variant: &planpb.Op_ReplaceRawIndex{ReplaceRawIndex: &planpb.ReplaceRawIndex{
+			Ctx:  ctx,
+			From: prevRI,
+			To:   ri,
+		}}})
+	}
+	return ops
+}
+
+func indexMap(idxs []*irpb.Index) map[string]*irpb.Index {
+	out := make(map[string]*irpb.Index, len(idxs))
+	for _, i := range idxs {
+		out[i.GetName()] = i
+	}
+	return out
+}
+
+func rawIndexMap(ris []*irpb.RawIndex) map[string]*irpb.RawIndex {
+	out := make(map[string]*irpb.RawIndex, len(ris))
+	for _, r := range ris {
+		out[r.GetName()] = r
+	}
+	return out
 }
 
 // tableRenames returns RenameTable ops for `both` pairs whose SQL name

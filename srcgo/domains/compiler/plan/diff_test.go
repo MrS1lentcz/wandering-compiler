@@ -363,6 +363,70 @@ func TestDiffRenameColumn(t *testing.T) {
 	}
 }
 
+// TestDiffIndexAdd — index name in curr but not prev → AddIndex.
+func TestDiffIndexAdd(t *testing.T) {
+	mk := func(idxs []*irpb.Index) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+				{Name: "email", ProtoName: "email", FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+			},
+			PrimaryKey: []string{"id"},
+			Indexes:    idxs,
+		}}}
+	}
+	got, err := plan.Diff(mk(nil), mk([]*irpb.Index{
+		{Name: "users_email_idx", Fields: []*irpb.IndexField{{Name: "email"}}},
+	}))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	ai := ops[0].GetAddIndex()
+	if ai == nil {
+		t.Fatalf("ops[0] = %T, want *Op_AddIndex", ops[0].GetVariant())
+	}
+	if ai.GetIndex().GetName() != "users_email_idx" {
+		t.Errorf("index name = %q", ai.GetIndex().GetName())
+	}
+	if len(ai.GetColumns()) != 2 {
+		t.Errorf("columns snapshot len = %d, want 2", len(ai.GetColumns()))
+	}
+}
+
+// TestDiffIndexReplace — same name, different facts → ReplaceIndex
+// (not Drop+Add, even though emit collapses it to drop+create SQL).
+func TestDiffIndexReplace(t *testing.T) {
+	mk := func(unique bool) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
+				{Name: "email", ProtoName: "email", FieldNumber: 2, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+			},
+			PrimaryKey: []string{"id"},
+			Indexes: []*irpb.Index{
+				{Name: "users_email_idx", Fields: []*irpb.IndexField{{Name: "email"}}, Unique: unique},
+			},
+		}}}
+	}
+	got, err := plan.Diff(mk(false), mk(true))
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	ops := got.GetOps()
+	if len(ops) != 1 {
+		t.Fatalf("len(ops) = %d, want 1", len(ops))
+	}
+	if ops[0].GetReplaceIndex() == nil {
+		t.Fatalf("ops[0] = %T, want *Op_ReplaceIndex", ops[0].GetVariant())
+	}
+}
+
 // TestDiffMessageRenameIsDropPlusAdd — D24: changing the proto message
 // name (= changing FQN) is semantically a destroy + create, not an
 // in-place rename. Even if the SQL `name` is identical, FQN difference

@@ -221,25 +221,62 @@ message AllowedExtensionsChange {
 
 // --- Index ops -------------------------------------------------------------
 
-message AddIndex       { TableCtx ctx = 1; w17.compiler.ir.Index index = 2; }
-message DropIndex      { TableCtx ctx = 1; w17.compiler.ir.Index index = 2; string index_name = 3; }
-message ReplaceIndex   { TableCtx ctx = 1; w17.compiler.ir.Index from = 2; w17.compiler.ir.Index to = 3; }
+// `columns` carries the carrier table's column snapshot so the
+// emitter can resolve IndexField proto-name references to SQL
+// column names (and look up `(w17.db.column).name` overrides)
+// without consulting Schema. Same convention for FK ops below.
+message AddIndex {
+  TableCtx ctx = 1;
+  w17.compiler.ir.Index index = 2;
+  repeated w17.compiler.ir.Column columns = 3;
+}
+message DropIndex {
+  TableCtx ctx = 1;
+  w17.compiler.ir.Index index = 2;        // pre-state, used by down to recreate
+  repeated w17.compiler.ir.Column columns = 3;
+}
+message ReplaceIndex {
+  TableCtx ctx = 1;
+  w17.compiler.ir.Index from = 2;
+  w17.compiler.ir.Index to = 3;
+  repeated w17.compiler.ir.Column columns = 4;
+}
 
+// raw_index ops carry an opaque body that already references columns
+// by SQL name (author's problem); no column snapshot needed.
 message AddRawIndex     { TableCtx ctx = 1; w17.compiler.ir.RawIndex index = 2; }
 message DropRawIndex    { TableCtx ctx = 1; w17.compiler.ir.RawIndex index = 2; }
 message ReplaceRawIndex { TableCtx ctx = 1; w17.compiler.ir.RawIndex from = 2; w17.compiler.ir.RawIndex to = 3; }
 
 // --- FK ops ----------------------------------------------------------------
 
-message AddForeignKey     { TableCtx ctx = 1; w17.compiler.ir.ForeignKey fk = 2; string constraint_name = 3; }
-message DropForeignKey    { TableCtx ctx = 1; w17.compiler.ir.ForeignKey fk = 2; string constraint_name = 3; }
-message ReplaceForeignKey { TableCtx ctx = 1; w17.compiler.ir.ForeignKey from = 2; w17.compiler.ir.ForeignKey to = 3; string constraint_name = 4; }
+message AddForeignKey {
+  TableCtx ctx = 1;
+  w17.compiler.ir.ForeignKey fk = 2;
+  string constraint_name = 3;
+  repeated w17.compiler.ir.Column columns = 4;
+}
+message DropForeignKey {
+  TableCtx ctx = 1;
+  w17.compiler.ir.ForeignKey fk = 2;
+  string constraint_name = 3;
+  repeated w17.compiler.ir.Column columns = 4;
+}
+message ReplaceForeignKey {
+  TableCtx ctx = 1;
+  w17.compiler.ir.ForeignKey from = 2;
+  w17.compiler.ir.ForeignKey to = 3;
+  string constraint_name = 4;
+  repeated w17.compiler.ir.Column columns = 5;
+}
 
 // --- CHECK ops -------------------------------------------------------------
 
-message AddCheck     { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; string constraint_name = 4; }
-message DropCheck    { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; string constraint_name = 4; }
-message ReplaceCheck { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check from = 3; w17.compiler.ir.Check to = 4; string constraint_name = 5; }
+// CHECK ops carry the owning Column directly (renderCheck signature
+// already takes a single Column).
+message AddCheck     { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; }
+message DropCheck    { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; }
+message ReplaceCheck { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check from = 3; w17.compiler.ir.Check to = 4; }
 
 message AddRawCheck     { TableCtx ctx = 1; w17.compiler.ir.RawCheck check = 2; }
 message DropRawCheck    { TableCtx ctx = 1; w17.compiler.ir.RawCheck check = 2; }

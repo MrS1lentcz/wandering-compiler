@@ -366,6 +366,70 @@ func TestEmitRenameColumnNoOpRefused(t *testing.T) {
 	}
 }
 
+// TestEmitAddIndexStructured — AddIndex renders the iter-1
+// CREATE INDEX shape; down drops by qualified name.
+func TestEmitAddIndexStructured(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AddIndex{AddIndex: &planpb.AddIndex{
+		Ctx: &planpb.TableCtx{TableName: "users"},
+		Index: &irpb.Index{
+			Name: "users_email_idx", Unique: true,
+			Fields: []*irpb.IndexField{{Name: "email"}},
+		},
+		Columns: []*irpb.Column{
+			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "CREATE UNIQUE INDEX users_email_idx ON users (email);" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "DROP INDEX IF EXISTS users_email_idx;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitReplaceIndex — drop+add for both sides. Up: drop from,
+// create to. Down: drop to, create from.
+func TestEmitReplaceIndex(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_ReplaceIndex{ReplaceIndex: &planpb.ReplaceIndex{
+		Ctx: &planpb.TableCtx{TableName: "users"},
+		From: &irpb.Index{Name: "users_email_idx", Fields: []*irpb.IndexField{{Name: "email"}}},
+		To:   &irpb.Index{Name: "users_email_idx", Fields: []*irpb.IndexField{{Name: "email"}}, Unique: true},
+		Columns: []*irpb.Column{
+			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "DROP INDEX IF EXISTS users_email_idx;")
+	mustContain(t, up, "CREATE UNIQUE INDEX users_email_idx ON users (email);")
+	mustContain(t, down, "CREATE INDEX users_email_idx ON users (email);")
+}
+
+// TestEmitRawIndexRoundtrip — opaque body passes through verbatim;
+// drop is by name, identical regardless of body.
+func TestEmitRawIndexRoundtrip(t *testing.T) {
+	addOp := &planpb.Op{Variant: &planpb.Op_AddRawIndex{AddRawIndex: &planpb.AddRawIndex{
+		Ctx:   &planpb.TableCtx{TableName: "posts"},
+		Index: &irpb.RawIndex{Name: "posts_search_gin", Body: "USING gin (search_tsv)"},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(addOp)
+	if err != nil {
+		t.Fatalf("AddRawIndex: %v", err)
+	}
+	if up != "CREATE INDEX posts_search_gin ON posts USING gin (search_tsv);" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "DROP INDEX IF EXISTS posts_search_gin;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
 // TestEmitDropColumnRoundtrip — DropColumn.up = ALTER ... DROP COLUMN;
 // DropColumn.down = AddColumn.up for the same column. Confirms the
 // emitter's symmetry contract for column-axis ops.
