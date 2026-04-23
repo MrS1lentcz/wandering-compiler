@@ -760,35 +760,50 @@ unblock.
 
 ### D28 — Migration-safety classification matrix (added 2026-04-23)
 
-**Status: design pending.** Captures the complete fact-pair × strategy
-table that the differ uses to classify every column / table /
-constraint change. Today's binary SAFE / REFUSE split is too coarse
-for production use — D28 expands it into six strategies and pins
-each fact transition to one.
+**Status: draft — YAML extraction in progress (2026-04-23).**
+Captures the complete fact-pair × strategy table that the differ uses
+to classify every column / table / constraint change. Today's binary
+SAFE / REFUSE split is too coarse for production use — D28 expands
+it into **five** strategies and pins each fact transition to one.
 
-**Strategies:**
+> **Authoritative source of truth:** `docs/classification/*.yaml`.
+> The markdown tables in D28.1–4 below are a human-readable rendering
+> — the YAML wins on conflict. Phase 2 tests load the YAML directly
+> and drive the classifier through every cell. Current YAML coverage:
+> `strategies.yaml` (all 5) + `carrier.yaml` (D28.2 complete).
+> `dbtype.yaml` / `constraint.yaml` / `sem.yaml` still live in the
+> markdown tables and migrate in follow-up turns.
+
+**Strategies** (full definitions in `classification/strategies.yaml`):
 
 - **SAFE** — type + data both fit; clean ALTER, no user input
   needed. (e.g. NOT NULL → NULL, max_len widen, default add.)
-- **LOSSLESS_USING** — PG cast handles the conversion in-place;
-  data may overflow but PG fails apply rather than silent
-  corruption. (e.g. TEXT ↔ CITEXT, JSON ↔ JSONB.)
+- **LOSSLESS_USING** — PG cast handles the conversion in-place,
+  deterministically + value-preservingly. No check.sql, no decision.
+  (e.g. TEXT ↔ CITEXT, JSON ↔ JSONB, BOOL → STRING.)
 - **NEEDS_CONFIRM** — types are theoretically convertible but
-  data may not fit (string→int, max_len narrow). User must
-  explicitly opt in via `--decide` flag; differ generates a
-  paired `check.sql` that pre-validates current data. If the
-  check fails on real data, user falls back to DROP_AND_CREATE
-  or CUSTOM_MIGRATION.
-- **DROP_AND_CREATE** — author-acknowledged lossy change; emit
-  drops the column + adds a fresh one. Effectively a destructive
-  migration with explicit user opt-in.
-- **CUSTOM_MIGRATION** — escape hatch where author writes their
-  own SQL/DQL block that knows how to transform the column's data
-  before the structural change applies.
-- **REFUSE** — default for changes that can't be safely automated
-  (carrier change, message ↔ scalar, custom_type swap). Differ
-  surfaces a strategy menu; user picks one of the above
-  alternatives explicitly.
+  data may not fit (string→int, max_len narrow). Differ auto-emits
+  a companion `check.sql`; deploy client runs it pre-apply. Zero-count
+  → proceed; non-zero → block with a decision menu
+  (DROP_AND_CREATE / CUSTOM_MIGRATION).
+- **DROP_AND_CREATE** — author-acknowledged lossy change; existing
+  data lost. Universal escape for any transition the compiler can't
+  safely automate; requires explicit `--decide <col>=drop_and_create`.
+  Never emitted silently.
+- **CUSTOM_MIGRATION** — author writes SQL that transforms existing
+  data before (or instead of) the structural change. Differ wraps
+  the block in a managed transaction. Requires explicit
+  `--decide <col>=custom:<path>`.
+
+**REFUSE removal (2026-04-23).** Prior draft carried a sixth
+strategy REFUSE for transitions with no "automatic" path. That
+framing was structurally redundant — DROP_AND_CREATE is a universal
+escape (drop the column, add it fresh; data is lost but schema
+moves). Every prior REFUSE cell collapses to either DROP_AND_CREATE
+(when the natural intent is "accept data loss") or CUSTOM_MIGRATION
+(when the natural intent is "preserve data via custom SQL"). The
+markdown tables below and the `carrier.yaml` file already carry
+the reclassification; other YAML files migrate next turn.
 
 **Decision plumbing (D29-aware):**
 
@@ -832,14 +847,17 @@ D28 is the foundation of an exhaustive table-driven test matrix:
 
 **Phasing:**
 
-1. Document the full classification matrix here in D28
-   (paper exhaustive, every fact transition pinned).
+1. Document the full classification matrix (paper exhaustive, every
+   fact transition pinned). **Status: D28.2 in YAML (`carrier.yaml`);
+   D28.1 / D28.3 / D28.4 still markdown-only, YAML-extraction queued.**
 2. Refactor `plan/diff.go` strategy classifier from binary →
-   six-strategy enum; emit structured "needs decision X"
-   objects.
+   five-strategy enum; emit structured "needs decision X" objects
+   driven off the YAML (load once at build, switch on strategy).
 3. CLI `--decide` flag plumbing.
-4. `check.sql` emit pipeline.
-5. Test matrix exhaustive.
+4. `check.sql` emit pipeline (template rendering from YAML).
+5. Test matrix exhaustive — table-driven test generator reads the
+   YAML files, synthesises (prev, curr) Column pairs, asserts
+   classifier pins each cell's expected strategy.
 
 **Open questions:**
 
@@ -867,8 +885,8 @@ Scope: every `Column` fact the IR carries today (see `plan/diff.go`
 context. Each axis is an independent dimension — a single alter may
 touch multiple, and the emitted strategy per alter is the **strictest**
 across axes (SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE
-< CUSTOM_MIGRATION < REFUSE). "Add" / "drop" of a whole column never
-appears here — that's `AddColumn` / `DropColumn`, pre-D28.
+< CUSTOM_MIGRATION). "Add" / "drop" of a whole column never appears
+here — that's `AddColumn` / `DropColumn`, pre-D28.
 
 Terminology:
 - **widen**: new accepts a superset of old values (VARCHAR(50)→VARCHAR(200), INTEGER→BIGINT).
@@ -883,7 +901,7 @@ Terminology:
 | NULL → NULL | — | — | — | No change. |
 | NOT NULL → NOT NULL | — | — | — | No change. |
 | NOT NULL → NULL | **SAFE** | SAFE | — | Relaxing a constraint is always safe; DB accepts everything it accepted before plus NULLs. |
-| NULL → NOT NULL | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> IS NULL LIMIT 1` | Live rows may be NULL; PG refuses `SET NOT NULL` with a rewrite error. If author adds a `default` in the same migration, the differ's emit order handles backfill; without one, user must decide (backfill / skip / REFUSE). |
+| NULL → NOT NULL | **NEEDS_CONFIRM** | SAFE* | `SELECT count(*) FROM <t> WHERE <col> IS NULL LIMIT 1` | Live rows may be NULL; PG refuses `SET NOT NULL` with a rewrite error. If author adds a `default` in the same migration, the differ's emit order handles backfill; without one, user must decide (backfill / skip / abort). |
 
 #### A2. `default`
 
@@ -925,23 +943,23 @@ Iter-1 IR synthesises `unique:true` into a `UNIQUE INDEX` inside `Table.Indexes`
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
-| false → true | **NEEDS_CONFIRM** | (via Index add) | `SELECT <col>, count(*) FROM <t> GROUP BY <col> HAVING count(*) > 1 LIMIT 1` | `CREATE UNIQUE INDEX` errors if duplicates exist; user decides to dedupe or REFUSE. |
+| false → true | **NEEDS_CONFIRM** | (via Index add) | `SELECT <col>, count(*) FROM <t> GROUP BY <col> HAVING count(*) > 1 LIMIT 1` | `CREATE UNIQUE INDEX` errors if duplicates exist; user decides to dedupe or abort. |
 | true → false | **SAFE** | (via Index drop) | — | `DROP INDEX` is always safe. |
 
 #### A6. `pk`
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
-| false → true | **REFUSE** | REFUSE | — | PK change is table-rebuild territory (PG allows `ADD PRIMARY KEY` only if the column is NOT NULL + UNIQUE; composite PK even trickier). Author writes CUSTOM_MIGRATION. |
-| true → false | **REFUSE** | REFUSE | — | Dropping PK breaks referential integrity for every FK pointing here. CUSTOM_MIGRATION with explicit FK-rewrite plan. |
+| false → true | **CUSTOM_MIGRATION** | REFUSE | — | PK change is table-rebuild territory (PG allows `ADD PRIMARY KEY` only if the column is NOT NULL + UNIQUE; composite PK even trickier). Default = CUSTOM_MIGRATION (author wants to keep existing rows as PKs). `--decide pk=drop_and_create` fallback if author wants fresh seed. |
+| true → false | **CUSTOM_MIGRATION** | REFUSE | — | Dropping PK breaks referential integrity for every FK pointing here; author must write the FK-rewrite plan. |
 
 #### A7. `generated_expr` (GENERATED ALWAYS AS ... STORED)
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
-| "" → expr (plain → generated) | **REFUSE** | SAFE* | — | PG can't convert a plain column to generated in-place; must drop + add. DROP_AND_CREATE is the escape. |
-| expr → "" (generated → plain) | **NEEDS_CONFIRM** | SAFE* | — | PG 18 supports `ALTER COLUMN DROP EXPRESSION` which materialises current values. User confirms: keep values vs. drop-and-backfill. |
-| expr A → expr B | **REFUSE** | SAFE* | — | PG has no direct "rewrite generated expression"; must drop + add (rewrites the whole column). Surfaced as REFUSE; author picks DROP_AND_CREATE (lose values, recompute from new expr) or CUSTOM_MIGRATION (dual-write pattern). |
+| "" → expr (plain → generated) | **DROP_AND_CREATE** | SAFE* | — | PG can't convert a plain column to generated in-place; natural path is drop + add-as-generated (values recompute from new expr). |
+| expr → "" (generated → plain) | **NEEDS_CONFIRM** | SAFE* | — | PG 18 supports `ALTER COLUMN DROP EXPRESSION` which materialises current values. User confirms: keep materialised values vs. drop-and-backfill. |
+| expr A → expr B | **DROP_AND_CREATE** | SAFE* | — | PG has no direct "rewrite generated expression"; drop + add-as-generated recomputes every value from new expr. Author opts into CUSTOM_MIGRATION if they need a dual-write / staged cutover. |
 
 #### A8. `comment`
 
@@ -963,14 +981,14 @@ Applies to SEM_FILE_PATH / SEM_IMAGE_PATH. Emitted as a CHECK regex in iter-1.
 
 #### A10. `enum_values` (SEM_ENUM)
 
-EnumFqn swap is REFUSE (already in `diff.go` enumValuesFactChange).
+EnumFqn swap was REFUSE in today's `diff.go` `enumValuesFactChange`; D28 promotes it to DROP_AND_CREATE.
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
 | names A → A ∪ {new} (add only) | **SAFE** | SAFE | — | Additive; string-backed PG ENUM uses `ALTER TYPE ADD VALUE`, int-backed updates the CHECK IN (…) list. |
-| names A → A \ {removed} (remove only) | **REFUSE** | REFUSE | — | PG can't drop enum values; int-backed CHECK narrow would reject existing rows. CUSTOM_MIGRATION = user rewrites rows first. |
-| names A → B with rename in place (same slot) | **REFUSE** | REFUSE (FQN-level) | — | Rename = remove + add = removal applies. (String-backed PG ENUM has `ALTER TYPE RENAME VALUE` — future SAFE row; out-of-scope M1.) |
-| enum_fqn "pkg.A" → "pkg.B" | **REFUSE** | REFUSE | — | Different enum entirely. DROP_AND_CREATE escape only. |
+| names A → A \ {removed} (remove only) | **CUSTOM_MIGRATION** | REFUSE | — | PG can't drop enum values; int-backed CHECK narrow would reject existing rows. Default = author rewrites affected rows to a surviving value, then re-emits with new enum. DROP_AND_CREATE fallback if author wants to discard affected rows. |
+| names A → B with rename in place (same slot) | **CUSTOM_MIGRATION** | REFUSE | — | Rename = remove + add = removal applies. (String-backed PG ENUM has `ALTER TYPE RENAME VALUE` — future SAFE row; out-of-scope M1.) |
+| enum_fqn "pkg.A" → "pkg.B" | **DROP_AND_CREATE** | REFUSE | — | Different enum entirely. Default = fresh start with new enum; author opts into CUSTOM_MIGRATION if they want to remap old values. |
 
 #### A11. `pg.required_extensions`
 
@@ -984,13 +1002,13 @@ Manifest-only impact; no DDL emitted per column (extensions are installed at sch
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
-| any → any (string change) | **REFUSE** | REFUSE | — | custom_type is author-owned opaque DDL; the compiler doesn't know its cast semantics. Always CUSTOM_MIGRATION. |
+| any → any (string change) | **CUSTOM_MIGRATION** | REFUSE | — | custom_type is author-owned opaque DDL; the compiler doesn't know its cast semantics. Default = author supplies migration SQL; DROP_AND_CREATE fallback loses the custom-typed data. |
 
 #### A13. `element_carrier` / `element_is_message` (repeated / map element)
 
 | From → To | Strategy | Current | check.sql | Rationale |
 |---|---|---|---|---|
-| any change | **REFUSE** | REFUSE | — | Element reshape under a list/map is carrier-axis (see D28.2 carrier matrix); collection evolution needs CUSTOM_MIGRATION (jsonb_array transform). |
+| any change | **CUSTOM_MIGRATION** | REFUSE | — | Element reshape under a list/map is carrier-axis (see D28.2 carrier matrix); collection evolution needs author-written jsonb_array transform. DROP_AND_CREATE fallback discards the collection contents. |
 
 #### Table-level axes (diff via non-column ops)
 
@@ -1019,7 +1037,7 @@ Manifest-only impact; no DDL emitted per column (extensions are installed at sch
 When one alter touches multiple axes (e.g. `max_len 200 → 50` + `nullable NULL → NOT NULL`), the emitted strategy is the **strictest**:
 
 ```
-SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE < CUSTOM_MIGRATION < REFUSE
+SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE < CUSTOM_MIGRATION
 ```
 
 Check.sql for a NEEDS_CONFIRM multi-axis alter is the AND of all per-axis checks:
@@ -1035,8 +1053,8 @@ LIMIT 1;
 
 Still deferred to follow-up subsections:
 
-- **D28.2 — Carrier × Carrier** (8 × 8 grid). E.g. STRING → INT32 (NEEDS_CONFIRM + USING cast), STRING → MESSAGE (REFUSE), INT32 → INT64 (SAFE widen).
-- **D28.3 — DbType × DbType** (~50 reachable). E.g. VARCHAR → TEXT (SAFE), INTEGER → BIGINT (SAFE widen), TEXT ↔ CITEXT (LOSSLESS_USING), JSON ↔ JSONB (LOSSLESS_USING). Includes cross-family REFUSE cases (TIMESTAMP → JSON).
+- **D28.2 — Carrier × Carrier** (8 × 8 grid). E.g. STRING → INT32 (NEEDS_CONFIRM + USING cast), STRING → MESSAGE (DROP_AND_CREATE), INT32 → INT64 (SAFE widen).
+- **D28.3 — DbType × DbType** (~50 reachable). E.g. VARCHAR → TEXT (SAFE), INTEGER → BIGINT (SAFE widen), TEXT ↔ CITEXT (LOSSLESS_USING), JSON ↔ JSONB (LOSSLESS_USING). Includes cross-family DROP_AND_CREATE cases (TIMESTAMP → JSON).
 - **D28.4 — Sem × Sem within carrier** (~150). E.g. SEM_EMAIL → SEM_URL on string (SAFE — same carrier, regex differs, fold via A9-style CHECK replace), SEM_CHAR → SEM_TEXT (SAFE — maps to dbType change TEXT).
 
 Most Sem changes degenerate into constraint-axis (regex CHECK) + dbType changes, so D28.4 will be short.
@@ -1063,8 +1081,9 @@ override to a *more permissive* strategy via `--decide`:
 SAFE ← LOSSLESS_USING ← NEEDS_CONFIRM ← DROP_AND_CREATE ← CUSTOM_MIGRATION
 ```
 
-REFUSE is the one-way terminator: no override path (author must
-renumber or write CUSTOM_MIGRATION). Matrix shows the *strictest*
+DROP_AND_CREATE is the universal fallback: every cell can override to
+it (at the cost of data loss). CUSTOM_MIGRATION further up the chain
+preserves data via author-written SQL. Matrix shows the *strictest*
 (safest) strategy that a clean default can emit; override-relaxations
 are plumbed at `--decide` parsing time.
 
@@ -1073,8 +1092,8 @@ are plumbed at `--decide` parsing time.
 - `S` SAFE (plain `ALTER COLUMN TYPE`, no USING)
 - `U` LOSSLESS_USING (USING cast, deterministic + value-preserving)
 - `N` NEEDS_CONFIRM (USING cast exists but may fail or reshape data; check.sql auto-emitted)
-- `C` CUSTOM_MIGRATION (author writes SQL; differ emits a template)
-- `R` REFUSE (no sensible automated path; author must renumber field)
+- `D` DROP_AND_CREATE (explicit `--decide` required; data lost)
+- `C` CUSTOM_MIGRATION (explicit `--decide` required; author writes SQL preserving data)
 
 #### Grid A — scalar × scalar (8 × 8)
 
@@ -1082,13 +1101,13 @@ Excludes MAP / LIST / MESSAGE (collection carriers covered in Grid B).
 
 | from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES |
 |---|---|---|---|---|---|---|---|---|
-| **BOOL** | — | U | U | U | U | R | R | N |
+| **BOOL** | — | U | U | U | U | D | D | N |
 | **STRING** | N | — | N | N | N | N | N | N |
 | **INT32** | N | U | — | S | U | N | N | N |
 | **INT64** | N | U | N | — | N | N | N | N |
 | **DOUBLE** | N | U | N | N | — | N | N | N |
-| **TIMESTAMP** | R | U | N | N | N | — | C | N |
-| **DURATION** | R | U | N | N | N | C | — | N |
+| **TIMESTAMP** | D | U | N | N | N | — | C | N |
+| **DURATION** | D | U | N | N | N | C | — | N |
 | **BYTES** | N | N | N | N | N | N | N | — |
 
 #### Grid A cell details
@@ -1103,7 +1122,7 @@ overflow check").
 | BOOL | INT32/INT64 | `U` | `col::int` / `col::bigint` | — | PG maps false→0, true→1; reversible via `<>0`. |
 | BOOL | DOUBLE | `U` | `col::int::double precision` | — | Chains bool→int→double; still lossless. |
 | BOOL | BYTES | `N` | `decode(col::text, 'escape')` | — | Encoding choice ambiguous (hex vs escape); author picks. |
-| BOOL | TIMESTAMP/DURATION | `R` | — | — | Semantically meaningless. Author renumbers. |
+| BOOL | TIMESTAMP/DURATION | `D` | — | — | Semantically meaningless; default is schema correction (accept data loss). |
 | STRING | BOOL | `N` | `col::boolean` | `SELECT count(*) FROM t WHERE col NOT IN ('t','f','true','false','yes','no','y','n','1','0','TRUE','FALSE','Yes','No','Y','N','True','False') LIMIT 1` | PG accepts a specific set; anything else errors at apply. Check.sql validates pre-apply. |
 | STRING | INT32 | `N` | `col::int` | `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+$' LIMIT 1` | Parse risk; also overflow risk if values exceed INT32. |
 | STRING | INT64 | `N` | `col::bigint` | `SELECT count(*) FROM t WHERE col !~ '^-?[0-9]+$' LIMIT 1` | Parse risk only (INT64 range dwarfs typical string-numeric). |
@@ -1128,11 +1147,11 @@ overflow check").
 | TIMESTAMP | DOUBLE | `N` | `extract(epoch from col)` | — | Precision loss below microseconds; author confirms. |
 | TIMESTAMP | DURATION | `C` | — | — | Timestamp → interval is non-unique (interval relative to what?). Author writes migration. |
 | TIMESTAMP | BYTES | `N` | `convert_to(col::text, 'UTF8')` | — | Text→bytes fallback; reversible if encoding fixed. |
-| TIMESTAMP | BOOL | `R` | — | — | Nonsense. |
+| TIMESTAMP | BOOL | `D` | — | — | No sensible cast. |
 | DURATION | STRING | `U` | `col::text` | — | `'1 day 02:03:04'` canonical; reversible. |
 | DURATION | INT32/INT64 | `N` | `extract(epoch from col)::int` | overflow check | Unit ambiguity + (INT32) overflow risk. |
 | DURATION | TIMESTAMP | `C` | — | — | Same as TIMESTAMP → DURATION: non-unique. |
-| DURATION | BOOL | `R` | — | — | Nonsense. |
+| DURATION | BOOL | `D` | — | — | No sensible cast. |
 | BYTES | STRING | `N` | `encode(col, 'hex')` OR `convert_from(col, 'UTF8')` | encoding-specific | Author picks encoding. UTF-8 decode may fail on non-text bytea. |
 | BYTES | INT* / DOUBLE / TIMESTAMP / DURATION / BOOL | `N` | custom decoder (`get_byte`, bit-level ops) | custom validator | Byte-level interpretation; user confirms. |
 
@@ -1144,32 +1163,40 @@ derivable from schema alone.
 
 | from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES | MAP | LIST | MESSAGE |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| **MAP** | R | U | R | R | R | R | R | R | — | C | C |
-| **LIST** | R | U | R | R | R | R | R | R | C | — | C |
-| **MESSAGE** | R | U | R | R | R | R | R | R | C | C | — |
+| **MAP** | D | U | D | D | D | D | D | D | — | C | C |
+| **LIST** | D | U | D | D | D | D | D | D | C | — | C |
+| **MESSAGE** | D | U | D | D | D | D | D | D | C | C | — |
+
+Scalar → collection rows (all `D` by default; override to `C` if
+author wants to wrap existing values via custom SQL):
+
+| from\to | MAP | LIST | MESSAGE |
+|---|---|---|---|
+| **BOOL / STRING / INT32 / INT64 / DOUBLE / TIMESTAMP / DURATION / BYTES** | D | D | D |
 
 | From | To | Cell | Expression | Rationale |
 |---|---|---|---|---|
 | MAP | STRING | `U` | `col::text` (jsonb serialises canonically) | JSONB cast to text is deterministic; reversible via `col::jsonb` on the reverse migration. |
-| MAP | scalar except STRING | `R` | — | No sensible single-value extraction; author must CUSTOM_MIGRATION a specific key. |
+| MAP | scalar except STRING | `D` | — | No sensible single-value extraction; default intent is schema correction. `--decide col=custom:<path>` to preserve via CUSTOM_MIGRATION. |
 | MAP | LIST | `C` | `jsonb_agg(value ORDER BY key)` or custom | Drops keys; author picks value-extraction order. |
 | MAP | MESSAGE | `C` | field-by-field extract | Shape change; author maps keys to message fields. |
 | LIST | STRING | `U` | `col::text` | Same as MAP. JSONB array serialises. |
-| LIST | scalar except STRING | `R` | — | Same reasoning as MAP. |
+| LIST | scalar except STRING | `D` | — | Same reasoning as MAP. |
 | LIST | MAP | `C` | `jsonb_object_agg(idx, value)` or custom | Keys must be synthesised; author owns the key scheme. |
 | LIST | MESSAGE | `C` | index-based field extract | Shape change. |
-| MESSAGE | STRING | `U` | `col::text` | Same. |
-| MESSAGE | scalar except STRING | `R` | — | No canonical single-value projection. |
+| MESSAGE | STRING | `U` | `col::text` | Same. (Bytes-backed MESSAGE: falls through to `D` — opaque.) |
+| MESSAGE | scalar except STRING | `D` | — | No canonical single-value projection. |
 | MESSAGE | MAP | `C` | field→key,value fold | Author picks fold. |
 | MESSAGE | LIST | `C` | field values in order | Author picks projection. |
-| scalar | MAP/LIST/MESSAGE | `R` | — | Wrapping a scalar into a collection is ambiguous (single-element list? object with what key?); author renumbers or CUSTOM_MIGRATION. |
+| scalar | MAP/LIST/MESSAGE | `D` | — | Wrapping a scalar into a collection is ambiguous; default = schema correction. Author opts into `C` with custom SQL if the scalar values are e.g. JSON-encoded strings worth preserving. |
 
 **Note on MESSAGE carrier:** iter-1 supports a subset — a proto
 `Message` can land in a column either as JSON/JSONB (default, same
 as MAP / LIST) or as a proto-bytes blob via `CARRIER_MESSAGE` +
 custom_type escape. For JSONB-backed MESSAGEs the grid above applies
-directly. For bytes-backed MESSAGEs the cell is `R` across the board
-(opaque to the compiler; author owns the deserialisation path).
+directly. For bytes-backed MESSAGEs every cell collapses to `D` (the
+compiler has no opaque-payload introspection; preservation requires
+a custom decoder → `C` with author-supplied SQL).
 
 #### Common failure modes the matrix steers around
 
@@ -1217,11 +1244,11 @@ same-carrier cast between unrelated dbTypes, e.g. UUID ↔ INET).
 | **TEXT** | — | S‡ | U | N | N | N | N | U |
 | **VARCHAR** | S | — | U | N | N | N | N | U |
 | **CITEXT** | U | U | — | N | N | N | N | U |
-| **UUID** | U | U | U | — | R | R | R | R |
-| **INET** | U | U | U | R | — | N | R | R |
-| **CIDR** | U | U | U | R | U | — | R | R |
-| **MACADDR** | U | U | U | R | R | R | — | R |
-| **TSVECTOR** | U | U | U | R | R | R | R | — |
+| **UUID** | U | U | U | — | D | D | D | D |
+| **INET** | U | U | U | D | — | N | D | D |
+| **CIDR** | U | U | U | D | U | — | D | D |
+| **MACADDR** | U | U | U | D | D | D | — | D |
+| **TSVECTOR** | U | U | U | D | D | D | D | — |
 
 ‡ TEXT → VARCHAR with an explicit `max_len` narrow triggers the A3 check.
 
@@ -1236,7 +1263,7 @@ same-carrier cast between unrelated dbTypes, e.g. UUID ↔ INET).
 | UUID / INET / CIDR / MACADDR / TSVECTOR | TEXT / VARCHAR / CITEXT | `U` | `col::text` | PG renders canonical string form; reversible. |
 | INET | CIDR | `N` | `col::cidr` + `SELECT count(*) FROM t WHERE host(col) <> host(network(col)) LIMIT 1` | PG's INET → CIDR cast strips host bits; rows with non-zero host bits lose data silently. Check.sql surfaces them so author can decide (keep host bits = stay INET, or normalize first). |
 | CIDR | INET | `U` | `col::inet` | Relax; always lossless. |
-| UUID / MACADDR / TSVECTOR ↔ network family | `R` | — | No sensible cast between unrelated type families. |
+| UUID / MACADDR / TSVECTOR ↔ network family | `D` | — | No sensible cast between unrelated type families; default intent is schema correction (accept data loss). Author opts into `C` with custom SQL if they have a specific transformation. |
 
 #### Grid C2 — INT32 / INT64 carriers (integer family)
 
@@ -1284,8 +1311,8 @@ Valid dbTypes: DATE, TIME, TIMESTAMP, TIMESTAMPTZ.
 
 | from\to | DATE | TIME | TIMESTAMP | TIMESTAMPTZ |
 |---|---|---|---|---|
-| **DATE** | — | R | U | U |
-| **TIME** | R | — | R | R |
+| **DATE** | — | C | U | U |
+| **TIME** | C | — | C | C |
 | **TIMESTAMP** | N | N | — | N |
 | **TIMESTAMPTZ** | N | N | N | — |
 
@@ -1296,7 +1323,7 @@ Valid dbTypes: DATE, TIME, TIMESTAMP, TIMESTAMPTZ.
 | TIMESTAMP → TIME | `N` | — | Drops date component; check irrelevant (data reshape is the point; user confirms intent). |
 | TIMESTAMP → TIMESTAMPTZ | `N` | — | PG applies session timezone; author must confirm target timezone matches data's assumed tz. |
 | TIMESTAMPTZ → TIMESTAMP | `N` | — | Drops timezone, leaving local-time; ambiguous if data spans multiple tz. |
-| TIME ↔ DATE / TIMESTAMP / TIMESTAMPTZ | `R` | — | TIME has no date; combining requires custom date; not automatic. Author CUSTOM_MIGRATION. |
+| TIME ↔ DATE / TIMESTAMP / TIMESTAMPTZ | `C` | — | TIME has no date; combining requires custom date. Default = CUSTOM_MIGRATION (author supplies the date). DROP_AND_CREATE fallback if fresh column is acceptable. |
 
 #### Grid C5 — BYTES carrier
 
@@ -1380,7 +1407,9 @@ the strictness rule.
 | POSIX_PATH | FILE_PATH | none | add extension-regex CHECK | A9 `[*]` → list = **N** |
 | FILE_PATH | POSIX_PATH | none | drop CHECK | A9 list → `[*]` = **S** |
 | FILE_PATH | IMAGE_PATH | none | replace CHECK (different extension list) | A9 narrow / reshape = **N** |
-| ENUM | anything non-ENUM | PG ENUM type drop + new dbType | CHECK potentially added | A12 `pg.custom_type` change family ≈ **REFUSE** (string-backed ENUM uses a type that can't be stripped in-place) |
+| ENUM (string-backed) | TEXT / VARCHAR / CITEXT | drop PG ENUM type | none | **U** — `ALTER COLUMN TYPE text USING col::text`; canonical text form of the enum value is preserved. Down direction requires DROP_AND_CREATE (can't re-narrow text → ENUM without validation; that's NEEDS_CONFIRM per A13 CHECK add). |
+| ENUM (string-backed) | non-text dbType | drop PG ENUM type + dbType change | possibly CHECK | **D** — schema correction; data lost. Author opts into C to transform existing enum strings. |
+| ENUM (int-backed) | non-ENUM | drop CHECK-IN | none | **S** — CHECK IN (…) drop is SAFE. |
 | anything non-ENUM | ENUM | add PG ENUM type | CHECK for int-backed variant | **N** (validate existing rows against enum set) + requires emitter to emit `CREATE TYPE` before `ALTER TYPE` |
 
 #### Reduction table — int carriers
@@ -1406,8 +1435,8 @@ collapse to D28.3 C4 cells. No new strategy territory.
 | From sem | To sem | Reduces to |
 |---|---|---|
 | DATE ↔ DATETIME | D28.3 C4 DATE ↔ TIMESTAMP |
-| DATETIME ↔ TIME | D28.3 C4 TIMESTAMP ↔ TIME = **R** |
-| TIME ↔ DATE | D28.3 C4 = **R** |
+| DATETIME ↔ TIME | D28.3 C4 TIMESTAMP ↔ TIME = **C** |
+| TIME ↔ DATE | D28.3 C4 = **C** |
 
 #### SEM_AUTO
 
@@ -1655,10 +1684,12 @@ goes (local `out/` vs tool API). This separation means:
    introspect(empty)` — every step green.
 4. Same (prev, curr) input produces byte-identical diff SQL on
    re-run (AC #4 of iter-1 extended).
-5. REFUSE cases (column carrier change, PK change, enum value
-   removal, `pg.custom_type` change) surface a `diag.Error` with
-   `file:line:col` + `why:` + `fix:`. Fixture `…_refuse` per
-   refused case. No silent wrong SQL.
+5. Decision-required cases (column carrier change, PK change, enum
+   value removal, `pg.custom_type` change) surface a `diag.Error`
+   with `file:line:col` + `why:` + `fix:` listing the available
+   strategies (DROP_AND_CREATE / CUSTOM_MIGRATION). Fixture
+   `…_needs_decide` per case. No silent wrong SQL; no auto-emitted
+   destructive migration without `--decide`.
 6. Narrow / incompatible-cast changes emit plain SQL; PG is the
    apply-time gate (refuses ALTER if live data doesn't fit).
    Compiler adds no warning comments; data-survival validation is

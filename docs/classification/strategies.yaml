@@ -1,0 +1,111 @@
+# Migration-safety strategies — D28 authoritative source of truth.
+#
+# Five strategies, strict ordering for multi-axis alter strictness fold:
+#   SAFE < LOSSLESS_USING < NEEDS_CONFIRM < DROP_AND_CREATE < CUSTOM_MIGRATION
+#
+# Loaded by plan/classifier.go at build time; driven through
+# table-driven tests that read the carrier / dbtype / constraint
+# YAML files and assert the classifier pins the expected strategy
+# per cell.
+#
+# Note on REFUSE removal: previous D28 draft carried a sixth strategy
+# REFUSE that labelled transitions with no "automatic" path. That
+# framing was structurally redundant — DROP_AND_CREATE is a
+# universal escape (drop the column, add it fresh; data is lost but
+# schema moves). Every prior REFUSE cell collapses to either
+# DROP_AND_CREATE (when the natural intent is "accept data loss") or
+# CUSTOM_MIGRATION (when the natural intent is "preserve data via
+# custom SQL"). See iteration-2.md D28 header for the full rationale.
+
+strategies:
+  - id: SAFE
+    rank: 0
+    decision_required: false
+    summary: |
+      Type + data both fit; clean ALTER, no USING, no data at risk.
+    ddl_template: "ALTER TABLE {{.Table}} ALTER COLUMN {{.Col}} <plain change>"
+    examples:
+      - "NOT NULL → NULL (relax)"
+      - "VARCHAR(50) → VARCHAR(200) (widen)"
+      - "INTEGER → BIGINT (widen)"
+      - "add default"
+      - "add comment"
+
+  - id: LOSSLESS_USING
+    rank: 1
+    decision_required: false
+    summary: |
+      PG cast handles conversion in-place deterministically. Cast is
+      value-preserving or reversibly mapped (encode/decode on both
+      directions). No check.sql needed; PG errors at apply if an
+      edge case surfaces.
+    ddl_template: "ALTER TABLE {{.Table}} ALTER COLUMN {{.Col}} TYPE <t> USING {{.Using}}"
+    examples:
+      - "BOOL → STRING via col::text"
+      - "INT32 → DOUBLE (fits exactly)"
+      - "JSON ↔ JSONB"
+      - "TEXT ↔ CITEXT"
+
+  - id: NEEDS_CONFIRM
+    rank: 2
+    decision_required: conditional
+    auto_apply_if: "check.sql returns zero rows on target DB"
+    summary: |
+      Types theoretically convertible but data may not fit (narrow
+      cast, parse risk, overflow). Differ auto-emits a companion
+      check.sql; deploy client runs it pre-apply. Zero-count →
+      proceed; non-zero → block, present decision menu
+      (DROP_AND_CREATE / CUSTOM_MIGRATION).
+    ddl_template: "ALTER TABLE {{.Table}} ALTER COLUMN {{.Col}} TYPE <t> USING {{.Using}}"
+    companion_template: "check.{{.Timestamp}}.sql with check_sql body"
+    examples:
+      - "VARCHAR(200) → VARCHAR(50) (narrow, data may exceed)"
+      - "STRING → INT32 (parse + overflow risk)"
+      - "NULL → NOT NULL (existing NULL rows)"
+      - "BIGINT → INTEGER (overflow risk)"
+
+  - id: DROP_AND_CREATE
+    rank: 3
+    decision_required: true
+    decision_flag: "--decide <col>=drop_and_create"
+    summary: |
+      Author-acknowledged lossy change; existing data lost. The
+      universal escape for any transition the compiler can't safely
+      automate: drop the column, re-add with the new shape.
+      Differ emits the two ALTERs behind explicit user opt-in;
+      never emitted silently.
+    ddl_template: |
+      ALTER TABLE {{.Table}} DROP COLUMN {{.Col}};
+      ALTER TABLE {{.Table}} ADD COLUMN {{.Col}} <new shape>;
+    examples:
+      - "STRING → MESSAGE (no cast path; accept data loss)"
+      - "pk flip (author re-seeds PK data)"
+      - "generated_expr add (drop + add as generated)"
+
+  - id: CUSTOM_MIGRATION
+    rank: 4
+    decision_required: true
+    decision_flag: "--decide <col>=custom:<sql-file-path>"
+    summary: |
+      Author writes SQL that transforms existing data before (or
+      instead of) the structural change. Differ wraps the custom
+      block in a managed transaction and emits the surrounding
+      structural ALTERs; user owns the data step.
+    ddl_template: |
+      BEGIN;
+      -- custom transform:
+      {{.CustomSQL}}
+      -- structural follow-up (if applicable):
+      ALTER TABLE {{.Table}} ALTER COLUMN {{.Col}} TYPE <t>;
+      COMMIT;
+    examples:
+      - "pg.custom_type swap (author owns opaque DDL)"
+      - "enum value remove (backfill old → new; then drop)"
+      - "collection carrier → scalar (extract / aggregate)"
+      - "element_carrier reshape (jsonb transform)"
+
+# Multi-axis strictness fold: when one AlterColumn touches N axes,
+# emitted strategy = strategy of highest rank across axes. Check.sql
+# is AND of all per-axis check_sql templates. Decision flag on the
+# fold: any of DROP_AND_CREATE / CUSTOM_MIGRATION forces explicit
+# opt-in across the whole alter.
