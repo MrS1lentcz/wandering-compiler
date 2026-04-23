@@ -1,0 +1,10 @@
+syntax = "proto3";
+package ir.mco;
+
+import "w17/db.proto";
+
+// side.proto only declares the side connection; it has no tables
+// of its own in this fixture.
+option (w17.db.module) = {
+  connection: { name: "side", dialect: SQLITE, version: "3" }
+};

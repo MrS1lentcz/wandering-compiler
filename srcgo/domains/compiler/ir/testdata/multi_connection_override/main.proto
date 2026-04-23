@@ -1,0 +1,19 @@
+syntax = "proto3";
+package ir.mco;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+option (w17.db.module) = {
+  connection: { name: "main", dialect: POSTGRES, version: "18" }
+};
+
+// feature_flags defined on main.proto but overrides to "side"
+// (SQLite) connection via (w17.db.table).connection. Exercises the
+// cross-module registry lookup in resolveTableConnection.
+message FeatureFlag {
+  option (w17.db.table) = { name: "feature_flags", connection: "side" };
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+  bool   enabled = 3;
+}

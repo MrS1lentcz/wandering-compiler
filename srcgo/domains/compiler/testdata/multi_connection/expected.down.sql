@@ -1,0 +1,8 @@
+BEGIN;
+
+DROP INDEX IF EXISTS users_email_uidx;
+DROP TABLE IF EXISTS users;
+
+DROP TABLE IF EXISTS sessions;
+
+COMMIT;
