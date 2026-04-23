@@ -1,0 +1,374 @@
+# D28.1 — column-constraint axis classification.
+#
+# Each axis is an independent dimension of a Column fact change.
+# The classifier dispatches per axis, then folds strategies via
+# strictness (see strategies.yaml).
+#
+# Entry shape: flat list of { axis, case, strategy, ... }.
+# `case` is the semantic label the classifier computes from the
+# (prev, curr) pair (e.g. "widen" vs "narrow" for a max_len change).
+# Literal transitions carry from / to fields; parametric cases carry
+# a description only.
+#
+# Template context for check_sql (Go text/template):
+#   {{.Table}}          — qualified table name
+#   {{.Col}}            — column name
+#   {{.NewMaxLen}}      — (max_len narrow/add) target max_len
+#   {{.NewPrecision}}   — (numeric narrow/add) target precision
+#   {{.NewScale}}       — (numeric narrow/add) target scale
+#   {{.IntMin/IntMax}}  — (integer narrow) target-type range bounds
+#   {{.NewRegex}}       — (allowed_extensions narrow) target regex
+#   {{.RemovedValues}}  — (enum remove) removed enum-value list
+#   {{.FK.Parent}}      — (FK add) parent table name
+#   {{.FK.PkCol}}       — (FK add) parent PK column
+
+cells:
+  # ── A1 nullable ──────────────────────────────────────────────
+  - axis: nullable
+    case: relax
+    from: NOT_NULL
+    to: "NULL"
+    strategy: SAFE
+    rationale: "Relaxing a constraint is always safe; DB accepts everything it accepted before plus NULLs."
+
+  - axis: nullable
+    case: tighten
+    from: "NULL"
+    to: NOT_NULL
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NULL LIMIT 1"
+    rationale: "Live rows may be NULL; PG refuses SET NOT NULL if any row is. Default add may co-emit SET DEFAULT in the same migration (differ orders the ops)."
+
+  # ── A2 default ───────────────────────────────────────────────
+  - axis: default
+    case: add
+    strategy: SAFE
+    rationale: "Affects only future inserts; existing rows retain prior values."
+
+  - axis: default
+    case: drop
+    strategy: SAFE
+    rationale: "DROP DEFAULT; existing rows unaffected."
+
+  - axis: default
+    case: change_literal
+    strategy: SAFE
+    rationale: "SET DEFAULT is instantaneous; no row rewrite."
+
+  - axis: default
+    case: auto_kind_change
+    strategy: SAFE
+    rationale: "E.g. AUTO_NOW ↔ literal timestamp; default-clause swap, no row rewrite."
+
+  - axis: default
+    case: identity_add
+    description: "off → AUTO_IDENTITY on existing INTEGER/BIGINT column"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NULL LIMIT 1"
+    rationale: "Adding GENERATED … AS IDENTITY on an existing column requires a fresh sequence seeded above MAX(col). Differ emits `ADD GENERATED ALWAYS AS IDENTITY (RESTART WITH (SELECT COALESCE(MAX({{.Col}}),0)+1 FROM {{.Table}}))`. Check.sql confirms no NULL rows (IDENTITY columns are NOT NULL). High-write prod may need `--decide identity=custom` with explicit LOCK TABLE prefix."
+
+  - axis: default
+    case: identity_drop
+    description: "AUTO_IDENTITY → off"
+    strategy: NEEDS_CONFIRM
+    rationale: "PG DROP IDENTITY is DDL-only; sequence lost. Down-migration recreates the sequence with no value continuity. User confirms intent."
+
+  # ── A3 max_len (VARCHAR / CHAR) ──────────────────────────────
+  - axis: max_len
+    case: add_bound
+    description: "0 (unbounded) → N"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE char_length({{.Col}}) > {{.NewMaxLen}} LIMIT 1"
+    rationale: "Unbounded → bounded; PG errors on ALTER if any row exceeds N."
+
+  - axis: max_len
+    case: remove_bound
+    description: "N → 0 (unbounded)"
+    strategy: SAFE
+    rationale: "VARCHAR(N) → TEXT/VARCHAR widen."
+
+  - axis: max_len
+    case: widen
+    description: "N → M, M > N"
+    strategy: SAFE
+    rationale: "Strict widen; no data at risk."
+
+  - axis: max_len
+    case: narrow
+    description: "N → M, M < N"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE char_length({{.Col}}) > {{.NewMaxLen}} LIMIT 1"
+    rationale: "PG errors on narrow ALTER if any row > M."
+
+  # ── A4 numeric precision / scale (DBT_NUMERIC) ───────────────
+  - axis: numeric
+    case: widen_both
+    description: "(P,S) → (P',S') with P' ≥ P, S' ≥ S"
+    strategy: SAFE
+    rationale: "Strict widen; no overflow possible."
+
+  - axis: numeric
+    case: scale_narrow
+    description: "Scale S → S' where S' < S (precision constant or widened)"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE scale({{.Col}}) > {{.NewScale}} LIMIT 1"
+    rationale: "Scale narrow truncates decimals; author decides acceptability. PG 13+ required for scale() function — earlier PG emits an equivalent predicate."
+
+  - axis: numeric
+    case: precision_narrow
+    description: "Precision P → P' where P' < P"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE abs({{.Col}}) >= 10.0^({{.NewPrecision}}-{{.NewScale}}) LIMIT 1"
+    rationale: "Overflow risk; PG errors on apply."
+
+  - axis: numeric
+    case: add_bound
+    description: "unbounded NUMERIC → NUMERIC(P,S)"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE abs({{.Col}}) >= 10.0^({{.NewPrecision}}-{{.NewScale}}) OR scale({{.Col}}) > {{.NewScale}} LIMIT 1"
+    rationale: "Going from unbounded to typed NUMERIC."
+
+  - axis: numeric
+    case: remove_bound
+    description: "NUMERIC(P,S) → unbounded NUMERIC"
+    strategy: SAFE
+    rationale: "Widen to unbounded."
+
+  # ── A5 unique flag (routes through Index bucket) ─────────────
+  - axis: unique
+    case: enable
+    description: "Note: synthesised as UNIQUE INDEX; classified via Index add path."
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT {{.Col}}, count(*) FROM {{.Table}} GROUP BY {{.Col}} HAVING count(*) > 1 LIMIT 1"
+    rationale: "CREATE UNIQUE INDEX errors on duplicates; user dedupes or aborts."
+
+  - axis: unique
+    case: disable
+    strategy: SAFE
+    rationale: "DROP INDEX is always safe."
+
+  # ── A6 pk flip ───────────────────────────────────────────────
+  - axis: pk
+    case: enable
+    from: "false"
+    to: "true"
+    strategy: CUSTOM_MIGRATION
+    rationale: "PK change is table-rebuild territory (NOT NULL + UNIQUE preconditions; composite PK interactions). Default = author keeps existing rows as PKs via custom SQL; DROP_AND_CREATE fallback for fresh seed."
+
+  - axis: pk
+    case: disable
+    from: "true"
+    to: "false"
+    strategy: CUSTOM_MIGRATION
+    rationale: "Dropping PK breaks FKs referencing here; author writes FK-rewrite plan."
+
+  # ── A7 generated_expr (GENERATED ALWAYS AS ... STORED) ───────
+  - axis: generated_expr
+    case: add
+    description: "\"\" → expr (plain → generated)"
+    strategy: DROP_AND_CREATE
+    rationale: "PG has no in-place convert-to-generated; drop + add-as-generated recomputes from new expr."
+
+  - axis: generated_expr
+    case: drop
+    description: "expr → \"\" (generated → plain)"
+    strategy: NEEDS_CONFIRM
+    rationale: "PG 18 ALTER COLUMN DROP EXPRESSION materialises current values. User confirms: keep materialised vs. drop-and-backfill."
+
+  - axis: generated_expr
+    case: change
+    description: "expr A → expr B"
+    strategy: DROP_AND_CREATE
+    rationale: "PG has no 'rewrite expression' ALTER; drop + add-as-generated recomputes every value. Author opts into CUSTOM_MIGRATION for dual-write / staged cutover."
+
+  # ── A8 comment ───────────────────────────────────────────────
+  - axis: comment
+    case: any
+    strategy: SAFE
+    rationale: "COMMENT ON COLUMN is metadata; instant and reversible."
+
+  # ── A9 allowed_extensions (path family) ──────────────────────
+  - axis: allowed_extensions
+    case: widen
+    description: "list A → superset B"
+    strategy: SAFE
+    rationale: "Existing rows pass the new (looser) check."
+
+  - axis: allowed_extensions
+    case: narrow
+    description: "list A → subset B"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '{{.NewRegex}}' LIMIT 1"
+    rationale: "Rows with now-forbidden extensions exist; surface count."
+
+  - axis: allowed_extensions
+    case: disjoint
+    description: "list A → B where A ∩ B = ∅"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '{{.NewRegex}}' LIMIT 1"
+    rationale: "Treated as narrow-to-new-set; same mechanics."
+
+  - axis: allowed_extensions
+    case: to_wildcard
+    description: "list → [*]"
+    strategy: SAFE
+    rationale: "Drops the CHECK entirely."
+
+  - axis: allowed_extensions
+    case: from_wildcard
+    description: "[*] → list"
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '{{.NewRegex}}' LIMIT 1"
+    rationale: "Adds constraint where none existed."
+
+  # ── A10 enum_values (SEM_ENUM) ───────────────────────────────
+  - axis: enum_values
+    case: add
+    description: "names A → A ∪ {new}"
+    strategy: SAFE
+    rationale: "Additive; string-backed uses ALTER TYPE ADD VALUE, int-backed updates CHECK IN (…)."
+
+  - axis: enum_values
+    case: remove
+    description: "names A → A \\ {removed}"
+    strategy: CUSTOM_MIGRATION
+    rationale: "PG can't drop enum values; int-backed CHECK narrow rejects existing rows. Default = author rewrites affected rows to a surviving value. DROP_AND_CREATE fallback discards."
+
+  - axis: enum_values
+    case: rename_in_place
+    description: "names A → B with renamed-value in same slot"
+    strategy: CUSTOM_MIGRATION
+    rationale: "Rename = remove + add. String-backed PG ENUM has ALTER TYPE RENAME VALUE (future SAFE; out-of-scope M1)."
+
+  - axis: enum_values
+    case: fqn_change
+    description: "enum_fqn \"pkg.A\" → \"pkg.B\""
+    strategy: DROP_AND_CREATE
+    rationale: "Different enum entirely. Default = fresh start. CUSTOM_MIGRATION to remap old values."
+
+  # ── A11 pg.required_extensions ───────────────────────────────
+  - axis: pg_required_extensions
+    case: any
+    strategy: SAFE
+    rationale: "Manifest-only impact; no column DDL. M4 deploy-manifest consumer decides CREATE EXTENSION."
+
+  # ── A12 pg.custom_type ───────────────────────────────────────
+  - axis: pg_custom_type
+    case: any
+    strategy: CUSTOM_MIGRATION
+    rationale: "custom_type is author-owned opaque DDL; compiler doesn't know cast semantics. Author supplies migration SQL; DROP_AND_CREATE fallback loses data."
+
+  # ── A13 element_carrier / element_is_message ─────────────────
+  - axis: element_reshape
+    case: any
+    strategy: CUSTOM_MIGRATION
+    rationale: "Collection element reshape under a list/map; jsonb_array transform is author-owned. DROP_AND_CREATE fallback discards collection contents."
+
+# Table-level axes — diff emits non-column ops (RenameTable,
+# SetTableNamespace, SetTableComment, index / FK / check ops)
+# rather than AlterColumn FactChanges. Classified here for
+# completeness and for the check.sql generator that runs on
+# FK adds + CHECK adds.
+
+table_level:
+  - axis: table_rename
+    case: any
+    strategy: SAFE
+    rationale: "ALTER TABLE RENAME TO is instant; FK + index names auto-update."
+
+  - axis: table_namespace
+    case: schema_change
+    description: "SCHEMA(a) → SCHEMA(b), or SCHEMA ↔ NONE"
+    strategy: SAFE
+    rationale: "ALTER TABLE SET SCHEMA is instant; cross-schema FKs keep working."
+
+  - axis: table_namespace
+    case: prefix_change
+    description: "PREFIX(a) → PREFIX(b)"
+    strategy: SAFE
+    rationale: "Under the hood = RENAME TO."
+
+  - axis: table_namespace
+    case: mode_switch
+    description: "SCHEMA ↔ PREFIX"
+    strategy: SAFE
+    rationale: "Chain: SET SCHEMA + RENAME TO."
+
+  - axis: table_comment
+    case: any
+    strategy: SAFE
+    rationale: "COMMENT ON TABLE; metadata."
+
+  - axis: index_add
+    case: unique
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT {{.Col}}, count(*) FROM {{.Table}} GROUP BY {{.Col}} HAVING count(*) > 1 LIMIT 1"
+    rationale: "CREATE UNIQUE INDEX errors on duplicates."
+
+  - axis: index_add
+    case: non_unique
+    strategy: SAFE
+    rationale: "Non-unique index; no data validation."
+
+  - axis: index_drop
+    case: any
+    strategy: SAFE
+    rationale: "DROP INDEX is always safe."
+
+  - axis: index_replace
+    case: shape_change
+    strategy: SAFE
+    rationale: "DROP + CREATE; no data change. Uniqueness flip inside replace: fold as drop + add; add-half dominates."
+
+  - axis: fk_add
+    case: any
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} NOT IN (SELECT {{.FK.PkCol}} FROM {{.FK.Parent}}) LIMIT 1"
+    rationale: "ADD FOREIGN KEY validates existing data; fails apply on orphan child rows."
+
+  - axis: fk_drop
+    case: any
+    strategy: SAFE
+    rationale: "Dropping a constraint is safe."
+
+  - axis: fk_replace
+    case: target_change
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} NOT IN (SELECT {{.FK.PkCol}} FROM {{.FK.Parent}}) LIMIT 1"
+    rationale: "Target change = drop + add; add-half dominates."
+
+  - axis: fk_replace
+    case: on_delete_only
+    strategy: SAFE
+    rationale: "Pure on_delete change: ALTER CONSTRAINT."
+
+  - axis: check_add
+    case: any
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE NOT ({{.CheckPredicate}}) LIMIT 1"
+    rationale: "ADD CONSTRAINT CHECK validates existing rows; surface count of rows that would fail."
+
+  - axis: check_drop
+    case: any
+    strategy: SAFE
+    rationale: "Dropping a constraint is always safe."
+
+  - axis: check_replace
+    case: any
+    strategy: NEEDS_CONFIRM
+    rationale: "Fold as drop + add; add-half dominates."
+
+  - axis: raw_add
+    case: any
+    strategy: NEEDS_CONFIRM
+    rationale: "Opaque body (D11); compiler can't derive check.sql. Stub check: '-- raw_* body is opaque; reviewer must hand-validate'."
+
+  - axis: raw_drop
+    case: any
+    strategy: SAFE
+    rationale: "Dropping a constraint / index is safe."
+
+  - axis: raw_replace
+    case: any
+    strategy: NEEDS_CONFIRM
+    rationale: "Same as raw_add."

@@ -1,0 +1,354 @@
+# D28.3 — dbType × dbType transition classification within carrier.
+#
+# `db_type` override lets authors pin a column's physical PG type
+# independently of the carrier's default. Changing the override
+# within the same carrier is the D28.3 territory; cross-carrier
+# dbType changes degenerate to the D28.2 carrier matrix (carrier
+# axis dominates).
+#
+# Entry shape: flat list of { family, from, to, strategy, ... }
+# where `family` is the carrier family (STRING / INT / DOUBLE /
+# TIMESTAMP / BYTES / JSON).
+#
+# Cells not present for a family = REFUSE-equivalent in prior draft,
+# now DROP_AND_CREATE by default (universal escape). Classifier
+# synthesises a DROP_AND_CREATE cell when a dbType transition has
+# no explicit entry.
+#
+# Template context: same as carrier.yaml + dbtype.yaml additions:
+#   {{.Col}}            — column name
+#   {{.Table}}          — qualified table name
+#   {{.NewMaxLen}}      — for VARCHAR narrow
+#   {{.IntMin/IntMax}}  — for integer narrow
+
+cells:
+  # ── STRING carrier — Grid C1 ──────────────────────────────────
+  - family: STRING
+    from: TEXT
+    to: VARCHAR
+    strategy: SAFE
+    rationale: "Adds VARCHAR length bound; if an explicit max_len narrow is part of the change it lifts to A3 NEEDS_CONFIRM."
+  - family: STRING
+    from: VARCHAR
+    to: TEXT
+    strategy: SAFE
+    rationale: "Remove bound."
+  - family: STRING
+    from: TEXT
+    to: CITEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::citext"
+    rationale: "Data-preserving; changes comparison semantics to case-insensitive."
+  - family: STRING
+    from: CITEXT
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Reversible."
+  - family: STRING
+    from: VARCHAR
+    to: CITEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::citext"
+    rationale: "Same as TEXT → CITEXT."
+  - family: STRING
+    from: CITEXT
+    to: VARCHAR
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::varchar"
+    rationale: "Reversible."
+
+  - family: STRING
+    from: TEXT
+    to: UUID
+    strategy: NEEDS_CONFIRM
+    using: "{{.Col}}::uuid"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$' LIMIT 1"
+    rationale: "UUID format validation required; PG errors on non-UUID rows."
+  - family: STRING
+    from: UUID
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Canonical hyphenated form."
+
+  - family: STRING
+    from: TEXT
+    to: INET
+    strategy: NEEDS_CONFIRM
+    using: "{{.Col}}::inet"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '^([0-9]{1,3}\\.){3}[0-9]{1,3}(/[0-9]+)?$|^[0-9a-fA-F:]+(/[0-9]+)?$' LIMIT 1"
+    rationale: "IPv4/IPv6 format validation."
+  - family: STRING
+    from: INET
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Canonical text form."
+
+  - family: STRING
+    from: INET
+    to: CIDR
+    strategy: NEEDS_CONFIRM
+    using: "{{.Col}}::cidr"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE host({{.Col}}) <> host(network({{.Col}})) LIMIT 1"
+    rationale: "CIDR strips host bits; rows with non-zero host bits silently lose data. Check surfaces them."
+  - family: STRING
+    from: CIDR
+    to: INET
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::inet"
+    rationale: "Relax; always lossless."
+  - family: STRING
+    from: TEXT
+    to: CIDR
+    strategy: NEEDS_CONFIRM
+    using: "{{.Col}}::cidr"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]+$|^[0-9a-fA-F:]+/[0-9]+$' LIMIT 1"
+    rationale: "CIDR requires mask + network-bits-only; stricter format check."
+  - family: STRING
+    from: CIDR
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Canonical form."
+
+  - family: STRING
+    from: TEXT
+    to: MACADDR
+    strategy: NEEDS_CONFIRM
+    using: "{{.Col}}::macaddr"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$' LIMIT 1"
+    rationale: "MAC address format check."
+  - family: STRING
+    from: MACADDR
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Canonical form."
+
+  - family: STRING
+    from: TEXT
+    to: TSVECTOR
+    strategy: LOSSLESS_USING
+    using: "to_tsvector('simple', {{.Col}})"
+    rationale: "Simple config; language-neutral lexing. If author needs language-specific stemming, follow-up schema change tracked separately (iter-3+)."
+  - family: STRING
+    from: TSVECTOR
+    to: TEXT
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::text"
+    rationale: "Reversible."
+
+  # STRING intra-family cross-type (UUID ↔ network, etc.) = default DROP_AND_CREATE per classifier synthesis.
+
+  # ── INT carrier (INT32/INT64) — Grid C2 ──────────────────────
+  - family: INT
+    from: SMALLINT
+    to: INTEGER
+    strategy: SAFE
+    rationale: "Strict widen."
+  - family: INT
+    from: INTEGER
+    to: BIGINT
+    strategy: SAFE
+    rationale: "Strict widen."
+  - family: INT
+    from: SMALLINT
+    to: BIGINT
+    strategy: SAFE
+    rationale: "Strict widen."
+
+  - family: INT
+    from: INTEGER
+    to: SMALLINT
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} > 32767 OR {{.Col}} < -32768 LIMIT 1"
+    rationale: "SMALLINT overflow check."
+  - family: INT
+    from: BIGINT
+    to: INTEGER
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} > 2147483647 OR {{.Col}} < -2147483648 LIMIT 1"
+    rationale: "INTEGER overflow."
+  - family: INT
+    from: BIGINT
+    to: SMALLINT
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} > 32767 OR {{.Col}} < -32768 LIMIT 1"
+    rationale: "SMALLINT overflow."
+
+  - family: INT
+    from: SMALLINT
+    to: NUMERIC
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::numeric"
+    rationale: "Always fits in NUMERIC."
+  - family: INT
+    from: INTEGER
+    to: NUMERIC
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::numeric"
+    rationale: "Always fits."
+  - family: INT
+    from: BIGINT
+    to: NUMERIC
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::numeric"
+    rationale: "Always fits."
+
+  - family: INT
+    from: NUMERIC
+    to: SMALLINT
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} <> floor({{.Col}}) OR {{.Col}} > 32767 OR {{.Col}} < -32768 LIMIT 1"
+    rationale: "Truncation + overflow."
+  - family: INT
+    from: NUMERIC
+    to: INTEGER
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} <> floor({{.Col}}) OR {{.Col}} > 2147483647 OR {{.Col}} < -2147483648 LIMIT 1"
+    rationale: "Truncation + overflow."
+  - family: INT
+    from: NUMERIC
+    to: BIGINT
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} <> floor({{.Col}}) LIMIT 1"
+    rationale: "Truncation only (BIGINT covers any finite numeric)."
+
+  # ── DOUBLE carrier — Grid C3 ─────────────────────────────────
+  - family: DOUBLE
+    from: REAL
+    to: DOUBLE_PRECISION
+    strategy: SAFE
+    rationale: "Strict widen (6 → 15 digits)."
+  - family: DOUBLE
+    from: DOUBLE_PRECISION
+    to: REAL
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}}::real::double precision <> {{.Col}} LIMIT 1"
+    rationale: "Precision loss; round-trip check finds rows that can't preserve."
+  - family: DOUBLE
+    from: REAL
+    to: NUMERIC
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::numeric"
+    rationale: "Fits."
+  - family: DOUBLE
+    from: DOUBLE_PRECISION
+    to: NUMERIC
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::numeric"
+    rationale: "Fits within NUMERIC precision window; NUMERIC is arbitrary-precision."
+  - family: DOUBLE
+    from: NUMERIC
+    to: REAL
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}}::real::numeric <> {{.Col}} LIMIT 1"
+    rationale: "Precision loss for high-magnitude NUMERIC values."
+  - family: DOUBLE
+    from: NUMERIC
+    to: DOUBLE_PRECISION
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}}::double precision::numeric <> {{.Col}} LIMIT 1"
+    rationale: "Precision loss above ~17 digits."
+
+  # ── TIMESTAMP carrier — Grid C4 ──────────────────────────────
+  - family: TIMESTAMP
+    from: DATE
+    to: TIMESTAMP
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::timestamp"
+    rationale: "Midnight; reversible."
+  - family: TIMESTAMP
+    from: DATE
+    to: TIMESTAMPTZ
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::timestamptz"
+    rationale: "Midnight in session timezone."
+
+  - family: TIMESTAMP
+    from: TIMESTAMP
+    to: DATE
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}}::time <> '00:00:00' LIMIT 1"
+    rationale: "Truncates time-of-day; check surfaces rows with non-midnight."
+  - family: TIMESTAMP
+    from: TIMESTAMPTZ
+    to: DATE
+    strategy: NEEDS_CONFIRM
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}}::time <> '00:00:00' LIMIT 1"
+    rationale: "Same; tz interpretation also drops."
+
+  - family: TIMESTAMP
+    from: TIMESTAMP
+    to: TIMESTAMPTZ
+    strategy: NEEDS_CONFIRM
+    rationale: "PG applies session timezone to naive timestamps; author confirms target tz matches data's assumed tz."
+  - family: TIMESTAMP
+    from: TIMESTAMPTZ
+    to: TIMESTAMP
+    strategy: NEEDS_CONFIRM
+    rationale: "Drops tz; ambiguous if data spans multiple tz."
+
+  - family: TIMESTAMP
+    from: TIMESTAMP
+    to: TIME
+    strategy: NEEDS_CONFIRM
+    rationale: "Drops date component."
+  - family: TIMESTAMP
+    from: TIMESTAMPTZ
+    to: TIME
+    strategy: NEEDS_CONFIRM
+    rationale: "Drops date + tz."
+
+  # TIME ↔ DATE / TIMESTAMP / TIMESTAMPTZ = default CUSTOM_MIGRATION
+  # (requires author-supplied date). Not explicit cells; classifier
+  # synthesises C as the default for missing TIME-source cells.
+
+  # ── BYTES carrier — Grid C5 ──────────────────────────────────
+  # Single valid dbType per dialect (BYTEA on PG, BLOB on MySQL).
+  # No intra-carrier dbType transition within one dialect; cross-
+  # dialect moves are M4 territory.
+
+  # ── MAP / LIST carrier (JSON family) — Grid C6 ───────────────
+  - family: JSON
+    from: JSON
+    to: JSONB
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::jsonb"
+    rationale: "Normalises whitespace + key order; semantically equivalent."
+  - family: JSON
+    from: JSONB
+    to: JSON
+    strategy: LOSSLESS_USING
+    using: "{{.Col}}::json"
+    rationale: "Deterministic text form."
+
+  - family: JSON
+    from: JSON
+    to: HSTORE
+    strategy: NEEDS_CONFIRM
+    using: "(custom unpack)"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE jsonb_typeof({{.Col}}::jsonb) <> 'object' OR EXISTS (SELECT 1 FROM jsonb_each({{.Col}}::jsonb) WHERE jsonb_typeof(value) <> 'string') LIMIT 1"
+    rationale: "HSTORE is string→string only; JSON may nest or have non-string leaves."
+  - family: JSON
+    from: JSONB
+    to: HSTORE
+    strategy: NEEDS_CONFIRM
+    using: "(custom unpack)"
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE jsonb_typeof({{.Col}}) <> 'object' OR EXISTS (SELECT 1 FROM jsonb_each({{.Col}}) WHERE jsonb_typeof(value) <> 'string') LIMIT 1"
+    rationale: "Same shape check."
+
+  - family: JSON
+    from: HSTORE
+    to: JSON
+    strategy: LOSSLESS_USING
+    using: "hstore_to_json({{.Col}})"
+    rationale: "All HSTORE values are strings by construction; always fits as JSON strings."
+  - family: JSON
+    from: HSTORE
+    to: JSONB
+    strategy: LOSSLESS_USING
+    using: "hstore_to_jsonb({{.Col}})"
+    rationale: "Same as HSTORE → JSON."

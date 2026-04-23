@@ -769,10 +769,17 @@ it into **five** strategies and pins each fact transition to one.
 > **Authoritative source of truth:** `docs/classification/*.yaml`.
 > The markdown tables in D28.1–4 below are a human-readable rendering
 > — the YAML wins on conflict. Phase 2 tests load the YAML directly
-> and drive the classifier through every cell. Current YAML coverage:
-> `strategies.yaml` (all 5) + `carrier.yaml` (D28.2 complete).
-> `dbtype.yaml` / `constraint.yaml` / `sem.yaml` still live in the
-> markdown tables and migrate in follow-up turns.
+> and drive the classifier through every cell.
+>
+> Files:
+> - `strategies.yaml` — the 5 strategies, rank-ordered, with DDL templates.
+> - `carrier.yaml` — D28.2 (carrier × carrier, ~125 cells).
+> - `dbtype.yaml` — D28.3 (dbType × dbType within carrier, flat per-family cells).
+> - `constraint.yaml` — D28.1 (axis-indexed cells for column + table-level axes).
+> - `sem.yaml` — **does not exist by design.** D28.4 sem transitions
+>   are pure compositions of carrier.yaml + dbtype.yaml + constraint.yaml
+>   cells; classifier synthesises them via the fold algorithm (see
+>   D28.4 summary). Nothing independent to store.
 
 **Strategies** (full definitions in `classification/strategies.yaml`):
 
@@ -847,9 +854,11 @@ D28 is the foundation of an exhaustive table-driven test matrix:
 
 **Phasing:**
 
-1. Document the full classification matrix (paper exhaustive, every
-   fact transition pinned). **Status: D28.2 in YAML (`carrier.yaml`);
-   D28.1 / D28.3 / D28.4 still markdown-only, YAML-extraction queued.**
+1. Document the full classification matrix in YAML (paper exhaustive,
+   every fact transition pinned). **Status: complete as of 2026-04-23.
+   All three active YAMLs (`carrier.yaml`, `dbtype.yaml`,
+   `constraint.yaml`) shipped; `sem.yaml` is absent by design
+   (reductions only).**
 2. Refactor `plan/diff.go` strategy classifier from binary →
    five-strategy enum; emit structured "needs decision X" objects
    driven off the YAML (load once at build, switch on strategy).
