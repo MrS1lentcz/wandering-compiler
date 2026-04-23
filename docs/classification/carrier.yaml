@@ -42,25 +42,25 @@ cells:
     rationale: "Chain bool→int→double; lossless both directions."
   - from: BOOL
     to: TIMESTAMP
-    strategy: DROP_AND_CREATE
-    rationale: "No meaningful cast; default intent is schema correction, not data preservation."
+    strategy: CUSTOM_MIGRATION
+    rationale: "No meaningful cast exists; author writes mapping SQL (e.g. 'true → now(), false → epoch') or opts into DROP_AND_CREATE via --decide."
   - from: BOOL
     to: DURATION
-    strategy: DROP_AND_CREATE
-    rationale: "Same as BOOL→TIMESTAMP."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as BOOL→TIMESTAMP: author owns mapping or opts into drop."
   - from: BOOL
     to: BYTES
     strategy: NEEDS_CONFIRM
-    using: "decode({{.Col}}::text, 'escape')"
-    rationale: "Encoding choice ambiguous (hex vs escape); differ emits a warning to pick encoding via --decide encoding=hex|escape."
+    using: "decode({{.Col}}::text, '{{.Project.Encoding}}')"
+    rationale: "Canonical 't'/'f' text bytes under project encoding (w17.yaml). No per-column encoding guess."
 
   # ── From STRING ──────────────────────────────────────────────
   - from: STRING
     to: BOOL
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::boolean"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} NOT IN ('t','f','true','false','yes','no','y','n','1','0','TRUE','FALSE','Yes','No','Y','N','True','False') LIMIT 1"
-    rationale: "PG's boolean parser accepts a specific token set; rows with other text error at apply."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} NOT IN ('0', '1') LIMIT 1"
+    rationale: "Strict compatibility: only '0' and '1' accepted. Other boolean-like strings ('true', 'yes', 't') — author converts via DQL/SQL first; compiler does no semantic guess."
   - from: STRING
     to: INT32
     strategy: NEEDS_CONFIRM
@@ -83,27 +83,27 @@ cells:
     to: TIMESTAMP
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::timestamptz"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} !~ '^\\d{4}-\\d{2}-\\d{2}' LIMIT 1"
-    rationale: "PG's timestamp parser is permissive; coarse ISO-8601 guard catches clearly-broken rows."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})?$' LIMIT 1"
+    rationale: "Strict ISO-8601 date+time-of-day required. Other timestamp-looking strings — author normalises via DQL first."
   - from: STRING
     to: DURATION
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::interval"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} !~ '[0-9]' LIMIT 1"
-    rationale: "Interval parser very permissive; coarse digit-presence guard."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NOT NULL AND {{.Col}} !~ '^P([0-9]+Y)?([0-9]+M)?([0-9]+D)?(T([0-9]+H)?([0-9]+M)?([0-9]+S)?)?$' LIMIT 1"
+    rationale: "Strict ISO-8601 duration form required ('P1Y2M3DT4H5M6S'). PG's native '1 day 02:03:04' form — author normalises first."
   - from: STRING
     to: BYTES
     strategy: NEEDS_CONFIRM
-    using: "decode({{.Col}}, 'hex')"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} !~ '^[0-9a-fA-F]*$' LIMIT 1"
-    rationale: "Default assumption: hex-encoded. Author picks different encoding via --decide encoding=escape|utf8."
+    using: "decode({{.Col}}, '{{.Project.Encoding}}')"
+    rationale: "Encoding from project config (w17.yaml Project.Encoding). Check.sql synthesised per-encoding by classifier (hex → [0-9a-fA-F], utf8 → convert_from round-trip, escape → always passes)."
 
   # ── From INT32 ───────────────────────────────────────────────
   - from: INT32
     to: BOOL
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::boolean"
-    rationale: "PG: 0=false, nonzero=true. Ambiguous when author uses -1 as sentinel; --decide bool_semantics=zero_is_false (default) | nonzero_is_true."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} NOT IN (0, 1) LIMIT 1"
+    rationale: "Strict compatibility: only 0 and 1 accepted. Sentinel values (-1 for 'unknown', 2/3/… for multi-state) — author writes DQL/CUSTOM_MIGRATION; compiler does no nonzero=true remap."
   - from: INT32
     to: STRING
     strategy: LOSSLESS_USING
@@ -120,26 +120,24 @@ cells:
     rationale: "INT32 max (~2.1e9) << 2^53; fits exactly in double."
   - from: INT32
     to: TIMESTAMP
-    strategy: NEEDS_CONFIRM
-    using: "to_timestamp({{.Col}})"
-    rationale: "Epoch-seconds assumed; unit ambiguity (s vs ms vs μs) means user must confirm unit via --decide epoch_unit=s|ms|us."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Epoch unit (s / ms / μs / ns) is author's semantic choice; compiler doesn't guess. Author writes `to_timestamp(col * <factor>)` or equivalent."
   - from: INT32
     to: DURATION
-    strategy: NEEDS_CONFIRM
-    using: "make_interval(secs => {{.Col}})"
-    rationale: "Seconds assumed; unit choice via --decide."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Unit ambiguity; author writes `make_interval(secs => col)` / `(col * INTERVAL '1 ms')` per chosen unit."
   - from: INT32
     to: BYTES
-    strategy: NEEDS_CONFIRM
-    using: "int4send({{.Col}})"
-    rationale: "Big-endian wire bytes assumed; author may want endianness / byte-count override."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Endianness + byte-count (4-byte BE default exists, but LE / compact varint are valid too); author writes the encoder."
 
   # ── From INT64 ───────────────────────────────────────────────
   - from: INT64
     to: BOOL
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::boolean"
-    rationale: "Same as INT32→BOOL."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} NOT IN (0, 1) LIMIT 1"
+    rationale: "Same as INT32→BOOL: strict 0/1 compatibility."
   - from: INT64
     to: STRING
     strategy: LOSSLESS_USING
@@ -159,27 +157,24 @@ cells:
     rationale: "Above 2^53, doubles lose integer precision."
   - from: INT64
     to: TIMESTAMP
-    strategy: NEEDS_CONFIRM
-    using: "to_timestamp({{.Col}})"
-    rationale: "Unit ambiguity; same as INT32→TIMESTAMP."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as INT32→TIMESTAMP: epoch-unit ambiguity, author writes."
   - from: INT64
     to: DURATION
-    strategy: NEEDS_CONFIRM
-    using: "make_interval(secs => {{.Col}})"
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as INT32→DURATION."
   - from: INT64
     to: BYTES
-    strategy: NEEDS_CONFIRM
-    using: "int8send({{.Col}})"
-    rationale: "Same as INT32→BYTES with 8-byte width."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as INT32→BYTES: endianness + byte-count author-owned."
 
   # ── From DOUBLE ──────────────────────────────────────────────
   - from: DOUBLE
     to: BOOL
     strategy: NEEDS_CONFIRM
     using: "{{.Col}}::int::boolean"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} <> 0 AND {{.Col}} <> 1 LIMIT 1"
-    rationale: "Nonzero → true, but 0.5 / 2.3 / NaN are ambiguous; surface count of non-{0,1} rows."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} NOT IN (0, 1) LIMIT 1"
+    rationale: "Strict compatibility: only exact 0 or 1 accepted. Floats like 0.5, 2.3, NaN — author converts via DQL first."
   - from: DOUBLE
     to: STRING
     strategy: LOSSLESS_USING
@@ -199,25 +194,22 @@ cells:
     rationale: "Truncation only (INT64 range covers any finite double)."
   - from: DOUBLE
     to: TIMESTAMP
-    strategy: NEEDS_CONFIRM
-    using: "to_timestamp({{.Col}})"
-    rationale: "Epoch-seconds (fractional supported); unit ambiguity remains."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Epoch-unit + sub-second precision is author's choice; no default."
   - from: DOUBLE
     to: DURATION
-    strategy: NEEDS_CONFIRM
-    using: "make_interval(secs => {{.Col}}::int)"
-    rationale: "Truncates sub-second portion; author confirms."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Sub-second + unit ambiguity; author writes."
   - from: DOUBLE
     to: BYTES
-    strategy: NEEDS_CONFIRM
-    using: "float8send({{.Col}})"
-    rationale: "IEEE 754 wire bytes; endianness + NaN representation ambiguity."
+    strategy: CUSTOM_MIGRATION
+    rationale: "IEEE 754 wire format, endianness + NaN representation — author writes encoder."
 
   # ── From TIMESTAMP ───────────────────────────────────────────
   - from: TIMESTAMP
     to: BOOL
-    strategy: DROP_AND_CREATE
-    rationale: "No sensible cast; schema-correction intent assumed."
+    strategy: CUSTOM_MIGRATION
+    rationale: "No sensible cast; author writes predicate (e.g. 'col > now() - interval '7d'') or opts into DROP_AND_CREATE."
   - from: TIMESTAMP
     to: STRING
     strategy: LOSSLESS_USING
@@ -225,35 +217,30 @@ cells:
     rationale: "ISO-8601 canonical; reversible via col::timestamptz."
   - from: TIMESTAMP
     to: INT32
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})::int"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE extract(epoch from {{.Col}}) > 2147483647 OR extract(epoch from {{.Col}}) < -2147483648 LIMIT 1"
-    rationale: "Y2038 overflow for INT32 seconds."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Epoch unit is author's semantic choice (s / ms / μs); no default. Author writes `extract(epoch from col)::int * <factor>` per chosen unit + overflow handling."
   - from: TIMESTAMP
     to: INT64
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})::bigint"
-    rationale: "Unit ambiguity (s / ms / μs); --decide epoch_unit."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as TIMESTAMP→INT32: unit ambiguity, author owns."
   - from: TIMESTAMP
     to: DOUBLE
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})"
-    rationale: "Precision loss below microseconds; fractional seconds preserved."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Unit + sub-second precision is author's choice."
   - from: TIMESTAMP
     to: DURATION
     strategy: CUSTOM_MIGRATION
     rationale: "Timestamp → interval requires a reference point (interval relative to what?); author writes the SQL that defines the reference."
   - from: TIMESTAMP
     to: BYTES
-    strategy: NEEDS_CONFIRM
-    using: "convert_to({{.Col}}::text, 'UTF8')"
-    rationale: "Text-form UTF-8 bytes; reversible if encoding preserved."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Encoding (text serialisation / binary timestamp / epoch-bytes) is author's choice."
 
   # ── From DURATION ────────────────────────────────────────────
   - from: DURATION
     to: BOOL
-    strategy: DROP_AND_CREATE
-    rationale: "No sensible cast."
+    strategy: CUSTOM_MIGRATION
+    rationale: "No sensible cast; author writes predicate or opts into DROP_AND_CREATE."
   - from: DURATION
     to: STRING
     strategy: LOSSLESS_USING
@@ -261,68 +248,64 @@ cells:
     rationale: "Canonical form ('1 day 02:03:04'); reversible."
   - from: DURATION
     to: INT32
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})::int"
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE extract(epoch from {{.Col}}) > 2147483647 LIMIT 1"
-    rationale: "Overflow for long intervals on INT32."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Unit ambiguity + overflow; author owns."
   - from: DURATION
     to: INT64
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})::bigint"
-    rationale: "Unit ambiguity."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Unit ambiguity; author owns."
   - from: DURATION
     to: DOUBLE
-    strategy: NEEDS_CONFIRM
-    using: "extract(epoch from {{.Col}})"
-    rationale: "Sub-second precision may be lost."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Unit + precision; author owns."
   - from: DURATION
     to: TIMESTAMP
     strategy: CUSTOM_MIGRATION
     rationale: "Interval → timestamp needs a reference point; same as TIMESTAMP→DURATION inverse."
   - from: DURATION
     to: BYTES
-    strategy: NEEDS_CONFIRM
-    using: "convert_to({{.Col}}::text, 'UTF8')"
-    rationale: "Text-form UTF-8 bytes."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Encoding (text form / binary / seconds-bytes) is author's choice."
 
   # ── From BYTES ───────────────────────────────────────────────
   - from: BYTES
     to: BOOL
-    strategy: NEEDS_CONFIRM
-    using: "get_byte({{.Col}}, 0) <> 0"
-    rationale: "First-byte nonzero = true; author may want different predicate via --decide."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Byte-level interpretation (first byte? any nonzero byte? specific header?) — author writes predicate."
   - from: BYTES
     to: STRING
     strategy: NEEDS_CONFIRM
-    using: "encode({{.Col}}, 'hex')"
-    rationale: "Default: hex encoding. Author chooses encode='escape'|'utf8' via --decide; UTF-8 decode may fail on non-text bytea."
+    using: "encode({{.Col}}, '{{.Project.Encoding}}')"
+    rationale: "Encoding from project config (w17.yaml Project.Encoding: hex / escape / utf8). Check.sql synthesised per-encoding by classifier (utf8 → convert_from round-trip; hex/escape always pass)."
   - from: BYTES
     to: INT32
-    strategy: NEEDS_CONFIRM
-    using: "('x' || right(encode({{.Col}}, 'hex'), 8))::bit(32)::int"
-    rationale: "First-4-bytes interpretation (big-endian); author may want little-endian or different byte count."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Endianness + byte-count interpretation author-owned."
   - from: BYTES
     to: INT64
-    strategy: NEEDS_CONFIRM
-    using: "('x' || right(encode({{.Col}}, 'hex'), 16))::bit(64)::bigint"
-    rationale: "Same as BYTES→INT32 with 8-byte width."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as BYTES→INT32."
   - from: BYTES
     to: DOUBLE
-    strategy: NEEDS_CONFIRM
-    using: "(custom decoder)"
-    rationale: "IEEE 754 reconstruction; author owns decoder choice."
+    strategy: CUSTOM_MIGRATION
+    rationale: "IEEE 754 reconstruction; author writes decoder."
   - from: BYTES
     to: TIMESTAMP
-    strategy: NEEDS_CONFIRM
-    using: "to_timestamp(('x' || right(encode({{.Col}}, 'hex'), 16))::bit(64)::bigint)"
-    rationale: "Epoch-seconds from 8-byte BE; unit ambiguity."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Byte-to-timestamp is format-specific; author writes."
   - from: BYTES
     to: DURATION
-    strategy: NEEDS_CONFIRM
-    using: "(custom decoder)"
+    strategy: CUSTOM_MIGRATION
     rationale: "Byte-level interpretation; author-defined."
 
   # ── Collection carriers — Grid B ─────────────────────────────
+  # Per user rule (types must be compatible; no silent coercion):
+  # every non-STRING projection from a collection carrier is
+  # CUSTOM_MIGRATION by default — the extraction rule is author's
+  # semantic choice. Author opts into DROP_AND_CREATE via
+  # `--decide col=drop_and_create` if they want fresh start
+  # instead of a custom extraction path.
+
   # MAP → *
   - from: MAP
     to: STRING
@@ -331,31 +314,31 @@ cells:
     rationale: "JSONB → canonical text serialisation; reversible via col::jsonb."
   - from: MAP
     to: BOOL
-    strategy: DROP_AND_CREATE
-    rationale: "No single-value projection from a map; schema-correction intent assumed."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Single-value projection from a map is author-defined (which key? fold?); compiler doesn't guess."
   - from: MAP
     to: INT32
-    strategy: DROP_AND_CREATE
-    rationale: "Same as MAP→BOOL."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as MAP→BOOL: projection rule author-owned."
   - from: MAP
     to: INT64
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as MAP→BOOL."
   - from: MAP
     to: DOUBLE
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as MAP→BOOL."
   - from: MAP
     to: TIMESTAMP
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as MAP→BOOL."
   - from: MAP
     to: DURATION
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as MAP→BOOL."
   - from: MAP
     to: BYTES
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same as MAP→BOOL."
   - from: MAP
     to: LIST
@@ -374,31 +357,31 @@ cells:
     rationale: "JSONB array → canonical text."
   - from: LIST
     to: BOOL
-    strategy: DROP_AND_CREATE
-    rationale: "No sensible projection."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Single-value projection (first? any? all?) is author's choice."
   - from: LIST
     to: INT32
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as LIST→BOOL."
   - from: LIST
     to: INT64
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: LIST
     to: DOUBLE
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: LIST
     to: TIMESTAMP
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: LIST
     to: DURATION
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: LIST
     to: BYTES
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: LIST
     to: MAP
@@ -414,34 +397,34 @@ cells:
     to: STRING
     strategy: LOSSLESS_USING
     using: "{{.Col}}::text"
-    rationale: "JSONB object → canonical text. NOTE: bytes-backed MESSAGE (custom_type escape) is opaque; falls through to DROP_AND_CREATE per A12."
+    rationale: "JSONB object → canonical text. NOTE: bytes-backed MESSAGE (custom_type escape) is opaque; falls through to CUSTOM_MIGRATION per A12."
   - from: MESSAGE
     to: BOOL
-    strategy: DROP_AND_CREATE
-    rationale: "No canonical single-value projection."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Single-value projection (which field?) is author's choice."
   - from: MESSAGE
     to: INT32
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Same as MESSAGE→BOOL."
   - from: MESSAGE
     to: INT64
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: MESSAGE
     to: DOUBLE
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: MESSAGE
     to: TIMESTAMP
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: MESSAGE
     to: DURATION
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: MESSAGE
     to: BYTES
-    strategy: DROP_AND_CREATE
+    strategy: CUSTOM_MIGRATION
     rationale: "Same."
   - from: MESSAGE
     to: MAP
@@ -452,100 +435,104 @@ cells:
     strategy: CUSTOM_MIGRATION
     rationale: "Field values in declaration order; author owns projection."
 
-  # scalar → collection (rare, reshape)
+  # scalar → collection (reshape)
+  # Wrapping a scalar into a collection is an author-intent choice
+  # (single-element list? object with what key?); classifier won't
+  # guess. Author supplies the wrap SQL via CUSTOM_MIGRATION, or
+  # opts into DROP_AND_CREATE via --decide if data-loss is fine.
   - from: BOOL
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Wrapping a scalar into a collection is ambiguous; default assumption: schema correction, accept data loss."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap SQL (e.g. `jsonb_build_object('value', {{.Col}})`)."
   - from: BOOL
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same as BOOL→MAP."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap SQL (e.g. `jsonb_build_array({{.Col}})`)."
   - from: BOOL
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same as BOOL→MAP."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author picks which field of the message receives the scalar."
   - from: STRING
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same as BOOL→MAP. Note: if rows happen to be JSON-encoded strings, author overrides to CUSTOM_MIGRATION + col::jsonb."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap. If rows are already JSON-text, `{{.Col}}::jsonb` suffices; classifier can't know without inspection."
   - from: STRING
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: STRING
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT32
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same as BOOL→MAP."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT32
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT32
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT64
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT64
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: INT64
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DOUBLE
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DOUBLE
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DOUBLE
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: TIMESTAMP
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: TIMESTAMP
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: TIMESTAMP
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DURATION
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DURATION
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: DURATION
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: BYTES
     to: MAP
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: BYTES
     to: LIST
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."
   - from: BYTES
     to: MESSAGE
-    strategy: DROP_AND_CREATE
-    rationale: "Same."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Author writes wrap."

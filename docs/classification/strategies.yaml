@@ -16,6 +16,31 @@
 # DROP_AND_CREATE (when the natural intent is "accept data loss") or
 # CUSTOM_MIGRATION (when the natural intent is "preserve data via
 # custom SQL"). See iteration-2.md D28 header for the full rationale.
+#
+# Governing rule for cell assignment (2026-04-23, user):
+#   "Types must be compatible; no silent coercion. If source data
+#    isn't already in the target's canonical form, author writes
+#    the conversion via DQL/CUSTOM_MIGRATION — compiler never
+#    guesses unit, encoding, or semantic intent."
+#
+# Practical consequences in the matrix:
+#   - STRING→BOOL accepts only literal '0' / '1'; NOT 'true'/'yes'/etc.
+#   - INT→BOOL accepts only 0 / 1; NOT nonzero=true remap.
+#   - TIMESTAMP↔INT, DURATION↔INT = CUSTOM_MIGRATION (unit ambiguity).
+#   - BYTES↔non-string scalar = CUSTOM_MIGRATION (custom decoder).
+#   - Collection→non-STRING scalar = CUSTOM_MIGRATION (data extraction).
+#   - BYTES↔STRING encoding = project-level config
+#     ({{.Project.Encoding}}); NOT per-column --decide.
+
+# Template context namespaces (Go text/template):
+#   {{.Table}}, {{.Col}}            — common to every cell
+#   {{.NewMaxLen}}, {{.NewPrecision}}, {{.NewScale}}
+#                                    — target numeric/string bounds
+#   {{.NewRegex}}                    — derived from allowed_extensions
+#   {{.FK.Parent}}, {{.FK.PkCol}}    — FK add target
+#   {{.CheckPredicate}}              — structured CHECK predicate
+#   {{.Project.Encoding}}            — project-level BYTES ↔ STRING encoding
+#                                      (hex / escape / utf8), set in w17.yaml
 
 strategies:
   - id: SAFE

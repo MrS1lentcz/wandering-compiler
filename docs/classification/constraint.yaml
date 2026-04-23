@@ -63,9 +63,8 @@ cells:
   - axis: default
     case: identity_add
     description: "off → AUTO_IDENTITY on existing INTEGER/BIGINT column"
-    strategy: NEEDS_CONFIRM
-    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IS NULL LIMIT 1"
-    rationale: "Adding GENERATED … AS IDENTITY on an existing column requires a fresh sequence seeded above MAX(col). Differ emits `ADD GENERATED ALWAYS AS IDENTITY (RESTART WITH (SELECT COALESCE(MAX({{.Col}}),0)+1 FROM {{.Table}}))`. Check.sql confirms no NULL rows (IDENTITY columns are NOT NULL). High-write prod may need `--decide identity=custom` with explicit LOCK TABLE prefix."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Adding GENERATED … AS IDENTITY on an existing column has a race window: classifier can't emit `RESTART WITH (SELECT MAX(col)+1)` safely without a LOCK TABLE wrapper, and the right wrapper depends on the project's write-load profile + deployment strategy. Author writes the full migration block (LOCK + seed + ADD IDENTITY). For dev/skeleton projects the author may opt into NEEDS_CONFIRM-style auto-seed via --decide identity=auto_seed; classifier default stays conservative."
 
   - axis: default
     case: identity_drop
@@ -243,8 +242,8 @@ cells:
   - axis: enum_values
     case: fqn_change
     description: "enum_fqn \"pkg.A\" → \"pkg.B\""
-    strategy: DROP_AND_CREATE
-    rationale: "Different enum entirely. Default = fresh start. CUSTOM_MIGRATION to remap old values."
+    strategy: CUSTOM_MIGRATION
+    rationale: "Different enum entirely — types not compatible. Author writes remap (old value → new value) or opts into DROP_AND_CREATE via --decide if fresh start is intended."
 
   # ── A11 pg.required_extensions ───────────────────────────────
   - axis: pg_required_extensions
@@ -343,10 +342,18 @@ table_level:
     rationale: "Pure on_delete change: ALTER CONSTRAINT."
 
   - axis: check_add
-    case: any
+    case: structured
+    description: "Add Length / Blank / Range / Regex / Choices check (iter-1 structured variants; predicate derivable)"
     strategy: NEEDS_CONFIRM
     check_sql: "SELECT count(*) FROM {{.Table}} WHERE NOT ({{.CheckPredicate}}) LIMIT 1"
-    rationale: "ADD CONSTRAINT CHECK validates existing rows; surface count of rows that would fail."
+    rationale: "Classifier renders CheckPredicate from the variant's fields (same logic the iter-1 emitter uses for CREATE TABLE inline CHECKs)."
+
+  - axis: check_add
+    case: raw
+    description: "Add raw_check (D11 opaque body)"
+    strategy: NEEDS_CONFIRM
+    check_sql: "-- raw_check body is opaque; reviewer must hand-validate against live data"
+    rationale: "Raw body is authored SQL; classifier can't synthesise a negation check. Emits a stub comment so deploy client / platform UI surfaces the manual-review requirement."
 
   - axis: check_drop
     case: any

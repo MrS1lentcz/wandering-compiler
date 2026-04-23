@@ -231,15 +231,17 @@ cells:
   - family: DOUBLE
     from: REAL
     to: NUMERIC
-    strategy: LOSSLESS_USING
+    strategy: NEEDS_CONFIRM
     using: "{{.Col}}::numeric"
-    rationale: "Fits."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IN ('NaN'::real, 'Infinity'::real, '-Infinity'::real) LIMIT 1"
+    rationale: "Finite REAL always fits NUMERIC (arbitrary precision), but NaN / ±Infinity aren't representable in NUMERIC — cast errors at apply. Check.sql surfaces those rows."
   - family: DOUBLE
     from: DOUBLE_PRECISION
     to: NUMERIC
-    strategy: LOSSLESS_USING
+    strategy: NEEDS_CONFIRM
     using: "{{.Col}}::numeric"
-    rationale: "Fits within NUMERIC precision window; NUMERIC is arbitrary-precision."
+    check_sql: "SELECT count(*) FROM {{.Table}} WHERE {{.Col}} IN ('NaN'::double precision, 'Infinity'::double precision, '-Infinity'::double precision) LIMIT 1"
+    rationale: "Same as REAL→NUMERIC; NaN / ±Infinity guard."
   - family: DOUBLE
     from: NUMERIC
     to: REAL

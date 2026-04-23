@@ -812,6 +812,34 @@ moves). Every prior REFUSE cell collapses to either DROP_AND_CREATE
 markdown tables below and the `carrier.yaml` file already carry
 the reclassification; other YAML files migrate next turn.
 
+**Governing rule (2026-04-23, user):**
+> "Types must be compatible; no silent coercion. If source data
+> isn't already in the target's canonical form, author writes the
+> conversion via DQL/CUSTOM_MIGRATION — compiler never guesses
+> unit, encoding, or semantic intent."
+
+Practical consequences pinned in all three YAMLs:
+- **Strict compatibility checks.** STRING→BOOL accepts only `'0'` /
+  `'1'`; INT→BOOL accepts only `0` / `1`. No `'true'`/`'yes'`/`t`
+  parsing; no "nonzero = true" remap.
+- **Unit-ambiguous casts → CUSTOM_MIGRATION.** TIMESTAMP↔INT,
+  DURATION↔INT, BYTES↔non-string-scalar all default to the author
+  writing SQL. Compiler refuses to pick s/ms/μs or BE/LE.
+- **Encoding is project-level.** BYTES↔STRING uses
+  `{{.Project.Encoding}}` (from `w17.yaml`), never per-column
+  `--decide`.
+- **DROP_AND_CREATE is user-opt-in only.** The classifier never
+  defaults to D except where PG semantics mandate it (A7
+  generated_expr add/change: generated columns are value-rewriting
+  by definition). User opts into D via `--decide
+  col=drop_and_create` when accepting data loss is fine.
+
+Post-rule counts: `carrier.yaml` 1 S / 13 U / 16 N / 0 D / 80 C;
+`constraint.yaml` 27 S / 0 U / 20 N / 2 D / 8 C; `dbtype.yaml` 6 S /
+20 U / 24 N / 0 D / 0 C. (CUSTOM_MIGRATION dominates `carrier.yaml`
+because most cross-carrier transitions are unit/semantic-ambiguous
+by the rule.)
+
 **Decision plumbing (D29-aware):**
 
 - Standalone mode: CLI flags `--decide users.email=using` or
@@ -870,17 +898,35 @@ D28 is the foundation of an exhaustive table-driven test matrix:
 
 **Open questions:**
 
-- Should NEEDS_CONFIRM auto-generate check.sql even without user
-  decision, so reviewer can preview risk? (Lean: yes.)
-- DROP_AND_CREATE proto-side semantics — does it require a new
-  proto field number + reserved old, or is it acceptable as-is
-  with a force flag in the decision? (Lean: force flag with
-  reserved-number warning, since reserved-number requirement is
-  proto convention not enforceable in compiler.)
-- CUSTOM_MIGRATION location — inline in proto as
-  `(w17.db.column).migration_custom_sql` or external in
-  decisions YAML? (Lean: decisions YAML; proto is point-in-time-
-  decision-free.)
+- ~~Should NEEDS_CONFIRM auto-generate check.sql even without user
+  decision, so reviewer can preview risk?~~ — **deferred 2026-04-23**
+  per user: "migration file + check.sql storage location is not
+  yet decided." Revisit when platform (D29) + deploy-client
+  contract firms up.
+- **DROP_AND_CREATE proto-side semantics** — two workflows co-exist
+  for a type change on an existing column:
+    1. **Keep the proto field number, change the type.** D10 sees
+       the number stable, matrix activates, classifier proposes
+       DROP_AND_CREATE. Author confirms via `--decide`. Compiler
+       emits `DROP COLUMN + ADD COLUMN`. **Side effect:** proto
+       wire compatibility breaks (old readers see incompatible
+       type for the kept field number).
+    2. **Renumber the proto field + reserve the old number.**
+       D10 sees old number missing + new number present ⇒ plain
+       `DropColumn` + `AddColumn` without matrix involvement.
+       No `--decide` needed. Proto wire stays clean (old readers
+       see unknown field).
+  Workflow 1 is faster; workflow 2 is safer. Compiler stance?
+  Options: (a) refuse workflow 1 entirely; (b) allow with loud
+  `diag.Warning`; (c) allow silently behind `--decide`. **Lean:
+  (b) — warn but don't block; author's proto-wire discipline is
+  their call.**
+- ~~CUSTOM_MIGRATION location — inline in proto or external in
+  decisions YAML?~~ — **resolved 2026-04-23** (user): custom SQL
+  lives only in CLI-passed file or platform UI; never in proto,
+  never in git-tracked decisions file. Proto is point-in-time-
+  decision-free (matches D29 "decisions live in the tool, not
+  in git").
 
 ### D28.1 — Classification matrix: column-constraint axes (added 2026-04-23)
 
@@ -1110,14 +1156,14 @@ Excludes MAP / LIST / MESSAGE (collection carriers covered in Grid B).
 
 | from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES |
 |---|---|---|---|---|---|---|---|---|
-| **BOOL** | — | U | U | U | U | D | D | N |
+| **BOOL** | — | U | U | U | U | C | C | N |
 | **STRING** | N | — | N | N | N | N | N | N |
-| **INT32** | N | U | — | S | U | N | N | N |
-| **INT64** | N | U | N | — | N | N | N | N |
-| **DOUBLE** | N | U | N | N | — | N | N | N |
-| **TIMESTAMP** | D | U | N | N | N | — | C | N |
-| **DURATION** | D | U | N | N | N | C | — | N |
-| **BYTES** | N | N | N | N | N | N | N | — |
+| **INT32** | N | U | — | S | U | C | C | C |
+| **INT64** | N | U | N | — | N | C | C | C |
+| **DOUBLE** | N | U | N | N | — | C | C | C |
+| **TIMESTAMP** | C | U | C | C | C | — | C | C |
+| **DURATION** | C | U | C | C | C | C | — | C |
+| **BYTES** | C | N | C | C | C | C | C | — |
 
 #### Grid A cell details
 
@@ -1172,16 +1218,16 @@ derivable from schema alone.
 
 | from\to | BOOL | STRING | INT32 | INT64 | DOUBLE | TIMESTAMP | DURATION | BYTES | MAP | LIST | MESSAGE |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| **MAP** | D | U | D | D | D | D | D | D | — | C | C |
-| **LIST** | D | U | D | D | D | D | D | D | C | — | C |
-| **MESSAGE** | D | U | D | D | D | D | D | D | C | C | — |
+| **MAP** | C | U | C | C | C | C | C | C | — | C | C |
+| **LIST** | C | U | C | C | C | C | C | C | C | — | C |
+| **MESSAGE** | C | U | C | C | C | C | C | C | C | C | — |
 
-Scalar → collection rows (all `D` by default; override to `C` if
-author wants to wrap existing values via custom SQL):
+Scalar → collection rows (all `C` by default — wrapping is author's
+choice; override to `D` via `--decide` if fresh start is fine):
 
 | from\to | MAP | LIST | MESSAGE |
 |---|---|---|---|
-| **BOOL / STRING / INT32 / INT64 / DOUBLE / TIMESTAMP / DURATION / BYTES** | D | D | D |
+| **BOOL / STRING / INT32 / INT64 / DOUBLE / TIMESTAMP / DURATION / BYTES** | C | C | C |
 
 | From | To | Cell | Expression | Rationale |
 |---|---|---|---|---|
@@ -1303,8 +1349,8 @@ Valid dbTypes: REAL, DOUBLE_PRECISION, NUMERIC.
 
 | from\to | REAL | DOUBLE_PRECISION | NUMERIC |
 |---|---|---|---|
-| **REAL** | — | S | U |
-| **DOUBLE_PRECISION** | N | — | U |
+| **REAL** | — | S | N |
+| **DOUBLE_PRECISION** | N | — | N |
 | **NUMERIC** | N | N | — |
 
 | From | To | Cell | check.sql | Rationale |
