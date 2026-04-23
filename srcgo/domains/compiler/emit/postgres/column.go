@@ -126,6 +126,8 @@ func columnType(tableName string, col *irpb.Column) (string, error) {
 		return columnTypeMap(col), nil
 	case irpb.Carrier_CARRIER_LIST:
 		return columnTypeList(col)
+	case irpb.Carrier_CARRIER_MESSAGE:
+		return columnTypeMessage(col), nil
 	}
 	return "", fmt.Errorf("no PG type mapping for carrier=%s type=%s (ir invariant violated)",
 		displayCarrier(col.GetCarrier()), displaySemType(col.GetType()))
@@ -252,6 +254,15 @@ func columnTypeMap(col *irpb.Column) string {
 	if !col.GetElementIsMessage() && col.GetElementCarrier() == irpb.Carrier_CARRIER_STRING {
 		return "HSTORE"
 	}
+	return "JSONB"
+}
+
+// columnTypeMessage maps a single proto Message carrier to JSONB by
+// default. db_type override to BYTEA activates the protobuf-binary
+// storage path (author serialises proto.Marshal bytes into the
+// column). JSONB default = queryable via PG JSON operators; BYTEA =
+// opaque but compact.
+func columnTypeMessage(col *irpb.Column) string {
 	return "JSONB"
 }
 

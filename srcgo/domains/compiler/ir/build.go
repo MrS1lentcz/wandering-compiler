@@ -584,7 +584,10 @@ func (b *builder) buildColumn(lf *loader.LoadedField) *irpb.Column {
 	b.validateDbType(col, carrier, lf)
 	b.validatePgCustomType(col, carrier, semType, lf)
 	b.validateGeneratedExpr(col, lf)
-	if lf.Field != nil && carrier != irpb.Carrier_CARRIER_MAP && carrier != irpb.Carrier_CARRIER_LIST {
+	if lf.Field != nil &&
+		carrier != irpb.Carrier_CARRIER_MAP &&
+		carrier != irpb.Carrier_CARRIER_LIST &&
+		carrier != irpb.Carrier_CARRIER_MESSAGE {
 		b.attachChecks(col, lf.Field, carrier, semType, lf.Desc)
 	}
 	return b.resolveAuxiliarySemTypes(col, lf, carrier, semType)
@@ -603,13 +606,17 @@ func (b *builder) initColumnFrame(lf *loader.LoadedField) (*irpb.Column, irpb.Ca
 			WithFix("change the field's proto type to one of the supported carriers, or drop the (w17.field) annotation if the field isn't a DB column"))
 		return nil, carrier, false
 	}
-	return &irpb.Column{
+	col := &irpb.Column{
 		Name:        protoName,
 		ProtoName:   protoName,
 		Location:    sourceLocation(desc),
 		FieldNumber: int32(desc.Number()),
 		Carrier:     carrier,
-	}, carrier, true
+	}
+	if carrier == irpb.Carrier_CARRIER_MESSAGE {
+		col.MessageFqn = string(desc.Message().FullName())
+	}
+	return col, carrier, true
 }
 
 // applyStorageOverrides pulls (w17.db.column) storage overrides — name,
@@ -880,6 +887,12 @@ func (b *builder) validateStringNumericOptions(carrier irpb.Carrier, semType irp
 			b.err(diag.Atf(desc, "field %q: min_len / blank / pattern / choices are not supported on %s carrier", protoName, displayCarrier(carrier)).
 				WithWhy("PG CHECK constraints can't iterate over array / map elements — there's no `forall element` operator without a subquery. Per-element validation needs triggers or application-level checks; raw_checks can spell a whole-column CHECK if that suffices").
 				WithFix("drop the string-only option, or move the check to (w17.db.table).raw_checks with a PG-specific body (e.g. cardinality() <= N)"))
+		}
+	case carrier == irpb.Carrier_CARRIER_MESSAGE:
+		if fieldOpt.MinLen != nil || fieldOpt.GetBlank() || fieldOpt.GetPattern() != "" || fieldOpt.GetChoices() != "" {
+			b.err(diag.Atf(desc, "field %q: min_len / blank / pattern / choices are not supported on message carrier", protoName).
+				WithWhy("single Message fields serialise whole — per-field string / numeric CHECKs don't apply to the opaque payload. JSON-shape validation is iter-3+ backlog; raw_checks can spell whole-column JSON operators today").
+				WithFix("drop the scalar-only option, or use raw_checks with a PG JSON operator (e.g. `(col->>'status') IN ('DRAFT','PUBLISHED')`)"))
 		}
 	case carrier != irpb.Carrier_CARRIER_STRING:
 		if fieldOpt.MinLen != nil {
@@ -1679,6 +1692,10 @@ func protoKindToScalarCarrier(fd protoreflect.FieldDescriptor) (irpb.Carrier, bo
 		case "google.protobuf.Duration":
 			return irpb.Carrier_CARRIER_DURATION, true
 		}
+		// Any other single Message field — serialised whole as JSONB
+		// (default) or BYTEA when (w17.db.column).db_type overrides.
+		// Column.MessageFqn carries the proto FQN.
+		return irpb.Carrier_CARRIER_MESSAGE, true
 	}
 	return irpb.Carrier_CARRIER_UNSPECIFIED, false
 }
@@ -1734,7 +1751,7 @@ func defaultSemTypeFor(carrier irpb.Carrier) irpb.SemType {
 		return irpb.SemType_SEM_DATETIME
 	case irpb.Carrier_CARRIER_DURATION:
 		return irpb.SemType_SEM_INTERVAL
-	case irpb.Carrier_CARRIER_MAP, irpb.Carrier_CARRIER_LIST:
+	case irpb.Carrier_CARRIER_MAP, irpb.Carrier_CARRIER_LIST, irpb.Carrier_CARRIER_MESSAGE:
 		return irpb.SemType_SEM_AUTO
 	}
 	return irpb.SemType_SEM_UNSPECIFIED
@@ -1926,6 +1943,17 @@ func validateCarrierSemType(desc protoreflect.FieldDescriptor, carrier irpb.Carr
 		// the default; anything else must be valid on the element carrier.
 		// Checked in a dedicated pass that sees element_carrier — the
 		// generic carrier×sem matrix below can't reach into elements.
+	case irpb.Carrier_CARRIER_MESSAGE:
+		// Single proto message field. AUTO (or unset → AUTO) is the
+		// default; storage dispatches to JSONB (default) or BYTEA
+		// (db_type override). No further refinement on the sem axis
+		// in iter-2 — iter-3+ can add SEM_JSON_SCHEMA_VALIDATED or
+		// similar without reshaping the carrier check.
+		if sem != irpb.SemType_SEM_UNSPECIFIED && sem != irpb.SemType_SEM_AUTO {
+			return diag.Atf(desc, "field %q: message carrier does not accept type %s", name, displaySemType(sem)).
+				WithWhy("single Message fields serialise whole — sem-type refinements (CHAR / UUID / MONEY / …) only apply to scalar carriers; JSON-vs-bytes storage picks via (w17.db.column).db_type").
+				WithFix("drop type: from (w17.field), or explicitly set type: AUTO; use (w17.db.column).db_type = BYTEA if you want protobuf binary storage")
+		}
 	}
 	return nil
 }
@@ -2321,7 +2349,7 @@ func dbTypeCompatibleWithCarrier(dbType irpb.DbType, carrier irpb.Carrier) bool 
 		irpb.DbType_DBT_TSVECTOR, irpb.DbType_DBT_UUID:
 		return carrier == irpb.Carrier_CARRIER_STRING
 	case irpb.DbType_DBT_JSON, irpb.DbType_DBT_JSONB, irpb.DbType_DBT_HSTORE:
-		return carrier == irpb.Carrier_CARRIER_STRING || carrier == irpb.Carrier_CARRIER_BYTES
+		return carrier == irpb.Carrier_CARRIER_STRING || carrier == irpb.Carrier_CARRIER_BYTES || carrier == irpb.Carrier_CARRIER_MESSAGE
 	case irpb.DbType_DBT_SMALLINT, irpb.DbType_DBT_INTEGER, irpb.DbType_DBT_BIGINT:
 		return carrier == irpb.Carrier_CARRIER_INT32 || carrier == irpb.Carrier_CARRIER_INT64
 	case irpb.DbType_DBT_REAL, irpb.DbType_DBT_DOUBLE_PRECISION:
@@ -2333,7 +2361,9 @@ func dbTypeCompatibleWithCarrier(dbType irpb.DbType, carrier irpb.Carrier) bool 
 	case irpb.DbType_DBT_INTERVAL:
 		return carrier == irpb.Carrier_CARRIER_DURATION
 	case irpb.DbType_DBT_BYTEA, irpb.DbType_DBT_BLOB:
-		return carrier == irpb.Carrier_CARRIER_BYTES
+		// BYTEA accepts bytes carrier AND message carrier — the latter
+		// is the PbBytes path where the author serialises proto bytes.
+		return carrier == irpb.Carrier_CARRIER_BYTES || carrier == irpb.Carrier_CARRIER_MESSAGE
 	case irpb.DbType_DBT_BOOLEAN:
 		return carrier == irpb.Carrier_CARRIER_BOOL
 	}

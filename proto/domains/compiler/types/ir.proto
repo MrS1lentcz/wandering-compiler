@@ -216,6 +216,13 @@ message Column {
   // --verbose output. Empty on non-path sem types. `["*"]` is kept
   // verbatim to document "any extension allowed" intent.
   repeated string allowed_extensions = 41;
+
+  // FQN of the proto Message type on CARRIER_MESSAGE columns. Empty
+  // for every other carrier. Downstream consumers (admin-gen, alter-
+  // diff forward-compat visualisation, JSON Schema derivation) read
+  // this to reconstruct the nested shape without reloading the proto
+  // source.
+  string message_fqn = 42;
 }
 
 // PgOptions mirrors (w17.pg.field). Curated jsonb / inet / tsvector / hstore
@@ -368,6 +375,14 @@ enum Carrier {
   // For repeated scalars, (w17.field).type on the field refines the
   // ELEMENT's sem type (e.g. `repeated string [type: URL]`).
   CARRIER_LIST = 10;
+  // Single proto Message field (non-Timestamp/Duration). The message
+  // is serialised whole — either as JSON(B) text (queryable, default)
+  // or as protobuf bytes via `db_type: BYTEA` override. message_fqn
+  // on Column carries the proto FQN for downstream tooling
+  // (admin-gen, JSON Schema derivation, alter-diff forward-compat
+  // visualisation). Storage: PG → JSONB by default / BYTEA when
+  // db_type overrides; MySQL → JSON / BLOB; SQLite → TEXT / BLOB.
+  CARRIER_MESSAGE = 11;
 }
 
 // SemType is the semantic refinement of a Carrier.

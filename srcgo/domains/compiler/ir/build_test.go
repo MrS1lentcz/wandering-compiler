@@ -1003,17 +1003,6 @@ func TestBuildErrors(t *testing.T) {
 			},
 		},
 		{
-			name:    "bare Message carrier rejected",
-			fixture: "testdata/errors/unsupported_carrier_bare_message.proto",
-			wants: []string{
-				`unsupported_carrier_bare_message.proto:`,
-				`field "inner"`,
-				`is not supported in iteration-1`,
-				`why:`,
-				`fix:`,
-			},
-		},
-		{
 			name:    "uint32 carrier rejected",
 			fixture: "testdata/errors/unsupported_carrier_uint32.proto",
 			wants: []string{

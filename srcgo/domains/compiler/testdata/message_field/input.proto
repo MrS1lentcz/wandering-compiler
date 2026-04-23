@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package ir.message_field;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Single-message carrier coverage: default JSONB storage for one
+// message field + BYTEA override (PbBytes path) for another. Both
+// are opaque whole-message serialisation; compiler carries the
+// FQN on Column.message_fqn for downstream tooling.
+
+message Address {
+  string street  = 1;
+  string city    = 2;
+  string country = 3;
+}
+
+message Metadata {
+  string key   = 1;
+  string value = 2;
+}
+
+message User {
+  option (w17.db.table) = { name: "users" };
+
+  int64    id           = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  // Default JSONB — queryable via PG JSON operators.
+  Address  address      = 2;
+  // PbBytes path — author serialises proto.Marshal bytes; compiler
+  // emits BYTEA column. Opaque binary storage, compact, not
+  // queryable at the column level.
+  Metadata pb_meta      = 3 [(w17.db.column) = { db_type: BYTEA }];
+  // Nullable message field.
+  Address  billing_addr = 4 [(w17.field) = { null: true }];
+}
