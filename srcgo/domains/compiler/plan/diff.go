@@ -22,19 +22,52 @@
 package plan
 
 import (
-	"errors"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/classifier"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
+// DiffResult carries the differ's output: the structural MigrationPlan
+// (Ops that compose the migration) plus any ReviewFindings — decision
+// points the classifier couldn't auto-resolve (carrier changes, PK
+// flips, custom_type swaps, enum FQN changes, enum value removal,
+// element-carrier reshape). Findings don't block Diff itself; the
+// caller's policy (engine.Plan + ResolutionSource) decides whether
+// they gate downstream emit.
+//
+// A Finding's axis-related Op is *omitted* from Plan. Emit never sees
+// an Op whose decision is pending. Resolved findings splice their
+// effect back in at the engine.Plan layer (step 6).
+type DiffResult struct {
+	Plan     *planpb.MigrationPlan
+	Findings []*planpb.ReviewFinding
+}
+
+// GetOps proxies to the embedded MigrationPlan so callers that only
+// care about the Op stream can read it directly without unwrapping.
+// Nil-safe: a nil DiffResult returns nil.
+func (r *DiffResult) GetOps() []*planpb.Op {
+	if r == nil {
+		return nil
+	}
+	return r.Plan.GetOps()
+}
+
 // Diff computes the migration plan from prev → curr. Both inputs may be
 // nil: nil prev = initial migration (every curr table emits AddTable),
 // nil curr = full teardown (every prev table emits DropTable).
+//
+// When `cls` is non-nil, axes that would have produced a REFUSE error
+// now emit a ReviewFinding instead (the classifier determines strategy +
+// rationale). When `cls` is nil, REFUSE axes fall back to today's plain
+// errors — useful for tests that haven't wired a classifier.
 //
 // Op order:
 //  1. Drops first: DropTable in reverse FK-topological order (referencer
@@ -44,7 +77,7 @@ import (
 //     referencer; iter-1's invariant).
 //  3. Carried-over-table fact changes (table-level + column + index +
 //     FK + check) — wired iteration-by-iteration as the M1 build progresses.
-func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
+func Diff(prev, curr *irpb.Schema, cls *classifier.Classifier) (*DiffResult, error) {
 	prevTables := tablesOf(prev)
 	currTables := tablesOf(curr)
 
@@ -107,18 +140,25 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 		ops = append(ops, columnRenames(pair)...)
 	}
 	// AlterColumn after rename — the alter ctx uses the post-rename
-	// name. REFUSE-strategy fact changes propagate as errors.
+	// name. When a classifier is injected, decision-requiring fact
+	// changes (carrier/pk/custom_type/enum-fqn/enum-remove/element)
+	// surface as ReviewFindings and the matching Op is *omitted*; the
+	// engine layer (step 6) decides whether to splice it back post-
+	// Resolution. When classifier is nil, those axes preserve today's
+	// plain-error behaviour for tests that haven't wired one.
 	var alterErrs []error
+	var findings []*planpb.ReviewFinding
 	for _, pair := range both {
-		alters, err := columnAlters(pair)
+		alters, fs, err := columnAlters(pair, cls)
 		if err != nil {
 			alterErrs = append(alterErrs, err)
 			continue
 		}
 		ops = append(ops, alters...)
+		findings = append(findings, fs...)
 	}
 	if len(alterErrs) > 0 {
-		return nil, fmt.Errorf("plan: column-alter refusals: %w", errors.Join(alterErrs...))
+		return nil, fmt.Errorf("plan: column-alter: %w", joinErrs(alterErrs))
 	}
 	// Index drops + replaces + adds. Indexes can reference columns
 	// added in this same migration (column adds emitted earlier),
@@ -150,7 +190,126 @@ func Diff(prev, curr *irpb.Schema) (*planpb.MigrationPlan, error) {
 	// Namespace move + AlterColumn + FK / CHECK diffs land in
 	// subsequent commits.
 
-	return &planpb.MigrationPlan{Ops: ops}, nil
+	return &DiffResult{
+		Plan:     &planpb.MigrationPlan{Ops: ops},
+		Findings: findings,
+	}, nil
+}
+
+// joinErrs merges a slice of errors into one, using errors.Join
+// semantics. Extracted so the Diff body stays tight and testable.
+func joinErrs(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	if len(errs) == 1 {
+		return errs[0]
+	}
+	// Go 1.20+ errors.Join preserves individual error chains.
+	out := errs[0]
+	for _, e := range errs[1:] {
+		out = fmt.Errorf("%w; %v", out, e)
+	}
+	return out
+}
+
+// buildColumnFinding constructs a ReviewFinding for a decision-required
+// column axis. ID is a deterministic sha256 of (message FQN, axis,
+// prev wire, curr wire) so resolutions survive re-runs idempotently
+// per D30. Severity = BLOCK by default (DROP_AND_CREATE + CUSTOM_MIGRATION
+// always need explicit user opt-in). Options list mirrors the cell's
+// proposed strategy plus the always-available DROP_AND_CREATE /
+// CUSTOM_MIGRATION escape hatches.
+func buildColumnFinding(table *irpb.Table, prev, curr *irpb.Column, axis string, cell classifier.Cell) *planpb.ReviewFinding {
+	id := findingID(table.GetMessageFqn(), axis, prev, curr)
+	severity := planpb.Severity_BLOCK
+	// Proposed strategy = what classifier says; Options includes all
+	// user-selectable strategies (proposed + universal opt-ins).
+	options := []planpb.Strategy{cell.Strategy}
+	switch cell.Strategy {
+	case planpb.Strategy_CUSTOM_MIGRATION:
+		options = append(options, planpb.Strategy_DROP_AND_CREATE)
+	case planpb.Strategy_DROP_AND_CREATE:
+		options = append(options, planpb.Strategy_CUSTOM_MIGRATION)
+	default:
+		options = append(options,
+			planpb.Strategy_DROP_AND_CREATE,
+			planpb.Strategy_CUSTOM_MIGRATION,
+		)
+	}
+	return &planpb.ReviewFinding{
+		Id: id,
+		Column: &planpb.ColumnRef{
+			TableFqn:    table.GetMessageFqn(),
+			TableName:   table.GetName(),
+			FieldNumber: curr.GetFieldNumber(),
+			ColumnName:  curr.GetName(),
+		},
+		Axis:      axis,
+		Proposed:  cell.Strategy,
+		Options:   options,
+		Rationale: cell.Rationale,
+		Severity:  severity,
+		Context: &planpb.FindingContext{
+			Kind: &planpb.FindingContext_Column{
+				Column: &planpb.ColumnContext{Prev: prev, Curr: curr},
+			},
+			PrevSummary: columnSummary(prev),
+			CurrSummary: columnSummary(curr),
+		},
+	}
+}
+
+// findingID — deterministic hash of (message FQN, axis, prev wire,
+// curr wire). Same inputs → same ID; lets resolutions survive
+// re-runs (D30 idempotence rule).
+func findingID(msgFqn, axis string, prev, curr *irpb.Column) string {
+	h := sha256.New()
+	h.Write([]byte(msgFqn))
+	h.Write([]byte{0})
+	h.Write([]byte(axis))
+	h.Write([]byte{0})
+	if prevBytes, err := proto.Marshal(prev); err == nil {
+		h.Write(prevBytes)
+	}
+	h.Write([]byte{0})
+	if currBytes, err := proto.Marshal(curr); err == nil {
+		h.Write(currBytes)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// columnSummary produces a one-liner humans can read in ReviewFinding
+// previews. Not the source of truth for context (ColumnContext carries
+// the full Column proto); this is a convenience for UI / CLI printing.
+func columnSummary(c *irpb.Column) string {
+	if c == nil {
+		return "<nil>"
+	}
+	parts := []string{fmt.Sprintf("%s %s", c.GetCarrier(), c.GetDbType())}
+	if c.GetNullable() {
+		parts = append(parts, "NULL")
+	} else {
+		parts = append(parts, "NOT NULL")
+	}
+	if c.GetMaxLen() != 0 {
+		parts = append(parts, fmt.Sprintf("max_len=%d", c.GetMaxLen()))
+	}
+	if c.GetPk() {
+		parts = append(parts, "PK")
+	}
+	return joinStrings(parts, " ")
+}
+
+func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += sep + p
+	}
+	return out
 }
 
 // columnAdds returns AddColumn ops for columns whose proto field
@@ -203,25 +362,28 @@ func columnDrops(pair TablePair) []*planpb.Op {
 // produce ALTER TABLE statements per the iteration-2 strategy
 // table.
 //
-// REFUSE-strategy facts (carrier, pk, custom_type, element_*,
-// generated_expr — only when the change is structural) trigger
-// a *diag.Error returned to the caller. Caller (Diff) accumulates
-// + returns; emit never sees a refusal.
-func columnAlters(pair TablePair) ([]*planpb.Op, error) {
+// Decision-required facts (carrier, pk, custom_type, element_*,
+// enum-fqn, enum-remove) emit ReviewFindings when a classifier is
+// provided; the matching Op is omitted (emit never sees it). When
+// cls is nil, those axes fall back to plain errors for backward
+// compat with pre-D30 tests.
+func columnAlters(pair TablePair, cls *classifier.Classifier) ([]*planpb.Op, []*planpb.ReviewFinding, error) {
 	prevByNum := numberMap(pair.Prev.GetColumns())
 	ctx := tableCtxOf(pair.Curr)
 	var ops []*planpb.Op
+	var findings []*planpb.ReviewFinding
 	var refusals []error
 	for _, currCol := range pair.Curr.GetColumns() {
 		prevCol, both := prevByNum[currCol.GetFieldNumber()]
 		if !both {
 			continue
 		}
-		changes, err := buildFactChanges(pair.Curr, prevCol, currCol)
+		changes, fs, err := buildFactChanges(pair.Curr, prevCol, currCol, cls)
 		if err != nil {
 			refusals = append(refusals, err)
 			continue
 		}
+		findings = append(findings, fs...)
 		if len(changes) == 0 {
 			continue
 		}
@@ -235,36 +397,66 @@ func columnAlters(pair TablePair) ([]*planpb.Op, error) {
 		}}})
 	}
 	if len(refusals) > 0 {
-		return nil, errors.Join(refusals...)
+		return nil, nil, joinErrs(refusals)
 	}
-	return ops, nil
+	return ops, findings, nil
 }
 
 // buildFactChanges walks every fact axis on a Column pair and
-// emits a FactChange entry per axis whose value differs. Returns
-// an error for REFUSE-strategy axes per iteration-2 alter-strategies
-// (carrier change, pk flip, element_* reshape, pg.custom_type change).
+// emits a FactChange entry per axis whose value differs. When a
+// classifier is supplied, decision-required axes (carrier / pk /
+// custom_type / element reshape / enum fqn / enum remove) produce
+// ReviewFindings instead of errors; the Op for that column is
+// omitted (findings[0].column + axis tells engine.Plan what to
+// do). When cls is nil, those axes error as before.
+//
 // Ordering in the returned slice is fact-class declaration order
 // here so emit produces deterministic SQL.
-func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*planpb.FactChange, error) {
+func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column, cls *classifier.Classifier) ([]*planpb.FactChange, []*planpb.ReviewFinding, error) {
+	var findings []*planpb.ReviewFinding
+
 	if prev.GetCarrier() != curr.GetCarrier() {
-		return nil, fmt.Errorf("column %q (#%d): proto carrier change %v→%v is REFUSE-strategy (drop the field and add a new one with a fresh number)",
-			curr.GetName(), curr.GetFieldNumber(), prev.GetCarrier(), curr.GetCarrier())
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): proto carrier change %v→%v is REFUSE-strategy (drop the field and add a new one with a fresh number)",
+				curr.GetName(), curr.GetFieldNumber(), prev.GetCarrier(), curr.GetCarrier())
+		}
+		cell := cls.Carrier(prev.GetCarrier(), curr.GetCarrier())
+		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "carrier_change", cell))
+		return nil, findings, nil
 	}
 	if prev.GetPk() != curr.GetPk() {
-		return nil, fmt.Errorf("column %q (#%d): primary-key flip is REFUSE-strategy (PK change is table-rebuild territory; author writes an explicit migration)",
-			curr.GetName(), curr.GetFieldNumber())
+		axisCase := "enable"
+		if prev.GetPk() {
+			axisCase = "disable"
+		}
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): primary-key flip is REFUSE-strategy (PK change is table-rebuild territory; author writes an explicit migration)",
+				curr.GetName(), curr.GetFieldNumber())
+		}
+		cell := cls.Constraint("pk", axisCase)
+		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "pk_flip", cell))
+		return nil, findings, nil
 	}
 	if prev.GetElementCarrier() != curr.GetElementCarrier() ||
 		prev.GetElementIsMessage() != curr.GetElementIsMessage() {
-		return nil, fmt.Errorf("column %q (#%d): collection element reshape is REFUSE-strategy",
-			curr.GetName(), curr.GetFieldNumber())
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): collection element reshape is REFUSE-strategy",
+				curr.GetName(), curr.GetFieldNumber())
+		}
+		cell := cls.Constraint("element_reshape", "any")
+		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "element_reshape", cell))
+		return nil, findings, nil
 	}
 	prevPgCT := prev.GetPg().GetCustomType()
 	currPgCT := curr.GetPg().GetCustomType()
 	if prevPgCT != currPgCT {
-		return nil, fmt.Errorf("column %q (#%d): (w17.pg.field).custom_type change %q→%q is REFUSE-strategy (custom_type is author-owned)",
-			curr.GetName(), curr.GetFieldNumber(), prevPgCT, currPgCT)
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): (w17.pg.field).custom_type change %q→%q is REFUSE-strategy (custom_type is author-owned)",
+				curr.GetName(), curr.GetFieldNumber(), prevPgCT, currPgCT)
+		}
+		cell := cls.Constraint("pg_custom_type", "any")
+		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "pg_custom_type", cell))
+		return nil, findings, nil
 	}
 
 	var out []*planpb.FactChange
@@ -310,9 +502,13 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*pla
 			From: prev.GetComment(), To: curr.GetComment(),
 		}}})
 	}
-	enumChange, err := enumValuesFactChange(prev, curr)
+	enumChange, enumFinding, err := enumValuesFactChange(carrierTable, prev, curr, cls)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	if enumFinding != nil {
+		findings = append(findings, enumFinding)
+		return nil, findings, nil
 	}
 	if enumChange != nil {
 		out = append(out, enumChange)
@@ -324,28 +520,33 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column) ([]*pla
 		}}})
 	}
 	if !proto.Equal(prev.GetPg(), curr.GetPg()) {
-		// Custom_type already REFUSE-checked above; only required_extensions
+		// Custom_type already handled above; only required_extensions
 		// can differ here. Manifest-only impact (no DDL); FactChange carried
 		// for downstream consumers (M4 capability tracking).
 		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_PgOptions{PgOptions: &planpb.PgOptionsChange{
 			From: prev.GetPg(), To: curr.GetPg(),
 		}}})
 	}
-	return out, nil
+	return out, findings, nil
 }
 
 // enumValuesFactChange handles SEM_ENUM column evolution. Returns
-// nil when the names list is unchanged. REFUSE when names are
-// removed (PG can't drop enum values without recreate) or when the
-// proto enum FQN itself changed (different enum entirely).
-// "Added only" → EnumValuesChange with the added subset.
-func enumValuesFactChange(prev, curr *irpb.Column) (*planpb.FactChange, error) {
+// nil when the names list is unchanged. When a classifier is
+// provided, enum FQN change and enum value removal surface as
+// ReviewFindings; the FactChange return stays nil in those cases so
+// emit skips the column. "Added only" → EnumValuesChange with the
+// added subset (SAFE; no finding).
+func enumValuesFactChange(carrierTable *irpb.Table, prev, curr *irpb.Column, cls *classifier.Classifier) (*planpb.FactChange, *planpb.ReviewFinding, error) {
 	if curr.GetType() != irpb.SemType_SEM_ENUM || prev.GetType() != irpb.SemType_SEM_ENUM {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if prev.GetEnumFqn() != curr.GetEnumFqn() {
-		return nil, fmt.Errorf("column %q (#%d): enum FQN change %q→%q is REFUSE-strategy (different proto enum entirely; drop the column and re-add)",
-			curr.GetName(), curr.GetFieldNumber(), prev.GetEnumFqn(), curr.GetEnumFqn())
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): enum FQN change %q→%q is REFUSE-strategy (different proto enum entirely; drop the column and re-add)",
+				curr.GetName(), curr.GetFieldNumber(), prev.GetEnumFqn(), curr.GetEnumFqn())
+		}
+		cell := cls.Constraint("enum_values", "fqn_change")
+		return nil, buildColumnFinding(carrierTable, prev, curr, "enum_fqn_change", cell), nil
 	}
 	prevSet := stringSet(prev.GetEnumNames())
 	currSet := stringSet(curr.GetEnumNames())
@@ -357,8 +558,12 @@ func enumValuesFactChange(prev, curr *irpb.Column) (*planpb.FactChange, error) {
 	}
 	if len(removed) > 0 {
 		sort.Strings(removed)
-		return nil, fmt.Errorf("column %q (#%d): enum value removal %v is REFUSE-strategy (PG can't drop enum values; drop the column or recreate the type)",
-			curr.GetName(), curr.GetFieldNumber(), removed)
+		if cls == nil {
+			return nil, nil, fmt.Errorf("column %q (#%d): enum value removal %v is REFUSE-strategy (PG can't drop enum values; drop the column or recreate the type)",
+				curr.GetName(), curr.GetFieldNumber(), removed)
+		}
+		cell := cls.Constraint("enum_values", "remove")
+		return nil, buildColumnFinding(carrierTable, prev, curr, "enum_values_remove", cell), nil
 	}
 	var addedNames []string
 	var addedNumbers []int64
@@ -372,12 +577,12 @@ func enumValuesFactChange(prev, curr *irpb.Column) (*planpb.FactChange, error) {
 		}
 	}
 	if len(addedNames) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	return &planpb.FactChange{Variant: &planpb.FactChange_EnumValues{EnumValues: &planpb.EnumValuesChange{
 		AddedNames:   addedNames,
 		AddedNumbers: addedNumbers,
-	}}}, nil
+	}}}, nil, nil
 }
 
 func stringSet(ss []string) map[string]struct{} {

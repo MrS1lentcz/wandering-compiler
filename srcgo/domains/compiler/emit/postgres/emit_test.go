@@ -1138,11 +1138,11 @@ func runPipeline(t *testing.T, protoPath string) (up, down string) {
 	if err != nil {
 		t.Fatalf("ir.Build: %v", err)
 	}
-	p, err := plan.Diff(nil, schema)
+	p, err := plan.Diff(nil, schema, nil)
 	if err != nil {
 		t.Fatalf("plan.Diff: %v", err)
 	}
-	up, down, err = emit.Emit(postgres.Emitter{}, p)
+	up, down, err = emit.Emit(postgres.Emitter{}, p.Plan)
 	if err != nil {
 		t.Fatalf("emit.Emit: %v", err)
 	}

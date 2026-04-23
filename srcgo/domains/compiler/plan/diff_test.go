@@ -2,14 +2,35 @@ package plan_test
 
 import (
 	"bytes"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/classifier"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/plan"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
+
+// testClassifier loads the real D28 YAMLs from docs/classification/
+// relative to this test file (runtime.Caller walk to repo root).
+// Shared across all *_WithClassifier tests.
+func testClassifier(t *testing.T) *classifier.Classifier {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	// file = srcgo/domains/compiler/plan/diff_test.go → ../../../../docs/classification
+	dir := filepath.Join(filepath.Dir(file), "..", "..", "..", "..", "docs", "classification")
+	c, err := classifier.Load(dir)
+	if err != nil {
+		t.Fatalf("classifier.Load: %v", err)
+	}
+	return c
+}
 
 // Input is intentionally given in reverse alphabetical order to prove the
 // differ sorts before emitting.
@@ -23,7 +44,7 @@ func schemaTwoTables() *irpb.Schema {
 }
 
 func TestDiffNilPrevTwoTables(t *testing.T) {
-	got, err := plan.Diff(nil, schemaTwoTables())
+	got, err := plan.Diff(nil, schemaTwoTables(), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -40,7 +61,7 @@ func TestDiffNilPrevTwoTables(t *testing.T) {
 }
 
 func TestDiffNilSchemas(t *testing.T) {
-	got, err := plan.Diff(nil, nil)
+	got, err := plan.Diff(nil, nil, nil)
 	if err != nil {
 		t.Fatalf("Diff(nil, nil): %v", err)
 	}
@@ -53,7 +74,7 @@ func TestDiffNilSchemas(t *testing.T) {
 // equivalent (same FQNs, same table content), the differ emits no Ops.
 // AC #1 of iter-2 M1 (`alter_noop` fixture's basis).
 func TestDiffPrevEqualsCurrEmptyPlan(t *testing.T) {
-	got, err := plan.Diff(schemaTwoTables(), schemaTwoTables())
+	got, err := plan.Diff(schemaTwoTables(), schemaTwoTables(), nil)
 	if err != nil {
 		t.Fatalf("Diff(equal, equal): %v", err)
 	}
@@ -68,7 +89,7 @@ func TestDiffPrevEqualsCurrEmptyPlan(t *testing.T) {
 func TestDiffDropTableOnly(t *testing.T) {
 	prev := schemaTwoTables()                       // shop.Order, shop.Customer
 	curr := &irpb.Schema{Tables: prev.GetTables()[:1]} // keeps shop.Order only
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -104,7 +125,7 @@ func TestDiffDropOrderReverseTopo(t *testing.T) {
 		},
 	}
 	curr := &irpb.Schema{} // drop everything
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -142,7 +163,7 @@ func TestDiffDropAndAddCombined(t *testing.T) {
 	curr := &irpb.Schema{
 		Tables: []*irpb.Table{{Name: "new_table", MessageFqn: "shop.New"}},
 	}
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -178,7 +199,7 @@ func TestDiffAddColumn(t *testing.T) {
 		},
 		PrimaryKey: []string{"id"},
 	}}}
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -218,7 +239,7 @@ func TestDiffDropColumn(t *testing.T) {
 		},
 		PrimaryKey: []string{"id"},
 	}}}
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -254,7 +275,7 @@ func TestDiffColumnDropBeforeAddOrder(t *testing.T) {
 		{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: true},
 		{Name: "new", ProtoName: "new", FieldNumber: 3, Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT},
 	})
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -284,7 +305,7 @@ func TestDiffRenameTable(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		}}}
 	}
-	got, err := plan.Diff(mk("users"), mk("accounts"))
+	got, err := plan.Diff(mk("users"), mk("accounts"), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -313,7 +334,7 @@ func TestDiffSetTableComment(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		}}}
 	}
-	got, err := plan.Diff(mk(""), mk("user accounts"))
+	got, err := plan.Diff(mk(""), mk("user accounts"), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -343,7 +364,7 @@ func TestDiffRenameColumn(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		}}}
 	}
-	got, err := plan.Diff(mk("name"), mk("display_name"))
+	got, err := plan.Diff(mk("name"), mk("display_name"), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -378,7 +399,7 @@ func TestDiffIndexAdd(t *testing.T) {
 	}
 	got, err := plan.Diff(mk(nil), mk([]*irpb.Index{
 		{Name: "users_email_idx", Fields: []*irpb.IndexField{{Name: "email"}}},
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -414,7 +435,7 @@ func TestDiffIndexReplace(t *testing.T) {
 			},
 		}}}
 	}
-	got, err := plan.Diff(mk(false), mk(true))
+	got, err := plan.Diff(mk(false), mk(true), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -440,7 +461,7 @@ func TestDiffAlterColumnNullable(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		}}}
 	}
-	got, err := plan.Diff(mk(false), mk(true))
+	got, err := plan.Diff(mk(false), mk(true), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -462,8 +483,8 @@ func TestDiffAlterColumnNullable(t *testing.T) {
 }
 
 // TestDiffAlterColumnRefuseCarrierChange — proto carrier change is
-// REFUSE per strategy table; differ surfaces an error rather than
-// emitting drop+add or silent SQL.
+// REFUSE per strategy table when cls is nil (pre-D30 fallback path);
+// differ surfaces an error rather than emitting drop+add or silent SQL.
 func TestDiffAlterColumnRefuseCarrierChange(t *testing.T) {
 	mk := func(carrier irpb.Carrier) *irpb.Schema {
 		return &irpb.Schema{Tables: []*irpb.Table{{
@@ -474,9 +495,105 @@ func TestDiffAlterColumnRefuseCarrierChange(t *testing.T) {
 			PrimaryKey: []string{"id"},
 		}}}
 	}
-	_, err := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING))
+	_, err := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING), nil)
 	if err == nil {
-		t.Fatal("Diff accepted carrier change; want REFUSE error")
+		t.Fatal("Diff accepted carrier change; want error when cls is nil")
+	}
+}
+
+// TestDiffAlterColumnCarrierChange_WithClassifier — same carrier change
+// with a classifier supplied: Diff returns successfully but emits a
+// ReviewFinding instead of an error. Verifies the D30 path.
+func TestDiffAlterColumnCarrierChange_WithClassifier(t *testing.T) {
+	cls := testClassifier(t)
+	mk := func(carrier irpb.Carrier) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: carrier, Type: irpb.SemType_SEM_ID, Pk: true},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING), cls)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if len(got.Findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(got.Findings))
+	}
+	f := got.Findings[0]
+	if f.GetAxis() != "carrier_change" {
+		t.Errorf("finding.Axis = %q, want carrier_change", f.GetAxis())
+	}
+	if f.GetColumn().GetFieldNumber() != 1 {
+		t.Errorf("finding.Column.FieldNumber = %d, want 1", f.GetColumn().GetFieldNumber())
+	}
+	if f.GetColumn().GetTableFqn() != "shop.User" {
+		t.Errorf("finding.Column.TableFqn = %q, want shop.User", f.GetColumn().GetTableFqn())
+	}
+	if f.GetProposed() != planpb.Strategy_LOSSLESS_USING {
+		// INT64 → STRING classifies as LOSSLESS_USING per carrier.yaml
+		// (col::text canonical form).
+		t.Errorf("finding.Proposed = %s, want LOSSLESS_USING", f.GetProposed())
+	}
+	if f.GetSeverity() != planpb.Severity_BLOCK {
+		t.Errorf("finding.Severity = %s, want BLOCK", f.GetSeverity())
+	}
+	if f.GetId() == "" {
+		t.Error("finding.Id is empty")
+	}
+	// No AlterColumn op emitted; the pending decision blocks emit.
+	for _, op := range got.GetOps() {
+		if op.GetAlterColumn() != nil {
+			t.Errorf("unexpected AlterColumn op in plan for decision-pending column")
+		}
+	}
+}
+
+// TestDiffAlterColumnPKFlip_WithClassifier — pk flip surfaces a
+// CUSTOM_MIGRATION finding under the D30 path.
+func TestDiffAlterColumnPKFlip_WithClassifier(t *testing.T) {
+	cls := testClassifier(t)
+	mk := func(pk bool) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID, Pk: pk},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	got, err := plan.Diff(mk(true), mk(false), cls)
+	if err != nil {
+		t.Fatalf("Diff: %v", err)
+	}
+	if len(got.Findings) != 1 || got.Findings[0].GetAxis() != "pk_flip" {
+		t.Fatalf("findings = %v, want 1 pk_flip finding", got.Findings)
+	}
+	if got.Findings[0].GetProposed() != planpb.Strategy_CUSTOM_MIGRATION {
+		t.Errorf("proposed strategy = %s, want CUSTOM_MIGRATION", got.Findings[0].GetProposed())
+	}
+}
+
+// TestDiffFindingIDStable — same (prev, curr) pair produces the same
+// Finding ID across runs. Underpins D30 idempotence: resolutions
+// identified by ID survive re-runs without change.
+func TestDiffFindingIDStable(t *testing.T) {
+	cls := testClassifier(t)
+	mk := func(carrier irpb.Carrier) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1, Carrier: carrier, Type: irpb.SemType_SEM_ID, Pk: true},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	run1, _ := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING), cls)
+	run2, _ := plan.Diff(mk(irpb.Carrier_CARRIER_INT64), mk(irpb.Carrier_CARRIER_STRING), cls)
+	if run1.Findings[0].GetId() != run2.Findings[0].GetId() {
+		t.Errorf("finding ID not stable: %q vs %q", run1.Findings[0].GetId(), run2.Findings[0].GetId())
 	}
 }
 
@@ -491,7 +608,7 @@ func TestDiffMessageRenameIsDropPlusAdd(t *testing.T) {
 	curr := &irpb.Schema{
 		Tables: []*irpb.Table{{Name: "users", MessageFqn: "shop.NewUser"}},
 	}
-	got, err := plan.Diff(prev, curr)
+	got, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -515,11 +632,11 @@ func TestDiffDeterministic(t *testing.T) {
 
 	run := func() []byte {
 		t.Helper()
-		p, err := plan.Diff(nil, in)
+		p, err := plan.Diff(nil, in, nil)
 		if err != nil {
 			t.Fatalf("Diff: %v", err)
 		}
-		b, err := (proto.MarshalOptions{Deterministic: true}).Marshal(p)
+		b, err := (proto.MarshalOptions{Deterministic: true}).Marshal(p.Plan)
 		if err != nil {
 			t.Fatalf("Marshal: %v", err)
 		}
@@ -535,7 +652,7 @@ func TestDiffDeterministic(t *testing.T) {
 // Assert the plan contains AddTable ops (not some other variant). Regression
 // guard for future Op additions — breaks if someone re-tags the oneof.
 func TestDiffOpVariantIsAddTable(t *testing.T) {
-	got, err := plan.Diff(nil, schemaTwoTables())
+	got, err := plan.Diff(nil, schemaTwoTables(), nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -565,7 +682,7 @@ func TestDiffTopoOrderReferencedBeforeReferencer(t *testing.T) {
 			{Name: "tags", MessageFqn: "shop.Tag"},
 		},
 	}
-	got, err := plan.Diff(nil, schema)
+	got, err := plan.Diff(nil, schema, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -602,7 +719,7 @@ func TestDiffSelfFKIsRoot(t *testing.T) {
 			{Name: "customers", MessageFqn: "shop.Customer"},
 		},
 	}
-	got, err := plan.Diff(nil, schema)
+	got, err := plan.Diff(nil, schema, nil)
 	if err != nil {
 		t.Fatalf("Diff: %v", err)
 	}
@@ -632,7 +749,7 @@ func TestDiffFKCycleRejected(t *testing.T) {
 			},
 		},
 	}
-	_, err := plan.Diff(nil, schema)
+	_, err := plan.Diff(nil, schema, nil)
 	if err == nil {
 		t.Fatal("Diff succeeded on 2-table FK cycle; expected rejection")
 	}

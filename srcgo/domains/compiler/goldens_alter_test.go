@@ -3,7 +3,7 @@ package compiler_test
 // Golden-file suite for the alter-diff path — AC #2 of iter-2.md M1.
 // Every subdirectory under testdata/alter/ is a case: prev.proto +
 // curr.proto compile through loader → ir.Build (twice), then
-// plan.Diff(prev, curr) → emit.Emit(postgres) and the resulting up/down
+// plan.Diff(prev, curr, nil) → emit.Emit(postgres) and the resulting up/down
 // SQL are byte-compared against expected.up.sql / expected.down.sql.
 //
 // REFUSE fixtures live under testdata/alter_refuse/<name>/ — same
@@ -78,7 +78,7 @@ func TestAlterRefuseFixtures(t *testing.T) {
 			dir := filepath.Join(refuseTestRoot, c)
 			prev := mustBuild(t, dir, "prev.proto")
 			curr := mustBuild(t, dir, "curr.proto")
-			_, err := plan.Diff(prev, curr)
+			_, err := plan.Diff(prev, curr, nil)
 			if err == nil {
 				t.Fatalf("Diff accepted REFUSE-strategy change in %s; want error", dir)
 			}
@@ -90,11 +90,11 @@ func runAlterPipeline(t *testing.T, dir string) (up, down string) {
 	t.Helper()
 	prev := mustBuild(t, dir, "prev.proto")
 	curr := mustBuild(t, dir, "curr.proto")
-	p, err := plan.Diff(prev, curr)
+	p, err := plan.Diff(prev, curr, nil)
 	if err != nil {
 		t.Fatalf("plan.Diff: %v", err)
 	}
-	up, down, err = emit.Emit(postgres.Emitter{}, p)
+	up, down, err = emit.Emit(postgres.Emitter{}, p.Plan)
 	if err != nil {
 		t.Fatalf("emit.Emit: %v", err)
 	}

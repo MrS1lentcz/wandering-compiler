@@ -104,7 +104,11 @@ func (c *GenerateCmd) Run() error {
 	wroteAny := false
 	for _, key := range order {
 		bkt := buckets[key]
-		p, err := plan.Diff(bkt.prev, bkt.curr)
+		// Classifier wired at step 6 (engine.Plan top-level); for now
+		// pass nil — Diff falls back to plain-error behaviour on
+		// REFUSE axes, preserving pre-D30 CLI UX until Resolution
+		// source wiring lands.
+		result, err := plan.Diff(bkt.prev, bkt.curr, nil)
 		if err != nil {
 			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
 		}
@@ -112,7 +116,7 @@ func (c *GenerateCmd) Run() error {
 		if err != nil {
 			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
 		}
-		up, down, err := emit.Emit(emitter, p)
+		up, down, err := emit.Emit(emitter, result.Plan)
 		if err != nil {
 			return fmt.Errorf("wc generate: bucket %q: %w", key, err)
 		}
