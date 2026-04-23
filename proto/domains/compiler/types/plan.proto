@@ -13,26 +13,252 @@ option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/c
 // Private / compiler-internal shape (not part of the user-facing w17
 // vocabulary); lives under proto/domains/compiler/types/ per tech-spec
 // strategic decision #8 and iteration-1.md D4 (rev 2026-04-21).
-//
-// Iteration-1 only handles prev=nil (initial migration) and emits one
-// AddTable op per table. DropTable / AddColumn / AlterColumn / RenameColumn /
-// AddIndex / DropIndex are added op-by-op as pilot schemas surface real
-// alter-diff needs.
 message MigrationPlan {
   repeated Op ops = 1;
 }
 
-// Op is the tagged union over every migration operation. Each variant carries
-// enough IR to render SQL without consulting the full Schema — emitters stay
-// Op-local.
+// Op is the tagged union over every migration operation. See
+// docs/iteration-2.md M1 Design for the full dispatch + ordering rules.
+//
+// Tag grouping (reserved for future growth):
+//   1-9   — table-level ops
+//   10-19 — column-level ops
+//   20-29 — index ops (structured + raw)
+//   30-39 — foreign-key ops
+//   40-49 — check-constraint ops (structured + raw)
+//   90-99 — applied-state tracking (D27)
 message Op {
   oneof variant {
-    AddTable add_table = 1;
+    AddTable            add_table             = 1;
+    DropTable           drop_table            = 2;
+    RenameTable         rename_table          = 3;
+    SetTableNamespace   set_table_namespace   = 4;
+    SetTableComment     set_table_comment     = 5;
+
+    AddColumn           add_column            = 10;
+    DropColumn          drop_column           = 11;
+    RenameColumn        rename_column         = 12;
+    AlterColumn         alter_column          = 13;
+
+    AddIndex            add_index             = 20;
+    DropIndex           drop_index            = 21;
+    ReplaceIndex        replace_index         = 22;
+    AddRawIndex         add_raw_index         = 23;
+    DropRawIndex        drop_raw_index        = 24;
+    ReplaceRawIndex     replace_raw_index     = 25;
+
+    AddForeignKey       add_foreign_key       = 30;
+    DropForeignKey      drop_foreign_key      = 31;
+    ReplaceForeignKey   replace_foreign_key   = 32;
+
+    AddCheck            add_check             = 40;
+    DropCheck           drop_check            = 41;
+    ReplaceCheck        replace_check         = 42;
+    AddRawCheck         add_raw_check         = 43;
+    DropRawCheck        drop_raw_check        = 44;
+    ReplaceRawCheck     replace_raw_check     = 45;
+
+    WcMigrationsCreate  wc_migrations_create  = 90;
+    WcMigrationsInsert  wc_migrations_insert  = 91;
   }
 }
 
+// TableCtx bundles the table-qualifier facts the emitter needs to
+// produce fully-qualified DDL. Every column-level / index / FK / check
+// op carries one so emit stays Op-local — no consulting a sibling
+// Schema or Table at emit time.
+message TableCtx {
+  string message_fqn = 1;
+  string table_name = 2;
+  w17.compiler.ir.NamespaceMode namespace_mode = 3;
+  string namespace = 4;
+}
+
+// --- Table-level ops -------------------------------------------------------
+
 // AddTable creates a new table. Carries the full ir.Table so the emitter
-// reaches columns, indexes, FKs, and PK list from one place.
+// reaches columns, indexes, FKs, PK list, raw_* entries, and comments from
+// one place. Down emits DROP TABLE plus any dependent object drops (enum
+// types, indexes) per the iter-1 emitAddTable path.
 message AddTable {
   w17.compiler.ir.Table table = 1;
+}
+
+// DropTable removes a table. Carries the full prev-side Table so the
+// down-migration can recreate it faithfully (same shape as AddTable but
+// reversed). FK-dependency order is the differ's concern (reverse topo);
+// the emitter just renders the DROP.
+message DropTable {
+  w17.compiler.ir.Table table = 1;
+}
+
+// RenameTable — message FQN stable, (w17.db.table).name changed. Carries
+// both old + new Table so the emitter qualifies both sides. Uses ALTER
+// TABLE ... RENAME TO on PG (data-preserving).
+message RenameTable {
+  TableCtx ctx = 1;                       // post-rename context (new name)
+  string   from_name = 2;                 // pre-rename SQL name
+  string   to_name = 3;                   // post-rename SQL name
+}
+
+// SetTableNamespace — message FQN stable, (w17.db.module).namespace or
+// mode changed. Emitter strategy per iteration-2.md alter-strategies
+// table (SCHEMA↔SCHEMA = SET SCHEMA, PREFIX↔PREFIX = RENAME TO with new
+// prefix, cross-mode = rename + SET SCHEMA chain).
+message SetTableNamespace {
+  string message_fqn = 1;
+  string table_name_from = 2;             // before move (PREFIX bakes prefix in)
+  string table_name_to = 3;               // after move
+  w17.compiler.ir.NamespaceMode from_mode = 4;
+  string from_namespace = 5;
+  w17.compiler.ir.NamespaceMode to_mode = 6;
+  string to_namespace = 7;
+}
+
+// SetTableComment — COMMENT ON TABLE add / change / drop. Empty to = drop.
+message SetTableComment {
+  TableCtx ctx = 1;
+  string from = 2;
+  string to = 3;
+}
+
+// --- Column-level ops ------------------------------------------------------
+
+// AddColumn adds a column to an existing table. The full ir.Column is
+// carried so the emitter can render default / NOT NULL / generated_expr /
+// comment / CHECK constraints inline. Down emits DROP COLUMN.
+message AddColumn {
+  TableCtx ctx = 1;
+  w17.compiler.ir.Column column = 2;
+}
+
+// DropColumn removes a column. Carries the pre-state Column so down can
+// re-add with the original shape.
+message DropColumn {
+  TableCtx ctx = 1;
+  w17.compiler.ir.Column column = 2;
+}
+
+// RenameColumn — proto field number stable, name changed. Down swaps
+// from/to. ALTER TABLE ... RENAME COLUMN on every supported dialect.
+message RenameColumn {
+  TableCtx ctx = 1;
+  int32  field_number = 2;
+  string from_name = 3;
+  string to_name = 4;
+}
+
+// AlterColumn consolidates every in-place fact change on one column into
+// one op. The emitter walks `changes` and picks the per-fact strategy
+// (DIRECT / USING / DROP+ADD / REFUSE) per iteration-2.md. Multiple
+// changes on one column coalesce into one ALTER TABLE statement where PG
+// permits.
+message AlterColumn {
+  TableCtx ctx = 1;
+  int32  field_number = 2;
+  string column_name = 3;
+  repeated FactChange changes = 4;
+}
+
+// FactChange is the per-fact delta inside an AlterColumn. Each variant
+// carries `from` + `to` so the emitter can render both up (to) and down
+// (from) with the same dispatch. REFUSE-strategy facts (carrier, pk,
+// storage_index, custom_type, element_*) are caught at diff time with
+// a diag.Error — they never reach emit.
+message FactChange {
+  oneof variant {
+    NullableChange           nullable            = 1;
+    DefaultChange            default_value       = 2;
+    MaxLenChange             max_len             = 3;
+    NumericPrecisionChange   numeric_precision   = 4;
+    DbTypeChange             db_type             = 5;
+    PgOptionsChange          pg_options          = 6;
+    CommentChange            comment             = 7;
+    GeneratedExprChange      generated_expr      = 8;
+    ChecksChange             checks              = 9;
+    EnumValuesChange         enum_values         = 10;
+    AllowedExtensionsChange  allowed_extensions  = 11;
+    UniqueChange             unique              = 12;
+  }
+}
+
+message NullableChange        { bool from = 1; bool to = 2; }
+message DefaultChange         { w17.compiler.ir.Default from = 1; w17.compiler.ir.Default to = 2; }
+message MaxLenChange          { int32 from = 1; int32 to = 2; }
+message NumericPrecisionChange {
+  int32 from_precision = 1;
+  optional int32 from_scale = 2;
+  int32 to_precision = 3;
+  optional int32 to_scale = 4;
+}
+message DbTypeChange          { w17.compiler.ir.DbType from = 1; w17.compiler.ir.DbType to = 2; }
+message PgOptionsChange       { w17.compiler.ir.PgOptions from = 1; w17.compiler.ir.PgOptions to = 2; }
+message CommentChange         { string from = 1; string to = 2; }
+message GeneratedExprChange   { string from = 1; string to = 2; }
+message UniqueChange          { bool from = 1; bool to = 2; }
+
+// ChecksChange carries added + removed Check entries (keyed by their
+// resolved SQL constraint name). Emitter expands to DROP CONSTRAINT /
+// ADD CONSTRAINT pairs in deterministic order.
+message ChecksChange {
+  repeated w17.compiler.ir.Check added = 1;
+  repeated w17.compiler.ir.Check removed = 2;
+}
+
+// EnumValuesChange covers the PG `ALTER TYPE ADD VALUE` path (added
+// values) and the REFUSE path (removed values — PG can't drop them).
+// The differ only produces this variant with `added_names` non-empty;
+// removed values become a diag.Error at diff time.
+message EnumValuesChange {
+  repeated string added_names = 1;
+  repeated int64 added_numbers = 2;
+}
+
+message AllowedExtensionsChange {
+  repeated string from = 1;
+  repeated string to = 2;
+}
+
+// --- Index ops -------------------------------------------------------------
+
+message AddIndex       { TableCtx ctx = 1; w17.compiler.ir.Index index = 2; }
+message DropIndex      { TableCtx ctx = 1; w17.compiler.ir.Index index = 2; string index_name = 3; }
+message ReplaceIndex   { TableCtx ctx = 1; w17.compiler.ir.Index from = 2; w17.compiler.ir.Index to = 3; }
+
+message AddRawIndex     { TableCtx ctx = 1; w17.compiler.ir.RawIndex index = 2; }
+message DropRawIndex    { TableCtx ctx = 1; w17.compiler.ir.RawIndex index = 2; }
+message ReplaceRawIndex { TableCtx ctx = 1; w17.compiler.ir.RawIndex from = 2; w17.compiler.ir.RawIndex to = 3; }
+
+// --- FK ops ----------------------------------------------------------------
+
+message AddForeignKey     { TableCtx ctx = 1; w17.compiler.ir.ForeignKey fk = 2; string constraint_name = 3; }
+message DropForeignKey    { TableCtx ctx = 1; w17.compiler.ir.ForeignKey fk = 2; string constraint_name = 3; }
+message ReplaceForeignKey { TableCtx ctx = 1; w17.compiler.ir.ForeignKey from = 2; w17.compiler.ir.ForeignKey to = 3; string constraint_name = 4; }
+
+// --- CHECK ops -------------------------------------------------------------
+
+message AddCheck     { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; string constraint_name = 4; }
+message DropCheck    { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check check = 3; string constraint_name = 4; }
+message ReplaceCheck { TableCtx ctx = 1; w17.compiler.ir.Column column = 2; w17.compiler.ir.Check from = 3; w17.compiler.ir.Check to = 4; string constraint_name = 5; }
+
+message AddRawCheck     { TableCtx ctx = 1; w17.compiler.ir.RawCheck check = 2; }
+message DropRawCheck    { TableCtx ctx = 1; w17.compiler.ir.RawCheck check = 2; }
+message ReplaceRawCheck { TableCtx ctx = 1; w17.compiler.ir.RawCheck from = 2; w17.compiler.ir.RawCheck to = 3; }
+
+// --- Applied-state tracking (D27) ------------------------------------------
+
+// WcMigrationsCreate — emitted in the very first migration for a
+// (domain, connection). Creates `wc_migrations` in the connection's
+// default schema. No namespace qualifier needed (one table per DB;
+// D26 pins "one domain = one DB" so no collision risk).
+message WcMigrationsCreate {}
+
+// WcMigrationsInsert — emitted at the tail of every up.sql; matching
+// DELETE goes at the head of down.sql. Timestamp = the migration's D5
+// filename stem (e.g. "20260423T143015Z"). content_sha256 = sha256 of
+// the up.sql body computed AFTER the rest is finalised (the INSERT
+// statement is the final line; the hash covers everything before it).
+message WcMigrationsInsert {
+  string timestamp = 1;
+  bytes  content_sha256 = 2;
 }

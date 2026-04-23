@@ -26,6 +26,30 @@ message Schema {
   // dialect schema.
   NamespaceMode namespace_mode = 2;
   string namespace = 3;
+
+  // Connection scope (D26). Every Schema is scoped to exactly one
+  // (dialect, version) connection. M1 defaults to the project-wide
+  // default connection when (w17.db.module).connection is unset;
+  // M3 activates multi-connection dispatch with per-connection
+  // Schema instances.
+  Connection connection = 4;
+}
+
+// Connection identifies one DB target (dialect + version + logical
+// name). Unique within a domain — two modules in the same domain can
+// never declare the same (dialect, version) per D26. `name` is the
+// logical label used in `(w17.db.table).connection` overrides.
+message Connection {
+  string name = 1;
+  Dialect dialect = 2;
+  string version = 3;
+}
+
+enum Dialect {
+  DIALECT_UNSPECIFIED = 0;
+  POSTGRES = 1;
+  MYSQL = 2;
+  SQLITE = 3;
 }
 
 // NamespaceMode — which strategy the module picked (D19). Mirrors the
@@ -81,6 +105,14 @@ message Table {
   // wins; otherwise falls back to the proto message's leading
   // comment; otherwise empty (no COMMENT statement emitted).
   string comment = 12;
+
+  // Per-table connection override (D26). Empty when the table lives
+  // on its module's default connection; set when
+  // `(w17.db.table).connection` names a secondary connection
+  // declared in the same domain. IR carries the connection NAME
+  // here; the orchestrator (M3) resolves name → Connection via the
+  // domain-level connection registry.
+  string connection_name = 13;
 }
 
 message RawCheck {

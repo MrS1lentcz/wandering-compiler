@@ -76,6 +76,40 @@ message Module {
     string schema = 1;
     string prefix = 2;
   }
+
+  // (w17.db.module).connection — declares which DB connection the
+  // tables defined in this file target. Optional: absent = the
+  // project-wide default connection (iteration-2 M1 assumes every
+  // module runs on the default; M3 activates multi-connection
+  // dispatch).
+  //
+  // Inside one domain, each (dialect, version) pair must be unique
+  // — D26 uses the domain as the DB-isolation boundary. "Two of the
+  // same" means "two domains."
+  //
+  // Usage:
+  //   option (w17.db.module) = {
+  //     connection: { name: "configs", dialect: SQLITE, version: "3" }
+  //   };
+  Connection connection = 3;
+}
+
+// Connection identifies one DB target: a logical name + dialect +
+// version. The name is the label used in (w17.db.table).connection
+// overrides; the dialect + version pair is what the emitter dispatches
+// on + what the output path uses (`out/<domain>/migrations/<dialect>-
+// <version>/`).
+message Connection {
+  string name = 1;
+  Dialect dialect = 2;
+  string version = 3;
+}
+
+enum Dialect {
+  DIALECT_UNSPECIFIED = 0;
+  POSTGRES = 1;
+  MYSQL = 2;
+  SQLITE = 3;
 }
 
 message Table {
@@ -106,6 +140,14 @@ message Table {
   // different). Empty value = no COMMENT emitted, even if a leading
   // comment exists.
   string comment = 5;
+
+  // Per-table connection override (D26). Names a connection declared
+  // in some (w17.db.module).connection option in the same domain.
+  // Empty = this table runs on its module's own connection. Use
+  // cases: a domain's main proto declares `(postgres, 18)` but a
+  // specific config-holding message lives in a side `(sqlite, 3)`
+  // registered by another module in the same domain.
+  string connection = 6;
 }
 
 // Index — structured index definition. Single authoring path; opaque
