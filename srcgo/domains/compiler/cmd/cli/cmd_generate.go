@@ -13,6 +13,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/application"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/postgres"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/sqlite"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/naming"
@@ -67,12 +68,20 @@ func (c *GenerateCmd) Run() error {
 	if outRoot == "" {
 		outRoot = app.OutputDir()
 	}
-	migrationsDir := filepath.Join(outRoot, "migrations")
 
 	ctx := context.Background()
 	currSchema, err := loadSchemaSet(ctx, c.Protos, c.Imports)
 	if err != nil {
 		return err
+	}
+
+	// Per-connection output subdir (D26). When the module declares a
+	// (w17.db.module).connection, migrations land in
+	// <out>/migrations/<dialect>-<version>/. Absent → bare
+	// <out>/migrations/ (iter-1 layout).
+	migrationsDir := filepath.Join(outRoot, "migrations")
+	if conn := currSchema.GetConnection(); conn != nil {
+		migrationsDir = filepath.Join(outRoot, "migrations", connectionDirKey(conn))
 	}
 	var prevSchema *irpb.Schema
 	if len(c.PrevSet) > 0 {
@@ -91,7 +100,11 @@ func (c *GenerateCmd) Run() error {
 	if err != nil {
 		return err
 	}
-	up, down, err := emit.Emit(postgres.Emitter{}, p)
+	dialect, err := pickEmitter(currSchema.GetConnection())
+	if err != nil {
+		return err
+	}
+	up, down, err := emit.Emit(dialect, p)
 	if err != nil {
 		return err
 	}
@@ -113,6 +126,31 @@ func (c *GenerateCmd) Run() error {
 	}
 	fmt.Printf("wrote:\n  %s\n  %s\n", upPath, downPath)
 	return nil
+}
+
+// connectionDirKey derives the `<dialect>-<version>` directory name
+// for the output path per D26. Lower-kebab on the dialect enum name.
+func connectionDirKey(c *irpb.Connection) string {
+	return strings.ToLower(c.GetDialect().String()) + "-" + c.GetVersion()
+}
+
+// pickEmitter selects the emit.DialectEmitter for the connection's
+// dialect. Absent connection (iter-1 default-path case) → postgres
+// (matches iter-1 behaviour). Unknown dialect surfaces a clear error
+// rather than defaulting silently.
+func pickEmitter(conn *irpb.Connection) (emit.DialectEmitter, error) {
+	if conn == nil {
+		return postgres.Emitter{}, nil
+	}
+	switch conn.GetDialect() {
+	case irpb.Dialect_POSTGRES:
+		return postgres.Emitter{}, nil
+	case irpb.Dialect_MYSQL:
+		return nil, fmt.Errorf("wc generate: dialect MYSQL is not yet implemented (tracked as iter-2 M4)")
+	case irpb.Dialect_SQLITE:
+		return sqlite.Emitter{}, nil
+	}
+	return nil, fmt.Errorf("wc generate: unknown connection dialect %v", conn.GetDialect())
 }
 
 // loadSchemaSet runs loader.LoadMany → ir.BuildMany over a proto set.

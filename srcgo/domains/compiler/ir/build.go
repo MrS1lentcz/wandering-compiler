@@ -62,10 +62,12 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 		b := &builder{lf: lf, msgByTable: map[string]*loader.LoadedMessage{}}
 		fileSchema := &irpb.Schema{}
 		b.resolveNamespace(fileSchema)
+		b.resolveConnection(fileSchema)
 		if len(b.errs) > 0 {
 			allErrs = append(allErrs, b.errs...)
 			continue
 		}
+		b.fileConnectionName = fileSchema.GetConnection().GetName()
 		b.namespaceMode = fileSchema.GetNamespaceMode()
 		b.namespace = fileSchema.GetNamespace()
 		if b.namespaceMode == irpb.NamespaceMode_NAMESPACE_MODE_PREFIX {
@@ -95,13 +97,44 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 	// Top-level Schema namespace = first file's. Per-Table namespaces
 	// are already stamped by per-file buildTable, so emit picks the
 	// right qualifier from Table.Namespace[Mode] regardless of what
-	// Schema-level carries.
+	// Schema-level carries. Connection follows the same convention —
+	// top-level carries the first file's declaration; per-Table
+	// override (D26) ships in a follow-up commit when connection
+	// bucketing enters the differ.
 	if len(files) > 0 {
 		firstSchema := &irpb.Schema{}
 		firstB := &builder{lf: files[0]}
 		firstB.resolveNamespace(firstSchema)
+		firstB.resolveConnection(firstSchema)
 		schema.NamespaceMode = firstSchema.GetNamespaceMode()
 		schema.Namespace = firstSchema.GetNamespace()
+		schema.Connection = firstSchema.GetConnection()
+	}
+
+	// D26 invariant: (dialect, version) pair unique across a domain
+	// (= BuildMany input batch today). Two files declaring the same
+	// connection identity would produce two migration streams to the
+	// same DB — collision at apply time.
+	type dvKey struct {
+		dialect irpb.Dialect
+		version string
+	}
+	seen := map[dvKey]string{}
+	for _, lf := range files {
+		if lf.Module == nil || lf.Module.GetConnection() == nil {
+			continue
+		}
+		src := lf.Module.GetConnection()
+		if src.GetDialect() == dbpb.Dialect_DIALECT_UNSPECIFIED || src.GetVersion() == "" {
+			continue // validation error already queued in per-file pass
+		}
+		k := dvKey{dialect: dialectToIR(src.GetDialect()), version: src.GetVersion()}
+		if prior, dup := seen[k]; dup && prior != src.GetName() {
+			allErrs = append(allErrs, diag.Atf(lf.File, "duplicate connection (dialect=%v, version=%q) declared under names %q and %q", k.dialect, k.version, prior, src.GetName()).
+				WithWhy("D26 makes (dialect, version) the DB-isolation boundary within a domain; two modules sharing the pair would produce two migration streams into the same database").
+				WithFix("either merge the modules under one connection name, or split the domain so each (dialect, version) lives in its own domain directory"))
+		}
+		seen[k] = src.GetName()
 	}
 
 	if len(allErrs) > 0 {
@@ -134,6 +167,59 @@ func duplicateTableName(schema *irpb.Schema, name string) (*irpb.Table, bool) {
 		}
 	}
 	return nil, false
+}
+
+// resolveConnection reads (w17.db.module).connection off the loader
+// and populates Schema.connection. Validated:
+//   - dialect must be set to one of the supported values (POSTGRES,
+//     MYSQL, SQLITE; Dialect enum maps 1:1 between authoring and IR).
+//   - version must be non-empty (<dialect>-<version> subdir naming
+//     needs it; deploy-side compat-matrix resolution needs it).
+//   - name is optional (the logical label for per-table overrides).
+//     When empty, per-table overrides can't target this connection.
+//
+// Absent (w17.db.module).connection leaves Schema.connection nil —
+// the CLI falls back to the project-default emit path (no per-
+// connection subdir) to preserve single-DB iter-1 behaviour.
+func (b *builder) resolveConnection(schema *irpb.Schema) {
+	mod := b.lf.Module
+	if mod == nil || mod.GetConnection() == nil {
+		return
+	}
+	src := mod.GetConnection()
+	dialect := dialectToIR(src.GetDialect())
+	if dialect == irpb.Dialect_DIALECT_UNSPECIFIED {
+		b.err(diag.Atf(b.lf.File, "(w17.db.module).connection.dialect is required").
+			WithWhy("wc picks the emitter + output path from (dialect, version); leaving dialect unspecified leaves both ambiguous").
+			WithFix("set dialect to one of: POSTGRES, MYSQL, SQLITE"))
+		return
+	}
+	if src.GetVersion() == "" {
+		b.err(diag.Atf(b.lf.File, "(w17.db.module).connection.version is required").
+			WithWhy("output migrations live in <out>/<domain>/migrations/<dialect>-<version>/; without a version the subdir is undefined and deploy-side compat matching is impossible").
+			WithFix(`set version to a dialect-native value (e.g. "18" for Postgres, "8.4" for MySQL, "3" for SQLite)`))
+		return
+	}
+	schema.Connection = &irpb.Connection{
+		Name:    src.GetName(),
+		Dialect: dialect,
+		Version: src.GetVersion(),
+	}
+}
+
+// dialectToIR maps the authoring-surface Dialect enum to the IR's
+// enum — 1:1 alias, kept in two separate types so the IR doesn't
+// import the authoring vocabulary.
+func dialectToIR(d dbpb.Dialect) irpb.Dialect {
+	switch d {
+	case dbpb.Dialect_POSTGRES:
+		return irpb.Dialect_POSTGRES
+	case dbpb.Dialect_MYSQL:
+		return irpb.Dialect_MYSQL
+	case dbpb.Dialect_SQLITE:
+		return irpb.Dialect_SQLITE
+	}
+	return irpb.Dialect_DIALECT_UNSPECIFIED
 }
 
 // resolveNamespace reads (w17.db.module) off the loader, validates it,
@@ -210,6 +296,12 @@ type builder struct {
 	namespaceMode irpb.NamespaceMode
 	namespace     string
 	prefix        string
+	// fileConnectionName — the module-level connection name resolved
+	// from (w17.db.module).connection. Empty when the module didn't
+	// declare a connection (table inherits the project default).
+	// Per-table override via (w17.db.table).connection is applied in
+	// buildTable after this is set.
+	fileConnectionName string
 }
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
