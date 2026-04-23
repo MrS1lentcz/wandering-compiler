@@ -8,6 +8,7 @@ require (
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/willabides/kongplete v0.4.0
 	google.golang.org/protobuf v1.36.11
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
