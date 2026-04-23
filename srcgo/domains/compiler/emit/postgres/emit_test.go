@@ -286,6 +286,340 @@ func TestEmitAddColumnEnum(t *testing.T) {
 	}
 }
 
+// TestEmitSetTableNamespaceSchemaToSchema — both sides SCHEMA, same
+// table name → SET SCHEMA. Down inverts.
+func TestEmitSetTableNamespaceSchemaToSchema(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		MessageFqn:    "shop.Event",
+		TableNameFrom: "events",
+		TableNameTo:   "events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		FromNamespace: "reporting",
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		ToNamespace:   "analytics",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE reporting.events SET SCHEMA analytics;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE analytics.events SET SCHEMA reporting;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitSetTableNamespaceNoneToSchema — NONE → SCHEMA, same identifier.
+func TestEmitSetTableNamespaceNoneToSchema(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "events",
+		TableNameTo:   "events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_NONE,
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		ToNamespace:   "reporting",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE events SET SCHEMA reporting;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE reporting.events SET SCHEMA public;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitSetTableNamespaceSchemaToNone — SCHEMA → NONE, same identifier.
+func TestEmitSetTableNamespaceSchemaToNone(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "events",
+		TableNameTo:   "events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		FromNamespace: "reporting",
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_NONE,
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE reporting.events SET SCHEMA public;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE events SET SCHEMA reporting;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitSetTableNamespaceBothNonSchemaRename — PREFIX / NONE on both
+// sides with different names → pure RENAME TO.
+func TestEmitSetTableNamespaceBothNonSchemaRename(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "old_events",
+		TableNameTo:   "new_events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_PREFIX,
+		FromNamespace: "old",
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_PREFIX,
+		ToNamespace:   "new",
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "ALTER TABLE old_events RENAME TO new_events;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "ALTER TABLE new_events RENAME TO old_events;" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitSetTableNamespaceSchemaChain — SCHEMA a → SCHEMA b with
+// name change. schemaMoveRenameChain produces SET SCHEMA + RENAME.
+func TestEmitSetTableNamespaceSchemaChain(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "events",
+		TableNameTo:   "audit_events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		FromNamespace: "reporting",
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		ToNamespace:   "audit",
+	}}}
+	up, _, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "ALTER TABLE reporting.events SET SCHEMA audit;")
+	mustContain(t, up, "ALTER TABLE audit.events RENAME TO audit_events;")
+}
+
+// TestEmitSetTableNamespaceNoneToPrefixChain — NONE → SCHEMA with
+// name change routes through schemaMoveRenameChain's else branch
+// (RENAME first, then SET SCHEMA).
+func TestEmitSetTableNamespaceNoneToPrefixChain(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "events",
+		TableNameTo:   "audit_events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_NONE,
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
+		ToNamespace:   "audit",
+	}}}
+	up, _, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "ALTER TABLE events RENAME TO audit_events;")
+	mustContain(t, up, "ALTER TABLE audit_events SET SCHEMA audit;")
+}
+
+// TestEmitSetTableNamespaceRejectsNoOp — mode/name both unchanged = no-op.
+func TestEmitSetTableNamespaceRejectsNoOp(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_SetTableNamespace{SetTableNamespace: &planpb.SetTableNamespace{
+		TableNameFrom: "events",
+		TableNameTo:   "events",
+		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_NONE,
+		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_NONE,
+	}}}
+	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("no-op SetTableNamespace accepted; want error")
+	}
+}
+
+// TestEmitDropIndexDirect — construct a DropIndex Op directly and
+// verify up is DROP INDEX IF EXISTS, down is CREATE INDEX.
+func TestEmitDropIndexDirect(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_DropIndex{DropIndex: &planpb.DropIndex{
+		Ctx: &planpb.TableCtx{TableName: "users"},
+		Index: &irpb.Index{
+			Name:   "users_email_idx",
+			Fields: []*irpb.IndexField{{Name: "email"}},
+		},
+		Columns: []*irpb.Column{
+			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if up != "DROP INDEX IF EXISTS users_email_idx;" {
+		t.Errorf("up = %q", up)
+	}
+	if down != "CREATE INDEX users_email_idx ON users (email);" {
+		t.Errorf("down = %q", down)
+	}
+}
+
+// TestEmitAlterColumnNumericNoScale — NumericPrecisionChange with
+// nil scale on both sides renders NUMERIC(N).
+func TestEmitAlterColumnNumericNoScale(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "t"},
+		ColumnName: "x",
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_NumericPrecision{NumericPrecision: &planpb.NumericPrecisionChange{
+				FromPrecision: 10,
+				ToPrecision:   20,
+			}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if !strings.Contains(up, "NUMERIC(20)") || !strings.Contains(down, "NUMERIC(10)") {
+		t.Errorf("up=%q down=%q", up, down)
+	}
+}
+
+// TestEmitAlterColumnGeneratedExprRemove — from != "" to == "" emits
+// DROP EXPRESSION; down recreates the column.
+func TestEmitAlterColumnGeneratedExprRemove(t *testing.T) {
+	col := &irpb.Column{
+		Name: "full_name", ProtoName: "full_name",
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 200,
+	}
+	prev := &irpb.Column{
+		Name: "full_name", ProtoName: "full_name",
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 200,
+		GeneratedExpr: "first_name || ' ' || last_name",
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "users"},
+		ColumnName: "full_name",
+		Column:     col,
+		PrevColumn: prev,
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
+				From: "first_name || ' ' || last_name", To: "",
+			}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if !strings.Contains(up, "DROP EXPRESSION") {
+		t.Errorf("up missing DROP EXPRESSION: %q", up)
+	}
+	if !strings.Contains(down, "GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED;") {
+		t.Errorf("down missing recreate: %q", down)
+	}
+}
+
+// TestEmitAlterColumnGeneratedExprChange — both from and to non-empty.
+func TestEmitAlterColumnGeneratedExprChange(t *testing.T) {
+	col := &irpb.Column{
+		Name: "x", ProtoName: "x",
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 100,
+		GeneratedExpr: "upper(y)",
+	}
+	prev := &irpb.Column{
+		Name: "x", ProtoName: "x",
+		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 100,
+		GeneratedExpr: "lower(y)",
+	}
+	op := &planpb.Op{Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+		Ctx:        &planpb.TableCtx{TableName: "t"},
+		ColumnName: "x",
+		Column:     col,
+		PrevColumn: prev,
+		Changes: []*planpb.FactChange{
+			{Variant: &planpb.FactChange_GeneratedExpr{GeneratedExpr: &planpb.GeneratedExprChange{
+				From: "lower(y)", To: "upper(y)",
+			}}},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	if !strings.Contains(up, "GENERATED ALWAYS AS (upper(y)) STORED") {
+		t.Errorf("up missing new expr: %q", up)
+	}
+	if !strings.Contains(down, "GENERATED ALWAYS AS (lower(y)) STORED") {
+		t.Errorf("down missing old expr: %q", down)
+	}
+}
+
+// TestEmitReplaceIndexFromNameChange — ReplaceIndex covers drop-from
+// + create-to across different names (structured).
+func TestEmitReplaceIndexFromNameChange(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_ReplaceIndex{ReplaceIndex: &planpb.ReplaceIndex{
+		Ctx:  &planpb.TableCtx{TableName: "users"},
+		From: &irpb.Index{Name: "users_email_idx_v1", Fields: []*irpb.IndexField{{Name: "email"}}},
+		To:   &irpb.Index{Name: "users_email_idx_v2", Fields: []*irpb.IndexField{{Name: "email"}}, Unique: true},
+		Columns: []*irpb.Column{
+			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "DROP INDEX IF EXISTS users_email_idx_v1;")
+	mustContain(t, up, "CREATE UNIQUE INDEX users_email_idx_v2")
+	mustContain(t, down, "DROP INDEX IF EXISTS users_email_idx_v2;")
+	mustContain(t, down, "CREATE INDEX users_email_idx_v1")
+}
+
+// TestEmitDropIndexEmptyName — defensive: empty name bails out.
+func TestEmitDropIndexEmptyName(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_DropIndex{DropIndex: &planpb.DropIndex{
+		Ctx:   &planpb.TableCtx{TableName: "users"},
+		Index: &irpb.Index{},
+	}}}
+	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+		t.Fatal("empty-name DropIndex accepted; want error")
+	}
+}
+
+// TestEmitReplaceForeignKeyAllFields — ReplaceForeignKey drops + adds
+// both sides. Covers column-name resolution and ON DELETE clause
+// round-trip.
+func TestEmitReplaceForeignKeyAllFields(t *testing.T) {
+	op := &planpb.Op{Variant: &planpb.Op_ReplaceForeignKey{ReplaceForeignKey: &planpb.ReplaceForeignKey{
+		Ctx:            &planpb.TableCtx{TableName: "orders"},
+		From:           &irpb.ForeignKey{Column: "customer_id", TargetTable: "customers", TargetColumn: "id", OnDelete: irpb.FKAction_FK_ACTION_CASCADE},
+		To:             &irpb.ForeignKey{Column: "customer_id", TargetTable: "customers", TargetColumn: "id", OnDelete: irpb.FKAction_FK_ACTION_RESTRICT},
+		ConstraintName: "orders_customer_id_fkey",
+		Columns: []*irpb.Column{
+			{Name: "customer_id", ProtoName: "customer_id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID},
+		},
+	}}}
+	up, down, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "DROP CONSTRAINT IF EXISTS orders_customer_id_fkey;")
+	mustContain(t, up, "ADD CONSTRAINT orders_customer_id_fkey FOREIGN KEY (customer_id)")
+	mustContain(t, up, "ON DELETE RESTRICT;")
+	mustContain(t, down, "ON DELETE CASCADE;")
+}
+
+// TestEmitReplaceCheckCoversBothSides — Drop from + Add to on up,
+// inverse on down.
+func TestEmitReplaceCheckCoversBothSides(t *testing.T) {
+	col := &irpb.Column{Name: "name", ProtoName: "name", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_CHAR, MaxLen: 120}
+	op := &planpb.Op{Variant: &planpb.Op_ReplaceCheck{ReplaceCheck: &planpb.ReplaceCheck{
+		Ctx:    &planpb.TableCtx{TableName: "users"},
+		Column: col,
+		From:   &irpb.Check{Variant: &irpb.Check_Length{Length: &irpb.LengthCheck{Min: intPtr(3)}}},
+		To:     &irpb.Check{Variant: &irpb.Check_Length{Length: &irpb.LengthCheck{Min: intPtr(10)}}},
+	}}}
+	up, _, err := postgres.Emitter{}.EmitOp(op)
+	if err != nil {
+		t.Fatalf("EmitOp: %v", err)
+	}
+	mustContain(t, up, "DROP CONSTRAINT IF EXISTS users_name_len;")
+	mustContain(t, up, "char_length(name) >= 10")
+}
+
+// intPtr helper for tests that build synthetic Checks with optional
+// proto3 int32 fields.
+func intPtr(v int32) *int32 { return &v }
+
 // TestEmitRenameTable — symmetric ALTER ... RENAME TO with schema
 // qualification on both sides.
 func TestEmitRenameTable(t *testing.T) {
