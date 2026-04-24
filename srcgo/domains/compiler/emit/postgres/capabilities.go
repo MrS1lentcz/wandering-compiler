@@ -127,3 +127,9 @@ func (Emitter) Requirement(cap string) (emit.Requirement, bool) {
 	r, ok := pgCatalog[cap]
 	return r, ok
 }
+
+// Compile-time guarantee Emitter satisfies the DialectCapabilities
+// contract. SQL dialects MUST satisfy this interface (per emit/
+// capabilities.go); KV / non-SQL dialects (redis) may opt out and
+// engine.buildManifest handles the absence gracefully.
+var _ emit.DialectCapabilities = Emitter{}

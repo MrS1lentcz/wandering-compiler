@@ -24,3 +24,8 @@ func (Emitter) Requirement(cap string) (emit.Requirement, bool) {
 	r, ok := sqliteCatalog[cap]
 	return r, ok
 }
+
+// Compile-time guarantee Emitter satisfies the DialectCapabilities
+// contract. SQL dialects MUST satisfy this interface (per emit/
+// capabilities.go); KV / non-SQL dialects (redis) may opt out.
+var _ emit.DialectCapabilities = Emitter{}

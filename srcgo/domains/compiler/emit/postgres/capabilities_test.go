@@ -8,11 +8,9 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/postgres"
 )
 
-// Compile-time interface conformance — the PG Emitter must satisfy
-// emit.DialectCapabilities so downstream tooling (iter-2 platform /
-// deploy client) can enumerate requirements per migration uniformly
-// across dialects.
-var _ emit.DialectCapabilities = postgres.Emitter{}
+// Compile-time DialectCapabilities conformance lives in
+// production-side capabilities.go (alongside the Requirement impl)
+// — kept there so build failure surfaces before tests even compile.
 
 // Every cap the PG emitter may reference during generation must be
 // in the catalog. This list is the authoritative enumeration —

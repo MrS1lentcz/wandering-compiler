@@ -56,9 +56,21 @@ type Requirement struct {
 	Extensions []string
 }
 
-// DialectCapabilities is the small inspection interface each emitter
-// implements. Iter-1.x uses only Name + Requirement; the tracking
-// machinery lands in iter-2 alongside the platform / deploy client.
+// DialectCapabilities is the small inspection interface each SQL
+// emitter implements. Pairs with DialectEmitter via composition (no
+// explicit composite interface — Go's structural typing handles it).
+//
+// **Mandatory for SQL dialects, optional for non-SQL.** Postgres,
+// MySQL, SQLite, etc. MUST implement this so engine.buildManifest
+// can populate Manifest.RequiredExtensions from cap usage. Each SQL
+// emitter pins compile-time conformance via
+// `var _ emit.DialectCapabilities = Emitter{}` next to its
+// Requirement method — forgetting the catalog won't make it past
+// `go build`. Non-SQL dialects (redis and other whole-model KV
+// stores) may opt out: the catalog has no meaningful surface for
+// them, and engine.buildManifest treats a missing impl as
+// "contributes no extensions" (the cap list still flows from
+// Use() calls).
 type DialectCapabilities interface {
 	// Name is the stable short identifier of the dialect
 	// ("postgres", "mysql", "sqlite", …). Matches DialectEmitter.Name.

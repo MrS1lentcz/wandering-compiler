@@ -2148,6 +2148,67 @@ the cap list noise-wise. Lean: record it, let downstream filter
 for "interesting caps" if the UI wants. Consistent with every
 other cap — emission uses it, cap list names it.
 
+### D32 — Per-dialect authoring pass-through: parallel proto extensions, not generalised (added 2026-04-25)
+
+**Status: locked.** Settles the proto-shape question for the
+`(w17.pg.field) { custom_type, required_extensions }` escape
+hatch as more dialects (MySQL, future) need their own.
+
+**Decision.** Each dialect ships its own proto extension file +
+IR slot. MySQL gets `proto/w17/mysql/field.proto` with
+`(w17.mysql.field)`, an `IR Column.Mysql MysqlOptions = <next-fnum>`,
+and the MySQL emitter reads only `Column.Mysql`. PG keeps
+`(w17.pg.field)` and `Column.Pg`. Cross-dialect generalisation
+(`(w17.dialect.field).variants[mysql|pg|…]`) is rejected: it
+gains nothing concrete + complicates per-dialect proto extensions
+that *don't* exist on every dialect (PG `required_extensions` ≠
+MySQL `engine`/`collation` ≠ Redis `key_pattern`).
+
+**Why parallel.**
+
+1. Pattern already in place. `proto/w17/pg/field.proto` says
+   *explicitly*: "Mandatory rule: no dialect is allowed to infer
+   column type from `custom_type`. Every dialect namespace ships
+   its own escape hatch." MySQL just continues the pattern.
+2. Each dialect's options ARE different. PG has
+   `required_extensions`; MySQL has `engine` (InnoDB / MyISAM),
+   `collation` (utf8mb4_general_ci / …), `partition` clause.
+   Forcing them into a shared proto message means optional fields
+   that only one dialect uses, which the other dialect's authoring
+   has to ignore.
+3. Compile-time safe. PG's `Column.Pg` field has number 31; MySQL
+   gets the next free number (33 today, since list/map carrier
+   reservations took the slot pattern past 31). Adding doesn't
+   break PG wire-compat.
+4. Reader simplicity. The PG emitter does
+   `col.GetPg().GetCustomType()`. MySQL emitter does
+   `col.GetMysql().GetCustomType()`. No type assertion, no
+   variant dispatch, no risk of cross-dialect bleed.
+
+**Where the IR-level union lives.** `engine.buildManifest`
+already merges per-column `(w17.pg.field).required_extensions`
+into `Manifest.RequiredExtensions`. When MySQL lands, the same
+merge runs `(w17.mysql.field).required_plugins` (or whatever
+the parallel field is) into the same Manifest slot — the slot
+name `RequiredExtensions` stays as a dialect-neutral "things the
+DBA must install before apply" label rather than reshaping the
+manifest message. Documented at the IR-builder layer, not at the
+emitter layer.
+
+**Mandatory rule preserved.** No emitter is allowed to infer
+column type from another dialect's `custom_type`. PG ignores
+`(w17.mysql.field).custom_type` and vice versa. Cross-dialect
+schemas (one proto Message compiled for both PG and MySQL via
+multi-domain D26) set both extensions explicitly when needed.
+
+**Open sub-question (non-blocking).** Should `Manifest.
+RequiredExtensions` rename to a dialect-neutral label like
+`RequiredArtifacts` or `RequiredPrerequisites`? Lean: no — the
+PG term is already what most ops engineers think of, and renaming
+churns the manifest contract for the deploy client (D29) before
+the deploy client even exists. Revisit if MySQL's plugin model
+makes the field name actively misleading.
+
 ## Where this document stops
 
 Everything past M4 Layer A+B is backlog territory
