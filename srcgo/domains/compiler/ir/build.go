@@ -28,6 +28,7 @@ import (
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	w17pb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17"
 	dbpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/db"
+	pgpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/pg"
 )
 
 // Build converts a loaded .proto into a validated *irpb.Schema.
@@ -229,6 +230,23 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 	if len(merged.errs) > 0 {
 		allErrs = append(allErrs, merged.errs...)
 		return nil, errors.Join(allErrs...)
+	}
+
+	// D36 — attach the resolved PG custom_types registry to the
+	// Schema so downstream (plan.Diff + engine.Plan) can read the
+	// convertible_to / convertible_from lists without re-walking
+	// loaded files.
+	if customTypes != nil {
+		flat := map[string]*pgpb.CustomType{}
+		for k, v := range customTypes.projectByAlias {
+			flat[k] = v
+		}
+		for k, v := range customTypes.domainByAlias {
+			flat[k] = v
+		}
+		if len(flat) > 0 {
+			schema.PgCustomTypes = flat
+		}
 	}
 	return schema, nil
 }

@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package w17.compiler.ir;
 
+import "w17/pg/module.proto";  // w17.pg.CustomType — D36 registry
+
 option go_package = "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir;irpb";
 
 // Compiler-internal IR. Produced by srcgo/domains/compiler/ir.Build, consumed
@@ -33,6 +35,17 @@ message Schema {
   // M3 activates multi-connection dispatch with per-connection
   // Schema instances.
   Connection connection = 4;
+
+  // D36 — PG custom_types registry keyed by alias. Project-level
+  // entries merged with domain-level entries by ir.BuildMany;
+  // collisions rejected at build time. Engine consumes this for
+  // custom_type_change Op rendering (D36 Commit B) — looks up the
+  // `convertible_to` / `convertible_from` template between prev
+  // and curr alias when user resolves to a non-CUSTOM strategy.
+  //
+  // Empty on non-PG schemas (REDIS / future MYSQL keep their own
+  // per-dialect registries in parallel fields when they arrive).
+  map<string, w17.pg.CustomType> pg_custom_types = 5;
 }
 
 // Connection identifies one DB target (dialect + version + logical

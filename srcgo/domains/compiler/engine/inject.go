@@ -57,16 +57,36 @@ func injectStrategyOps(
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
 			out = append(out, ops...)
-		default:
-			// Other decision-required axes today only accept
-			// CUSTOM_MIGRATION. If user resolved them to a non-custom
-			// strategy, we have no template to synthesise SQL from —
-			// fall through silently; buildManifest still records the
-			// AppliedResolution so the audit trail survives.
-			continue
+		case "pg_custom_type":
+			// D36 Commit B — typed registry path. Resolution looks up
+			// conversion template in Schema.PgCustomTypes; falls back
+			// to hard-error when no registered path exists.
+			ops, err := injectCustomTypeChange(p, bkt)
+			if err != nil {
+				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
+			}
+			out = append(out, ops...)
+		case "pk_flip", "enum_fqn_change", "enum_remove_value", "element_carrier_reshape":
+			// D36 B1 — these axes accept only CUSTOM_MIGRATION. User
+			// resolving them to another strategy previously landed
+			// silently (AppliedResolution recorded, no SQL emitted —
+			// silent-empty-migration bug). Hard-error instead with
+			// explicit guidance.
+			return nil, fmt.Errorf("finding %s (%s): strategy %s is not supported for this axis — only CUSTOM_MIGRATION is accepted (supply --decide %s=custom:<sql-file>)",
+				p.Finding.GetId(), p.Finding.GetAxis(), p.Resolution.GetStrategy(),
+				findingKey(p.Finding))
 		}
 	}
 	return out, nil
+}
+
+// findingKey formats a human-readable `<table>.<column>:<axis>`
+// identifier for --decide error messages. Omits the axis suffix
+// when the Finding doesn't need axis disambiguation (column has
+// only one pending axis).
+func findingKey(f *planpb.ReviewFinding) string {
+	c := f.GetColumn()
+	return fmt.Sprintf("%s.%s:%s", c.GetTableName(), c.GetColumnName(), f.GetAxis())
 }
 
 // injectCarrierChange synthesises the Op(s) for a resolved
@@ -132,6 +152,110 @@ func injectCarrierChange(
 	}
 
 	return nil, fmt.Errorf("carrier_change: unhandled strategy %s", strategy)
+}
+
+// injectCustomTypeChange renders Ops for a resolved pg_custom_type
+// finding. Strategy dispatch:
+//
+//   - DROP_AND_CREATE → DropColumn + AddColumn pair.
+//   - SAFE / LOSSLESS_USING / NEEDS_CONFIRM → AlterColumn with
+//     TypeChange; USING clauses rendered from the registered
+//     convertible_to / convertible_from cast templates.
+//
+// Falls back to hard-error when no conversion template is
+// registered between prev.alias and curr.alias — author must
+// either extend the registry or resolve as CUSTOM_MIGRATION.
+func injectCustomTypeChange(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
+	ref := p.Finding.GetColumn()
+	prevTable, prevCol := findColumnByRef(bkt.prev, ref)
+	_, currCol := findColumnByRef(bkt.curr, ref)
+	if prevCol == nil || currCol == nil {
+		return nil, fmt.Errorf("pg_custom_type: prev/curr column not found via %s/#%d",
+			ref.GetTableFqn(), ref.GetFieldNumber())
+	}
+
+	ctx := &planpb.TableCtx{
+		TableName:     prevTable.GetName(),
+		MessageFqn:    prevTable.GetMessageFqn(),
+		NamespaceMode: prevTable.GetNamespaceMode(),
+		Namespace:     prevTable.GetNamespace(),
+	}
+
+	strategy := p.Resolution.GetStrategy()
+	if strategy == planpb.Strategy_DROP_AND_CREATE {
+		return []*planpb.Op{
+			{Variant: &planpb.Op_DropColumn{DropColumn: &planpb.DropColumn{
+				Ctx: ctx, Column: prevCol,
+			}}},
+			{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
+				Ctx: ctx, Column: currCol,
+			}}},
+		}, nil
+	}
+
+	// SAFE / LOSSLESS_USING / NEEDS_CONFIRM — look up conversion path
+	// + render cast template with {{.Col}} / {{.Table}} context.
+	prevAlias := prevCol.GetPg().GetCustomTypeAlias()
+	currAlias := currCol.GetPg().GetCustomTypeAlias()
+	data := carrierUsingContext{
+		Col:     currCol.GetName(),
+		Table:   prevTable.GetName(),
+		Project: projectContext{Encoding: "escape"},
+	}
+	usingUp := renderUsingTemplate(lookupCustomTypeCast(bkt.curr, prevAlias, currAlias), data)
+	data.Col = prevCol.GetName()
+	usingDown := renderUsingTemplate(lookupCustomTypeCast(bkt.curr, currAlias, prevAlias), data)
+	if usingUp == "" && currAlias != "" && prevAlias != "" {
+		return nil, fmt.Errorf("pg_custom_type %q → %q: no conversion path registered for strategy %s — either add a convertible_to entry on %q pointing at %q (or convertible_from on %q pointing at %q), or resolve with --decide %s=custom:<sql-file>",
+			prevAlias, currAlias, strategy, prevAlias, currAlias, currAlias, prevAlias, findingKey(p.Finding))
+	}
+
+	return []*planpb.Op{{
+		Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+			Ctx:        ctx,
+			ColumnName: currCol.GetName(),
+			Column:     currCol,
+			PrevColumn: prevCol,
+			Changes: []*planpb.FactChange{{
+				Variant: &planpb.FactChange_TypeChange{TypeChange: &planpb.TypeChange{
+					FromColumn: prevCol,
+					ToColumn:   currCol,
+					UsingUp:    usingUp,
+					UsingDown:  usingDown,
+					Strategy:   strategy,
+				}},
+			}},
+		}},
+	}}, nil
+}
+
+// lookupCustomTypeCast searches the registered custom_type entries
+// for a conversion path from `from` to `to`. Checks first the
+// `from` entry's convertible_to, then falls back to the `to`
+// entry's convertible_from. Returns the rendered cast template
+// (with {{.Col}} / {{.Table}} substituted) or "" if no path exists.
+//
+// The scan is O(entries-of-from + entries-of-to) — tiny in
+// practice, each alias registration lists 1–5 conversion entries.
+func lookupCustomTypeCast(schema *irpb.Schema, fromAlias, toAlias string) string {
+	if fromAlias == "" || toAlias == "" || fromAlias == toAlias {
+		return ""
+	}
+	if entry, ok := schema.GetPgCustomTypes()[fromAlias]; ok {
+		for _, conv := range entry.GetConvertibleTo() {
+			if conv.GetType() == toAlias {
+				return conv.GetCast()
+			}
+		}
+	}
+	if entry, ok := schema.GetPgCustomTypes()[toAlias]; ok {
+		for _, conv := range entry.GetConvertibleFrom() {
+			if conv.GetType() == fromAlias {
+				return conv.GetCast()
+			}
+		}
+	}
+	return ""
 }
 
 // renderCarrierUsing renders the USING expressions for forward +

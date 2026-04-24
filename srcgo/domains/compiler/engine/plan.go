@@ -357,6 +357,18 @@ func bucketByConnection(prev, curr *irpb.Schema) (map[string]*bucket, []string) 
 	for _, t := range curr.GetTables() {
 		addTable("curr", t)
 	}
+	// D36 — bucket schemas inherit the full PgCustomTypes registry
+	// from their source. Engine lookups for custom_type_change cast
+	// templates consult bkt.curr.PgCustomTypes; without this copy the
+	// bucket's freshly-made Schema{} would be empty.
+	for _, b := range buckets {
+		if prev != nil {
+			b.prev.PgCustomTypes = prev.GetPgCustomTypes()
+		}
+		if curr != nil {
+			b.curr.PgCustomTypes = curr.GetPgCustomTypes()
+		}
+	}
 	// prev == nil means initial migration — the buckets' prev side
 	// must surface as nil so plan.Diff takes the "no prev" path.
 	if prev == nil {
