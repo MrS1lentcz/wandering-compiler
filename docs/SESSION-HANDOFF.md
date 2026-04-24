@@ -944,3 +944,110 @@ contract:
 Anyone joining the project reads this doc first for structural
 understanding; the D-records in iter-2.md hold the decision
 history.
+
+## 2026-04-25 — Decision-pending sweep: D35 → D40 (commits 43e47d1 → 815469d)
+
+Closed every decision-pending axis the e2e skip triage flagged.
+Five D-records, all built around one principle (codified inline
++ in feedback_strategy_semantics memory):
+
+> CUSTOM_MIGRATION is reserved for non-deterministic transitions
+> (json→boolean, semantic remap). Deterministic-but-destructive
+> transitions are NEEDS_CONFIRM with an engine-rendered template —
+> the engine writes the SQL, the user confirms the destructive
+> outcome.
+
+### What shipped (in order)
+
+- **D35 (43e47d1)**: deterministic risk analysis always emitted
+  on ALTER migrations. `engine/risk.go` static profile table;
+  comment header at the top of every migration with severity +
+  lock + rationale + recommendation. No DB inspection; pure
+  Op-shape derivation.
+- **D36 A+B+C (75b72f5, 88c2866, 9a00670)**: typed custom_types
+  registry replaces opaque `(w17.pg.field).custom_type: "<raw
+  SQL>"`. Three-layer model: project options proto +
+  domain-options proto + field references alias. D33-style
+  conversion templates per registered alias. D35 risk split:
+  `pg_custom_type_registered` MEDIUM vs `pg_custom_type_unregistered`
+  HIGH.
+- **D37 (55f2096)**: enum_values/remove CUSTOM_MIGRATION →
+  NEEDS_CONFIRM. PG ENUM rebuild template (4 statements: CREATE
+  TYPE new / ALTER USING / DROP TYPE old / RENAME). Risk: USING
+  cast fails if rows still carry removed value.
+- **D38 (f80a9bb)**: default identity lifecycle + auto_kind_change
+  in-axis fix. identity_add CUSTOM_MIGRATION → NEEDS_CONFIRM with
+  ADD GENERATED + setval(pg_get_serial_sequence) template;
+  identity_drop NEEDS_CONFIRM impl added; auto_kind_change SAFE
+  path fixed (synthetic-column-to-defaultExpr bug; AUTO_NOW now
+  picks NOW()/CURRENT_DATE/CURRENT_TIME by sem type).
+- **D39 (436e393)**: pk_flip single-column CUSTOM_MIGRATION →
+  NEEDS_CONFIRM. ALTER TABLE ADD PRIMARY KEY / DROP CONSTRAINT
+  <t>_pkey templates (PG auto-naming). Multi-column PK swap
+  hard-errors with pointer to CUSTOM_MIGRATION (composite is
+  beyond single-template scope). New FactChange variant
+  PrimaryKeyChange.
+- **D40 (815469d)**: enum_fqn_change CUSTOM_MIGRATION →
+  NEEDS_CONFIRM via the same path as D37 (renamed
+  `injectEnumRemoveValue` → `injectEnumValuesChange`; computes
+  added + removed from enum_names diff; emit picks rebuild /
+  ADD VALUE / no-op marker). Last B1 graduation.
+
+### Test state at end of sweep
+
+- `go test ./...` green; engine coverage 90.9%, postgres emit
+  78.4%, plan 70.9%.
+- E2E classifier matrix on PG 14-18 has every previously
+  decision-pending axis green: pg_custom_type_any (D36),
+  enum_values_remove + enum_values_fqn_change (D37/D40),
+  default_identity_add + identity_drop + auto_kind_change (D38),
+  pk_enable + pk_disable (D39).
+- E2E manifest goldens (TestManifestGoldens/pg_dialect)
+  regenerated multiple times due to protojson whitespace flake;
+  any future regeneration via `-update` flag is fine.
+
+### B1 hard-error list after D40
+
+Only `element_carrier_reshape` remains. Genuinely non-deterministic
+(MAP value / LIST element carrier change requires per-element
+remap the compiler has no template for); confirmed CUSTOM_MIGRATION-
+only in docs/e2e-matrix-coverage.md D.5.
+
+### Where to resume next session
+
+**Next substantive block: M4 Layer C — MySQL emitter stub.**
+User explicitly paused before this back at 2026-04-25 mid-session;
+all decision-pending work is now closed, so M4-C unblocks cleanly.
+
+The D32 per-dialect proto extension contract is locked. M4-C
+follows the contract:
+
+1. `proto/w17/mysql/field.proto` + `(w17.mysql.field)` extension.
+2. `Column.Mysql MysqlOptions` in `ir.proto` + IR builder read.
+3. `srcgo/domains/compiler/emit/mysql/` — Emitter + catalog.
+4. `pickEmitter` wire-up (today returns "not implemented").
+5. `scripts/test-apply.sh` case `mysql)` arm + Makefile target.
+6. Third bucket in `TestPlan_MultiDialect_HappyPath`.
+7. A MySQL grand-tour fixture with its own `expected/` golden.
+
+Read `docs/iteration-2.md` D32 first for the contract; then
+`emit/postgres/` as the reference implementation.
+
+### Still owed (soft, non-blocking on MySQL)
+
+- **Coverage push to ≥94.3%** (current cross-package floor from
+  iter-1 §3.3-ter). Engine 90.9% suggests we slipped a bit on the
+  D36-D40 sweep; postgres 78.4% is mostly e2e-only paths. Both
+  acceptable until a coverage gate is enforced.
+- **Makefile standard targets** (configure / install / up / audit
+  / seed / nuke / neoc / migrate / e2e / loadtest) — pre-poc gate
+  per `tooling.md`.
+- **wc_migrations bookkeeping extensions** (hash-verify utility,
+  partial-failure recovery, multi-connection rollback) — iter-2
+  follow-up.
+
+### Parked (explicit iter-3+)
+
+- DQL.
+- Local schema validator.
+- Deploy-client consumption of manifest.json.
