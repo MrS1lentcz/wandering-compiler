@@ -2148,6 +2148,111 @@ the cap list noise-wise. Lean: record it, let downstream filter
 for "interesting caps" if the UI wants. Consistent with every
 other cap — emission uses it, cap list names it.
 
+### D34 — Dialects grouped by category; one domain = one dialect per category (added 2026-04-25)
+
+**Status: locked.** Extends D26 (multi-connection per domain) with
+an invariant: every dialect belongs to exactly one **category**,
+and within a domain each category may host **at most one**
+connection. Combining dialects from different categories is fine;
+combining dialects of the same category is rejected at IR build
+time.
+
+**Categories.**
+
+| Category | Primary role | Current dialects | Future |
+|---|---|---|---|
+| `RELATIONAL` | Structured schema, SQL DDL, row/column semantics | `POSTGRES`, `MYSQL`, `SQLITE` | MSSQL, Oracle, CockroachDB |
+| `KEY_VALUE` | Whole-document storage, key pattern access | `REDIS` | Memcached, DynamoDB |
+| `MESSAGE_BROKER` | Event streams, topic/queue semantics | — | Kafka, RabbitMQ, NATS |
+
+Classification is by **primary focus**. PostgreSQL has LISTEN/
+NOTIFY (broker-ish) and key-value extensions; Redis has streams
+(broker-ish); some stores span multiple paradigms. We classify by
+the DB's primary design intent and never retag a dialect into
+multiple categories — the category is a fixed property per
+dialect row in the IR.
+
+**Rule within a domain.**
+
+A domain MAY run against:
+- 0 or 1 RELATIONAL connection
+- 0 or 1 KEY_VALUE connection
+- 0 or 1 MESSAGE_BROKER connection (future)
+
+A domain MAY NOT run against:
+- 2 RELATIONAL connections (e.g. PG + MySQL in the same domain —
+  that's a multi-domain architecture, each domain picks its
+  relational backend)
+- 2 KEY_VALUE connections (e.g. Redis + Memcached — unnecessary
+  complexity; pick one)
+- 2 MESSAGE_BROKER connections
+
+Combining categories is encouraged when the domain's data model
+actually spans paradigms — e.g., a domain whose transactional
+records live in PG and whose ephemeral session cache lives in
+Redis. Not everything in a domain is necessarily relational.
+
+**Why this over "any combination of dialects".**
+
+D26's predecessor let a domain declare arbitrary connections.
+That would allow `(PG, MySQL)` per-table overrides, which means
+compile-time awareness of multiple SQL dialects inside one
+domain's schema registry. Pragmatically, no project needs this —
+if you need both, you're running two services / domains that
+each own their relational backend. The invariant:
+
+- keeps per-domain type-compatibility checks simple (only one
+  RELATIONAL dialect's cap catalog applies to schema validation);
+- keeps the emitter dispatch per-domain trivial (pick the one
+  RELATIONAL emitter for most ops, the one KEY_VALUE emitter for
+  whole-model ops);
+- cuts Layer C scope cleanly: adding MySQL doesn't require
+  reasoning about "what if this domain also has PG?" because
+  that combination is disallowed.
+
+**Enforcement.**
+
+IR build time. `Schema.Connection` + `Table.Connection` overrides
+are aggregated per domain; the loader rejects schemas where two
+distinct dialects share a category. Error fixture:
+`multi_relational_rejected` (future IR error-fixture batch).
+
+**Proto shape.**
+
+`proto/w17/db.proto`'s `Dialect` enum stays as-is; the category
+is derived statically in Go via a `DialectCategory(Dialect)`
+lookup next to the dialect constants. Rationale: category is a
+property of the dialect kind, not a per-connection choice —
+putting it on `Connection` would let authors mis-tag
+(`dialect: POSTGRES, category: KEY_VALUE`) which is nonsense.
+Lookup is in one place, drift-proof.
+
+**Rationale (user, 2026-04-25).**
+
+> "kazdy dialekt/db bude mit svoji kategorii, napr relacni db vs
+> key value storage. v ramci domeny bych nechtel mit moznost mit
+> vice db stejneho typu, napr kombinovat mysql a pg, protoze to
+> nesmyslne zvyujes komplexitu a nedava to smysl - to je vetsinou
+> vice domenovy pristup, kdy kazda domena ma svoji db, ale
+> kombinace relacni + kv dava smysl, protoze ne vsech v domene
+> jsou nutne relacni data. kazdopadne ani kv nechceme kombinovat,
+> abychom nezvysovali slozitost, vyhledove budeme mit asi tri
+> typy: relacni db, key value storage a message broker - nektere
+> db umi oboje nebo vsechny tri, ale to nebudeme resit, budeme se
+> na ne divat z jejich primarniho zamereni"
+
+**Implementation status.**
+
+- Category lookup function + compile-time enforcement: **not yet
+  implemented**. Tracked as a follow-up before Layer C (MySQL
+  stub) opens — MySQL landing is the concrete moment where the
+  "two relational dialects in one domain" question becomes
+  reachable.
+- Existing fixtures (pg_dialect + redis multi-connection) already
+  comply — PG + Redis is (RELATIONAL, KEY_VALUE), one of each.
+- D26 stays the authoritative multi-connection spec; D34
+  narrows its allowed shapes.
+
 ### D33 — Engine renders YAML strategy templates into Ops (added 2026-04-25)
 
 **Status: locked.** Closes the gap between "classifier says
