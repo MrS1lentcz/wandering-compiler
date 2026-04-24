@@ -122,53 +122,117 @@ func TestPlan_CarrierChange_Unresolved(t *testing.T) {
 // TestPlan_CarrierChange_Resolved — same carrier change, but caller
 // supplies a Resolution matching the finding ID. The finding moves
 // from Plan.Findings into the Migration's Manifest.AppliedResolutions;
-// Plan.Findings is now empty.
+// Plan.Findings is now empty. Post-D33 the resolution also injects
+// emittable Ops so the Migration actually carries SQL.
 func TestPlan_CarrierChange_Resolved(t *testing.T) {
 	cls := testClassifier(t)
-	mk := func(carrier irpb.Carrier) *irpb.Schema {
+	// Use a non-PK column so DROP_AND_CREATE is valid (dropping a PK
+	// column would be a separate invariant hit). Table keeps its own
+	// integer PK untouched.
+	mk := func(targetCarrier irpb.Carrier, targetSem irpb.SemType) *irpb.Schema {
 		return &irpb.Schema{Tables: []*irpb.Table{{
 			Name: "users", MessageFqn: "shop.User",
 			Columns: []*irpb.Column{
 				{Name: "id", ProtoName: "id", FieldNumber: 1,
-					Carrier: carrier,
+					Carrier: irpb.Carrier_CARRIER_INT64,
 					Type:    irpb.SemType_SEM_ID,
+					DbType:  irpb.DbType_DBT_BIGINT,
 					Pk:      true},
+				{Name: "flag", ProtoName: "flag", FieldNumber: 2, Nullable: true,
+					Carrier: targetCarrier, Type: targetSem,
+					MaxLen: func() int32 {
+						if targetCarrier == irpb.Carrier_CARRIER_STRING {
+							return 32
+						}
+						return 0
+					}()},
 			},
 			PrimaryKey: []string{"id"},
 		}}}
 	}
+	prev := mk(irpb.Carrier_CARRIER_BOOL, irpb.SemType_SEM_UNSPECIFIED)
+	curr := mk(irpb.Carrier_CARRIER_STRING, irpb.SemType_SEM_CHAR)
+
 	// Round 1: probe to learn the finding ID.
-	probe, _ := engine.Plan(
-		mk(irpb.Carrier_CARRIER_INT64),
-		mk(irpb.Carrier_CARRIER_STRING),
-		cls, nil, pgOnlyEmitter,
-	)
+	probe, _ := engine.Plan(prev, curr, cls, nil, pgOnlyEmitter)
 	if len(probe.Findings) != 1 {
 		t.Fatalf("probe: expected 1 finding, got %d", len(probe.Findings))
 	}
 	findingID := probe.Findings[0].GetId()
 
-	// Round 2: supply a matching Resolution.
+	// Round 2: supply a matching Resolution — DROP_AND_CREATE on a
+	// non-PK column is a valid user opt-in for a BOOL→STRING flip.
 	resolutions := []*planpb.Resolution{{
 		FindingId: findingID,
 		Strategy:  planpb.Strategy_DROP_AND_CREATE,
 		Actor:     "test",
 	}}
-	result, err := engine.Plan(
-		mk(irpb.Carrier_CARRIER_INT64),
-		mk(irpb.Carrier_CARRIER_STRING),
-		cls, resolutions, pgOnlyEmitter,
-	)
+	result, err := engine.Plan(prev, curr, cls, resolutions, pgOnlyEmitter)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
 	if len(result.Findings) != 0 {
 		t.Errorf("expected Findings to clear after Resolution; got %d", len(result.Findings))
 	}
-	// The bucket had no other changes than the carrier flip, so the
-	// Migration is still empty (no SQL to emit). Manifest-only effect
-	// of Resolution lives in the Migration envelope — only present
-	// when a Migration was emitted for other changes.
+	// Post-D33: the Migration now carries DROP COLUMN + ADD COLUMN
+	// SQL produced by injectStrategyOps.
+	if len(result.Migrations) != 1 {
+		t.Fatalf("want 1 migration (carrier-change Drop+Add), got %d", len(result.Migrations))
+	}
+	up := result.Migrations[0].GetUpSql()
+	if !strings.Contains(up, "DROP COLUMN flag") || !strings.Contains(up, "ADD COLUMN flag") {
+		t.Errorf("expected Drop+Add on `flag`, got up=%q", up)
+	}
+	// Applied-resolution audit survives in the manifest.
+	m := result.Migrations[0].GetManifest()
+	if m == nil || len(m.GetAppliedResolutions()) != 1 {
+		t.Errorf("expected one AppliedResolution in manifest, got %v", m)
+	}
+}
+
+// TestPlan_CarrierChange_LosslessUsing — covers the D33 template-
+// rendering path for a SAFE/LOSSLESS_USING carrier transition. The
+// BOOL→STRING cell classifies as LOSSLESS_USING with using template
+// `{{.Col}}::text`. Engine must emit an AlterColumn with TypeChange
+// + the rendered USING clause.
+func TestPlan_CarrierChange_LosslessUsing(t *testing.T) {
+	cls := testClassifier(t)
+	mk := func(targetCarrier irpb.Carrier, targetSem irpb.SemType, maxLen int32) *irpb.Schema {
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "users", MessageFqn: "shop.User",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1,
+					Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID,
+					DbType: irpb.DbType_DBT_BIGINT, Pk: true},
+				{Name: "flag", ProtoName: "flag", FieldNumber: 2, Nullable: true,
+					Carrier: targetCarrier, Type: targetSem, MaxLen: maxLen},
+			},
+			PrimaryKey: []string{"id"},
+		}}}
+	}
+	prev := mk(irpb.Carrier_CARRIER_BOOL, irpb.SemType_SEM_UNSPECIFIED, 0)
+	curr := mk(irpb.Carrier_CARRIER_STRING, irpb.SemType_SEM_CHAR, 32)
+
+	probe, _ := engine.Plan(prev, curr, cls, nil, pgOnlyEmitter)
+	if len(probe.Findings) != 1 {
+		t.Fatalf("probe: expected 1 finding, got %d", len(probe.Findings))
+	}
+	resolutions := []*planpb.Resolution{{
+		FindingId: probe.Findings[0].GetId(),
+		Strategy:  planpb.Strategy_LOSSLESS_USING,
+		Actor:     "test",
+	}}
+	result, err := engine.Plan(prev, curr, cls, resolutions, pgOnlyEmitter)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(result.Migrations) != 1 {
+		t.Fatalf("want 1 migration, got %d", len(result.Migrations))
+	}
+	up := result.Migrations[0].GetUpSql()
+	if !strings.Contains(up, "ALTER COLUMN flag TYPE VARCHAR(32) USING flag::text") {
+		t.Errorf("expected ALTER ... TYPE VARCHAR(32) USING flag::text; got up=%q", up)
+	}
 }
 
 // TestPlan_Idempotence — same inputs produce byte-identical output.

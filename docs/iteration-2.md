@@ -2148,6 +2148,96 @@ the cap list noise-wise. Lean: record it, let downstream filter
 for "interesting caps" if the UI wants. Consistent with every
 other cap — emission uses it, cap list names it.
 
+### D33 — Engine renders YAML strategy templates into Ops (added 2026-04-25)
+
+**Status: locked.** Closes the gap between "classifier says
+LOSSLESS_USING with this using: template" and "engine produces
+actual migration SQL." Uncovered during pre-Layer-C review:
+`classifier.Cell.Using` is loaded from YAML but no path rendered
+it into an Op; resolutions of non-CUSTOM_MIGRATION strategies
+silently produced empty Migrations.
+
+**Scope.** Cross-carrier ReviewFindings (axis `carrier_change`,
+110 cells in `docs/classification/carrier.yaml`). When the
+caller supplies a Resolution via `--decide`, engine injects
+synthetic Ops before emit runs.
+
+**Strategy dispatch.**
+
+| Strategy | Injected Op(s) | Where USING comes from |
+|---|---|---|
+| `SAFE` | `AlterColumn` w/ `TypeChange` fact | (empty) — PG implicit cast |
+| `LOSSLESS_USING` | `AlterColumn` w/ `TypeChange` fact | rendered `cell.Using` forward; reverse = symmetric cell's Using or empty |
+| `NEEDS_CONFIRM` | `AlterColumn` w/ `TypeChange` + check.sql emitted via `collectChecks` | same as LOSSLESS_USING |
+| `DROP_AND_CREATE` | `DropColumn` + `AddColumn` pair | — (no USING for drop+create) |
+| `CUSTOM_MIGRATION` | — (splice only) | — (author-supplied SQL) |
+
+**Proto addition.**
+
+```proto
+message FactChange {
+  oneof variant {
+    // ... existing 12 variants
+    TypeChange type_change = 13;  // NEW
+  }
+}
+message TypeChange {
+  w17.compiler.ir.Column from_column = 1;  // prev Column snapshot
+  w17.compiler.ir.Column to_column = 2;    // curr Column snapshot
+  string using_up = 3;                      // rendered USING forward
+  string using_down = 4;                    // rendered USING reverse
+  Strategy strategy = 5;                    // audit trail
+}
+```
+
+**Why a new FactChange variant, not an extension of DbTypeChange.**
+DbTypeChange operates within a single carrier family
+(VARCHAR↔TEXT). Cross-carrier is fundamentally different — the
+USING clause is non-optional for most transitions and comes from
+the classifier's template, not a cast-keyword heuristic. Reusing
+DbTypeChange would require a `using_override` field on it, which
+muddies the "within-carrier" invariant.
+
+**Why `from_column` + `to_column`, not pre-rendered type strings.**
+Keeps engine dialect-agnostic. PG emitter calls its own
+`columnType(table, col)` on each side — cap instrumentation
+(D31) lights up the same way as AddTable/AddColumn would. MySQL
+(Layer C) renders its own types from the same Column snapshots.
+
+**Engine-side injection point.** Before `emit.Emit`, after
+`splitByResolution`. `injectStrategyOps` walks resolvedPairs
+(minus CUSTOM_MIGRATION) and appends Ops to the plan. Ops land
+in Finding-ID-sorted order for determinism.
+
+**Emitter contract.** Each dialect's `EmitOp` must dispatch
+`FactChange_TypeChange` to render its own
+`ALTER TABLE … ALTER COLUMN … TYPE <type> [USING <expr>];`
+statement. PG renders via `renderTypeChange` →
+`columnType()` + `renderAlterColumnType`.
+
+**Out of scope (today).**
+- Non-carrier cross-axis findings (pk_flip, custom_type_change,
+  enum_fqn_change, enum_remove_value,
+  element_carrier_reshape). These axes don't have YAML templates
+  — only CUSTOM_MIGRATION is valid. If user resolves them to a
+  non-custom strategy, engine's `injectStrategyOps` falls
+  through silently; manifest still records the
+  `AppliedResolution` for audit. Future D-record may extend
+  coverage case-by-case.
+- Cross-carrier NEEDS_CONFIRM where no `using:` template exists
+  in the cell → engine emits plain ALTER TABLE TYPE without
+  USING + the cell's check.sql; PG may refuse the implicit cast
+  at apply time.
+
+**Rationale.** Without D33, the 110-cell carrier matrix was only
+testable for CUSTOM_MIGRATION (80 cells) via string splice.
+With D33, the remaining 30 cells (13 LOSSLESS_USING + 16
+NEEDS_CONFIRM + 1 SAFE) can produce real migration SQL that the
+F2 E2E matrix runner applies against PG across the supported
+version range. Layer C MySQL inherits the same pattern — MySQL
+emitter just needs its own `renderTypeChange` + `columnType`
+dispatch.
+
 ### D32 — Per-dialect authoring pass-through: parallel proto extensions, not generalised (added 2026-04-25)
 
 **Status: locked.** Settles the proto-shape question for the

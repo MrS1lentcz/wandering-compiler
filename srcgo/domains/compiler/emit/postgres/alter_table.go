@@ -322,6 +322,8 @@ func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, 
 		return up, down, nil
 	case *planpb.FactChange_DbType:
 		return renderDbTypeChange(qualTable, colName, v.DbType, column, prevColumn, usage)
+	case *planpb.FactChange_TypeChange:
+		return renderTypeChange(qualTable, colName, v.TypeChange, usage)
 	case *planpb.FactChange_Unique:
 		up, down := renderUniqueChange(qualTable, colName, v.Unique)
 		return up, down, nil
@@ -470,6 +472,39 @@ func dbTypeOrEffective(t irpb.DbType, col *irpb.Column, tableName string, usage 
 		return "", fmt.Errorf("UNSPECIFIED DbType with no column snapshot")
 	}
 	return columnType(tableName, col, usage)
+}
+
+// renderTypeChange — D33 cross-carrier ALTER TABLE ... TYPE clause.
+// Column type strings are rendered through the standard columnType
+// dispatch (so cap usage lights up the same way as AddTable/
+// AddColumn would). USING expressions come pre-rendered by engine
+// from the classifier template; empty using = plain ALTER TABLE
+// TYPE without USING.
+func renderTypeChange(qual, col string, ch *planpb.TypeChange, usage *emit.Usage) (string, string, error) {
+	tableName := qualToTable(qual)
+	toType, err := columnType(tableName, ch.GetToColumn(), usage)
+	if err != nil {
+		return "", "", fmt.Errorf("TypeChange to_column: %w", err)
+	}
+	fromType, err := columnType(tableName, ch.GetFromColumn(), usage)
+	if err != nil {
+		return "", "", fmt.Errorf("TypeChange from_column: %w", err)
+	}
+	up := renderAlterColumnType(qual, col, toType, ch.GetUsingUp())
+	down := renderAlterColumnType(qual, col, fromType, ch.GetUsingDown())
+	return up, down, nil
+}
+
+// renderAlterColumnType formats one ALTER TABLE ... ALTER COLUMN
+// ... TYPE <type> [USING <expr>]; statement. Empty using omits
+// the clause — PG attempts implicit cast, fails at apply if
+// incompatible (which is the correct signal).
+func renderAlterColumnType(qual, col, typeSQL, using string) string {
+	if using == "" {
+		return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", qual, col, typeSQL)
+	}
+	return fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s;",
+		qual, col, typeSQL, using)
 }
 
 // recordDbTypeCap mirrors pgColumnFromDbType's cap-tagging for the

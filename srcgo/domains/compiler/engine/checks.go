@@ -102,6 +102,13 @@ func classifyFactChange(
 		curr := alter.GetColumn()
 		cell := cls.DbType(curr.GetCarrier(), v.DbType.GetFrom(), v.DbType.GetTo())
 		return cell, "dbtype", true
+	case *planpb.FactChange_TypeChange:
+		// D33 — carrier change synthesised by engine.injectStrategyOps.
+		// Re-classifies against the carrier matrix so NEEDS_CONFIRM
+		// cells emit their check.sql alongside the ALTER.
+		from := v.TypeChange.GetFromColumn().GetCarrier()
+		to := v.TypeChange.GetToColumn().GetCarrier()
+		return cls.Carrier(from, to), "carrier_change", true
 	case *planpb.FactChange_GeneratedExpr:
 		from, to := v.GeneratedExpr.GetFrom(), v.GeneratedExpr.GetTo()
 		var caseID string

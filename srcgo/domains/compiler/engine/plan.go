@@ -91,12 +91,25 @@ func planBucket(
 	if err != nil {
 		return nil, nil, err
 	}
+
+	unresolved, applied, resolvedPairs := splitByResolution(result.Findings, resolutionsByID)
+
+	// D33 — inject synthetic Ops for resolved cross-carrier findings
+	// before emit, so strategy-driven SQL (LOSSLESS_USING templates,
+	// SAFE plain-ALTER, DROP_AND_CREATE drop+add, NEEDS_CONFIRM with
+	// check.sql + using) flows through the standard emit dispatch.
+	// CUSTOM_MIGRATION stays on the string-splice path (opaque user
+	// SQL) and is filtered out here.
+	injected, err := injectStrategyOps(resolvedPairs, cls, bkt)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inject strategy ops: %w", err)
+	}
+	result.Plan.Ops = append(result.Plan.Ops, injected...)
+
 	up, down, usage, err := emit.Emit(emitter, result.Plan)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	unresolved, applied, resolvedPairs := splitByResolution(result.Findings, resolutionsByID)
 
 	// Splice author-provided CUSTOM_MIGRATION SQL into the Migration
 	// body before AC #1's empty-diff check — CUSTOM_MIGRATION may be

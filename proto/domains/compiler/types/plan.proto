@@ -187,6 +187,15 @@ message FactChange {
     EnumValuesChange         enum_values         = 10;
     AllowedExtensionsChange  allowed_extensions  = 11;
     UniqueChange             unique              = 12;
+    // D33 — cross-carrier type change, synthesised by engine.Plan
+    // from a resolved ReviewFinding. Carries the pre-rendered PG
+    // type strings + optional USING expressions (templated from
+    // classifier.yaml `using:` entries). Distinct from DbTypeChange
+    // because the latter operates within a single carrier family
+    // (VARCHAR↔TEXT); cross-carrier changes (BOOL→STRING,
+    // INT32→INT64, …) need the USING clause explicit rather than
+    // synthesised by cast-keyword heuristics.
+    TypeChange               type_change         = 13;
   }
 }
 
@@ -204,6 +213,37 @@ message PgOptionsChange       { w17.compiler.ir.PgOptions from = 1; w17.compiler
 message CommentChange         { string from = 1; string to = 2; }
 message GeneratedExprChange   { string from = 1; string to = 2; }
 message UniqueChange          { bool from = 1; bool to = 2; }
+
+// TypeChange — D33 cross-carrier ALTER TABLE ... ALTER COLUMN ...
+// TYPE shape. Carries the IR Column snapshots (prev = from_column,
+// curr = to_column) so the emitter renders dialect-specific column
+// types via its normal dispatch — no leaking of dialect keyword
+// knowledge into the engine.
+//
+// using_up / using_down are rendered by the engine from the
+// classifier's `using:` template with `{Col, Table, FromType,
+// ToType}` context:
+//
+//   - strategy = LOSSLESS_USING → using_up set from the cell's
+//     template (e.g. "{{.Col}}::text" → "target::text").
+//   - strategy = NEEDS_CONFIRM → using_up set; check.sql emitted in
+//     parallel by engine.collectChecks.
+//   - strategy = SAFE → using_up empty; emitter omits USING and PG
+//     performs an implicit cast (guaranteed compatible by cell).
+//   - using_down is the reverse direction's USING clause. Engine
+//     renders the symmetric cell's `using:` if available, else
+//     falls back to `{{.Col}}::{{.FromType}}`.
+//
+// DROP_AND_CREATE doesn't use TypeChange — engine emits a
+// DropColumn+AddColumn pair instead. CUSTOM_MIGRATION doesn't use
+// TypeChange — engine splices the user SQL at string level.
+message TypeChange {
+  w17.compiler.ir.Column from_column = 1;  // prev Column snapshot
+  w17.compiler.ir.Column to_column = 2;    // curr Column snapshot
+  string using_up = 3;
+  string using_down = 4;
+  Strategy strategy = 5;
+}
 
 // ChecksChange carries added + removed Check entries (keyed by their
 // resolved SQL constraint name). Emitter expands to DROP CONSTRAINT /
