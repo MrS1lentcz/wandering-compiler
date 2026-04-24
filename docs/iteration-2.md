@@ -19,10 +19,12 @@ Companion documents:
 
 ## Status
 
-**Draft — 2026-04-23.** M1 rescoped (2026-04-23 turn-2) to
-**complete alter-diff** — every Op variant lands together, no
-deferred "comes later in M2" subset. No code shipped yet.
-Milestones land one at a time, same ritual as iter-1:
+**In progress — 2026-04-25.** M1 / M2 / M3 shipped across
+2026-04-23 → 2026-04-24 sessions (alter-diff end-to-end on PG 18,
+multi-file schemas, multi-connection per domain, D28 classifier +
+D30 engine isolation Phase 2+4). M4 is now the open milestone —
+capability usage tracking + platform manifest first (Layers A+B),
+MySQL stub follows in a later turn.
 
 - design turn → D-record in this doc → implementation → per-feature
   commit → `make test-apply` green → push.
@@ -1968,8 +1970,183 @@ All prior iter-2 M1 open questions resolved as of 2026-04-23:
 
 M1 coding is unblocked.
 
+## M4 — Capability usage tracking + platform manifest
+
+**Locked design 2026-04-25 for Layers A+B.** Layer C (MySQL stub) is
+deferred to a later turn; the contract Layer B pins is explicit so
+Layer C can land without reshaping anything.
+
+### Scope in — Layer A+B
+
+- **Usage collector** in `emit/`: emitters call `usage.Use(capID)`
+  at every use-site that references a D16 capability. `DialectEmitter`
+  grows a `*Usage` parameter on `EmitOp`; `Emit()` constructs the
+  collector, plumbs it through per-op dispatch, and returns it.
+- **Postgres emitter instrumentation**: every dispatch path that
+  produces a typed column / index / constraint / comment calls
+  `Use()` with the right cap ID. Instrumented surfaces:
+  - column types: JSONB, JSON, UUID, BYTEA, BOOLEAN, INET, CIDR,
+    MACADDR, TSVECTOR, Array (`pgArrayOf`), HSTORE (map-string),
+    CITEXT (db_type), ENUM_TYPE (string+SEM_ENUM), NUMERIC,
+    DOUBLE_PRECISION, DATE/TIME/TIMESTAMP/TIMESTAMPTZ, INTERVAL,
+    SCHEMA_QUALIFIED (every site that qualifies with a namespace);
+  - defaults: fn `gen_random_uuid()`, fn `uuidv7()`;
+  - column modifiers: IDENTITY_COLUMN, GENERATED_COLUMN, COMMENT_ON;
+  - indexes: per-method (GIN/GIST/BRIN/SPGIST/HASH), INCLUDE_INDEX,
+    storage WITH-map exercise. Partial/expression parked on
+    raw_indexes (DQL).
+  - FK ops: ON_DELETE_RESTRICT, ON_DELETE_SET_DEFAULT;
+  - transactional wrapper: TRANSACTIONAL_DDL (once per non-empty
+    migration, not per op — BEGIN/COMMIT is a per-migration
+    concern).
+- **Manifest population** in `engine.buildManifest`:
+  - `Capabilities` = sorted + deduped union of `usage.Sorted()`.
+  - `RequiredExtensions` = sorted + deduped union of (a) the
+    catalog's `Requirement(cap).Extensions` for every cap in
+    `Capabilities`, resolved via the `DialectCapabilities` the
+    emitter implements (emitters without it contribute nothing —
+    redis stub today), and (b) IR-level
+    `(w17.pg.field).required_extensions` propagated on every
+    column the emitted SQL references.
+  - Manifest emitted with zero capabilities + zero extensions +
+    zero applied resolutions collapses to `nil` (today's
+    behaviour for empty applied-only). A non-empty Capabilities
+    or RequiredExtensions list always triggers Manifest
+    emission.
+- **`FilesystemSink` output**: when Manifest non-empty, Sink writes
+  `<ts>-<name>.manifest.json` next to `up.sql` / `down.sql`. Format
+  is canonical `protojson.Marshal` output (sorted keys,
+  deterministic). Empty Manifest → no file written (stays AC #1
+  clean: a no-op migration writes nothing).
+
+### Scope out (Layer C follow-up)
+
+- **MySQL stub**: parallel emitter + catalog; EmitOp returns
+  not-implemented like sqlite's stub until a pilot needs it.
+  Instrumentation harness (usage collector + Requirement lookup)
+  applies uniformly once MySQL emission bodies land.
+- **Platform consumption**: deploy client / hosted platform reads
+  the manifest.json in a later iteration. M4 Layer A+B only ships
+  the on-disk artifact; the UI / API contract lands with D29.
+- **Usage-driven apply-time gating**: emitter validating usage
+  against a configured target PG version / extension set. Deferred
+  per D16 phase 2.
+
+### Acceptance criteria for M4 Layer A+B
+
+1. `emit.Emit(e, plan)` returns `(up, down string, usage *Usage,
+   err error)`. `usage.Sorted()` is deterministic (sorted,
+   deduped) across re-runs on identical plans.
+2. Every capability in `postgres/pgCatalog` used anywhere by the
+   emitter is recorded via `Use()` at the relevant dispatch site.
+   Test iterates each cap ID and asserts at least one Op in the
+   fixture corpus drives `Use` for it (invariant test: "no dead
+   cap IDs in the catalog").
+3. `engine.buildManifest` populates `Capabilities` +
+   `RequiredExtensions` in sorted, deduped form. A grand-tour
+   fixture (re-use iter-1 `pg_dialect` or the M1 `alter_grand_tour`)
+   asserts the expected lists byte-for-byte in a golden.
+4. `FilesystemSink` writes `<ts>-<name>.manifest.json` alongside
+   `up.sql` / `down.sql` iff Manifest non-empty. Empty manifest
+   migrations write no JSON file (AC #1 preservation). Contents
+   are stable `protojson.Marshal` output (re-run → byte-identical).
+5. `make test-apply` stays green on PG 18 — manifest artifacts
+   don't interfere with the apply-roundtrip harness (harness
+   ignores non-`.sql` files). Coverage floor 96.3 % cross-package
+   (M3 baseline; manifest code adds unit tests that should nudge
+   it up, not down).
+
+### D31 — Capability usage tracking via `*Usage` collector + post-emit union (added 2026-04-25)
+
+**Status: locked.** Captures the plumbing decision for Layer A of
+M4.
+
+**Decision.** Track capability usage at emission time via an
+explicit collector passed through `DialectEmitter.EmitOp`. Engine
+consumes the collector post-emit, unions with catalog-derived
+extension requirements + IR-level `required_extensions`, and
+persists the result on `Migration.Manifest`.
+
+**Shape.**
+
+```go
+// emit/usage.go
+type Usage struct {
+    set map[string]struct{} // internal — never serialised
+}
+
+func (u *Usage) Use(cap string) {
+    if u == nil || cap == "" { return }
+    if u.set == nil { u.set = map[string]struct{}{} }
+    u.set[cap] = struct{}{}
+}
+
+func (u *Usage) Sorted() []string { /* sorted dedup */ }
+
+// emit/dialect.go
+type DialectEmitter interface {
+    Name() string
+    EmitOp(op *planpb.Op, usage *Usage) (up, down string, err error)
+}
+
+func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up, down string, usage *Usage, err error)
+```
+
+**Why a parameter, not a receiver field.** Emitters are shared
+zero-value singletons today (`postgres.Emitter{}`), reused across
+every `wc generate` invocation in a process. Storing state on the
+receiver would force per-run instances or lock-contended state.
+An explicit parameter keeps the emitter stateless + the engine
+controls the collector lifecycle per-migration.
+
+**Why widen `EmitOp` instead of an optional interface.** The
+alternative was "emitters that want to opt into tracking implement
+`EmitOpWithUsage`; callers type-assert." One real impl + two stubs
+isn't enough surface area to justify the duplicated dispatch.
+Widening `EmitOp` is a one-line migration for each stub and makes
+the tracking contract mandatory — which matches D16's iter-2+
+vision of every cap referenced by emission showing up on the
+manifest.
+
+**Why `Use()` on a `*Usage` and not a closure.** A pointer-method
+receiver is no-op on nil (`if u == nil { return }`), so zero-value
+construction stays possible for tests that don't care about usage.
+A closure (`func(cap string)`) would need nil-handling at every
+call site. Small thing, repeated 40+ times across the emitter.
+
+**Why union with IR `required_extensions` at engine layer.** Two
+paths today carry extension data: the catalog (per-cap
+`Requirement.Extensions`) and the author's explicit
+`(w17.pg.field).required_extensions` on a column using a
+`custom_type` that the compiler can't classify. Both converge on
+the manifest. Union at engine keeps emitter code focused on the
+capability IDs it knows about; IR-level extensions flow through
+the IR the engine already walks.
+
+**Escape hatch.** Emitters without a `DialectCapabilities` impl
+(redis today) contribute no extension inferences. Their
+`Capabilities` list is still populated from their `Use()` calls —
+those IDs just don't resolve to `Requirement.Extensions`, so the
+manifest's `RequiredExtensions` stays limited to IR-level entries
+for that connection.
+
+**Rationale.** Makes manifest.json a self-contained artifact:
+platform / deploy client reads one file and knows which caps the
+migration relied on + which extensions the target needs loaded —
+no cross-reference back to the source IR. Same data the D16
+catalog already curates, just pivoted from "which caps does PG
+support" to "which caps does this migration use".
+
+**Open sub-question (non-blocking).** `TRANSACTIONAL_DDL` is
+always-on for transactional PG emission — every non-empty
+migration wraps in BEGIN/COMMIT. Recording it every time inflates
+the cap list noise-wise. Lean: record it, let downstream filter
+for "interesting caps" if the UI wants. Consistent with every
+other cap — emission uses it, cap list names it.
+
 ## Where this document stops
 
-Everything past M1's acceptance criteria is backlog territory
-(`iteration-2-backlog.md`). When M1 lands, open the M2 section here
-the same way D-records landed in iter-1: one milestone at a time.
+Everything past M4 Layer A+B is backlog territory
+(`iteration-2-backlog.md`) or Layer C. When Layer A+B ships, open
+the Layer C section (MySQL stub) here the same way D-records
+landed in iter-1: one milestone at a time.
