@@ -90,7 +90,18 @@ func injectStrategyOps(
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
 			out = append(out, ops...)
-		case "pk_flip", "enum_fqn_change", "element_carrier_reshape":
+		case "pk_flip":
+			// D39 — single-column PK enable/disable via NEEDS_CONFIRM.
+			// Emits AlterColumn with PrimaryKeyChange FactChange; the
+			// emitter renders ALTER TABLE ADD PRIMARY KEY / DROP
+			// CONSTRAINT <t>_pkey. Multi-column PK swap on the same
+			// table hard-errors pointing at CUSTOM_MIGRATION.
+			ops, err := injectPkFlip(p, sorted, bkt)
+			if err != nil {
+				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
+			}
+			out = append(out, ops...)
+		case "enum_fqn_change", "element_carrier_reshape":
 			// D36 B1 — these axes accept only CUSTOM_MIGRATION. User
 			// resolving them to another strategy previously landed
 			// silently (AppliedResolution recorded, no SQL emitted —
@@ -382,6 +393,70 @@ func injectDefaultIdentity(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
 				Variant: &planpb.FactChange_DefaultValue{DefaultValue: &planpb.DefaultChange{
 					From: prevCol.GetDefault(),
 					To:   currCol.GetDefault(),
+				}},
+			}},
+		}},
+	}}, nil
+}
+
+// injectPkFlip — D39. Resolves a pk_flip ReviewFinding into an
+// AlterColumn op carrying a PrimaryKeyChange FactChange. The emit
+// path renders ALTER TABLE ADD PRIMARY KEY (col) for enable and
+// ALTER TABLE DROP CONSTRAINT <table>_pkey for disable.
+//
+// Only NEEDS_CONFIRM is accepted. Multi-column PK swap on the same
+// table (two pk_flip findings on one carrier) is flagged as a
+// composite transition and hard-errors with a pointer to CUSTOM.
+// Reason: a swap requires coordinated DROP + ADD within one ALTER
+// TABLE, plus FK-referential preconditions the engine doesn't
+// currently reason about; author owns those via --decide custom.
+func injectPkFlip(p resolvedPair, allPairs []resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
+	if p.Resolution.GetStrategy() != planpb.Strategy_NEEDS_CONFIRM {
+		return nil, fmt.Errorf("pk_flip on %s: strategy %s is not supported — only NEEDS_CONFIRM is accepted (supply --decide %s=needs_confirm, or resolve as CUSTOM_MIGRATION for multi-column PK swaps)",
+			findingKey(p.Finding), p.Resolution.GetStrategy(), findingKey(p.Finding))
+	}
+	ref := p.Finding.GetColumn()
+	// Multi-column PK swap guard — iterate allPairs (the sorted
+	// resolved-findings list this dispatcher is walking) and count
+	// pk_flip findings whose table matches.
+	table := ref.GetTableFqn()
+	var siblings int
+	for _, q := range allPairs {
+		if q.Finding.GetAxis() != "pk_flip" {
+			continue
+		}
+		if q.Finding.GetColumn().GetTableFqn() != table {
+			continue
+		}
+		siblings++
+	}
+	if siblings > 1 {
+		return nil, fmt.Errorf("pk_flip on %s: table %s has %d concurrent pk_flip findings (composite PK swap) — single-column enable/disable templates don't cover this; resolve all pk findings as CUSTOM_MIGRATION with --decide <col>=custom:<sql-file>",
+			findingKey(p.Finding), table, siblings)
+	}
+	prevTable, prevCol := findColumnByRef(bkt.prev, ref)
+	_, currCol := findColumnByRef(bkt.curr, ref)
+	if prevCol == nil || currCol == nil {
+		return nil, fmt.Errorf("pk_flip: prev/curr column not found via %s/#%d",
+			ref.GetTableFqn(), ref.GetFieldNumber())
+	}
+	ctx := &planpb.TableCtx{
+		TableName:     prevTable.GetName(),
+		MessageFqn:    prevTable.GetMessageFqn(),
+		NamespaceMode: prevTable.GetNamespaceMode(),
+		Namespace:     prevTable.GetNamespace(),
+	}
+	return []*planpb.Op{{
+		Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+			Ctx:         ctx,
+			FieldNumber: currCol.GetFieldNumber(),
+			ColumnName:  currCol.GetName(),
+			Column:      currCol,
+			PrevColumn:  prevCol,
+			Changes: []*planpb.FactChange{{
+				Variant: &planpb.FactChange_PrimaryKey{PrimaryKey: &planpb.PrimaryKeyChange{
+					From: prevCol.GetPk(),
+					To:   currCol.GetPk(),
 				}},
 			}},
 		}},

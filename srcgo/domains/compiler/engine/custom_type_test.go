@@ -140,10 +140,14 @@ func TestPlan_CustomTypeChange_DropAndCreate(t *testing.T) {
 	}
 }
 
-// TestPlan_B1_PkFlip_NonCustomHardErrors — B1 fix: pk_flip with a
-// non-CUSTOM strategy previously silent-empty-migrated; now hard
-// errors with a pointer to the --decide custom path.
-func TestPlan_B1_PkFlip_NonCustomHardErrors(t *testing.T) {
+// TestPlan_PkFlip_SwapHardErrors — D39 guard: a PK swap (old PK
+// column disable + new PK column enable on the same table) is a
+// composite transition that doesn't fit the single-column template;
+// engine hard-errors pointing at CUSTOM_MIGRATION. The original
+// D36 B1 silent-empty prevention is still covered — DROP_AND_CREATE
+// resolution is rejected before the swap guard, with the new
+// "only NEEDS_CONFIRM" message.
+func TestPlan_PkFlip_SwapHardErrors(t *testing.T) {
 	cls := testClassifier(t)
 	mk := func(pkOnFlag bool) *irpb.Schema {
 		return &irpb.Schema{Tables: []*irpb.Table{{
@@ -182,19 +186,28 @@ func TestPlan_B1_PkFlip_NonCustomHardErrors(t *testing.T) {
 	if pkID == "" {
 		t.Fatal("no pk_flip finding in probe")
 	}
-	res := []*planpb.Resolution{{
-		FindingId: pkID,
-		Strategy:  planpb.Strategy_DROP_AND_CREATE,
-		Actor:     "test",
-	}}
+	// Resolve both pk_flip findings as NEEDS_CONFIRM so the swap-
+	// detection guard fires instead of the strategy gate.
+	var res []*planpb.Resolution
+	for _, f := range probe.Findings {
+		if f.GetAxis() != "pk_flip" {
+			continue
+		}
+		res = append(res, &planpb.Resolution{
+			FindingId: f.GetId(),
+			Strategy:  planpb.Strategy_NEEDS_CONFIRM,
+			Actor:     "test",
+		})
+	}
 	_, err := engine.Plan(prev, curr, cls, res, pgOnlyEmitter)
 	if err == nil {
-		t.Fatal("want B1 hard-error on pk_flip + DROP_AND_CREATE")
+		t.Fatal("want hard-error on composite pk_flip swap")
 	}
-	if !strings.Contains(err.Error(), "only CUSTOM_MIGRATION is accepted") {
-		t.Errorf("err should mention only CUSTOM_MIGRATION allowed, got: %v", err)
+	if !strings.Contains(err.Error(), "composite PK swap") {
+		t.Errorf("err should mention composite PK swap, got: %v", err)
 	}
 	if !strings.Contains(err.Error(), "--decide") {
 		t.Errorf("err should point at --decide, got: %v", err)
 	}
+	_ = pkID
 }

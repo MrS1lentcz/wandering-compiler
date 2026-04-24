@@ -539,6 +539,14 @@ func factChangeKind(fc *planpb.FactChange) string {
 			return "default_identity_drop"
 		}
 		return "default_change"
+	case *planpb.FactChange_PrimaryKey:
+		// D39 — single-column PK flip. Enable tier is HIGH (unique index
+		// build + ACCESS EXCLUSIVE for full duration); disable tier is
+		// HIGH too (FK referential surprise risk).
+		if v.PrimaryKey.GetTo() {
+			return "pk_flip_enable"
+		}
+		return "pk_flip_disable"
 	case *planpb.FactChange_EnumValues:
 		// D37 — RemovedNames non-empty = NEEDS_CONFIRM rebuild path
 		// that rewrites every row in the enum-typed column under an
@@ -592,11 +600,11 @@ func mapFindingAxisToProfileKey(f *planpb.ReviewFinding) string {
 	axis := f.GetAxis()
 	switch axis {
 	case "pk_flip":
-		// Not enough state on the Finding alone to distinguish enable
-		// vs disable; ColumnRef is the flipping column — use a generic
-		// pk_flip profile for now. Future: carry case into ReviewFinding.
-		// For this first cut both enable/disable share the disable
-		// profile's text — still accurate for severity + lock.
+		// D39 — FindingContext carries prev/curr Column snapshots;
+		// inspect the Pk flag flip to tier risk correctly.
+		if col := f.GetContext().GetColumn(); col != nil && !col.GetPrev().GetPk() && col.GetCurr().GetPk() {
+			return "pk_flip_enable"
+		}
 		return "pk_flip_disable"
 	case "pg_custom_type":
 		// Unresolved pg_custom_type finding — author hasn't decided

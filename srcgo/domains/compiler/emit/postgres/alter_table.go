@@ -337,6 +337,9 @@ func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, 
 		usage.Use(emit.CapEnumType)
 		up, down := renderEnumValuesChange(qualTable, colName, v.EnumValues, column, prevColumn)
 		return up, down, nil
+	case *planpb.FactChange_PrimaryKey:
+		up, down := renderPrimaryKeyChange(qualTable, colName, v.PrimaryKey)
+		return up, down, nil
 	case *planpb.FactChange_AllowedExtensions:
 		// Path-family allowed-extensions changes ride along the
 		// regex-CHECK on this column. The CHECK regeneration shows
@@ -759,6 +762,24 @@ func qualToTable(qual string) string {
 		return qual[i+1:]
 	}
 	return qual
+}
+
+// renderPrimaryKeyChange — D39. Single-column PK enable/disable.
+// The constraint name follows PG's auto-naming rule: <table>_pkey.
+// Engine guarantees single-column scope upstream (multi-column PK
+// swaps hard-error in injectPkFlip), so ADD PRIMARY KEY targets
+// just this column.
+func renderPrimaryKeyChange(qual, col string, ch *planpb.PrimaryKeyChange) (string, string) {
+	constraint := qualToTable(qual) + "_pkey"
+	addStmt := fmt.Sprintf("ALTER TABLE %s ADD PRIMARY KEY (%s);", qual, col)
+	dropStmt := fmt.Sprintf("ALTER TABLE %s DROP CONSTRAINT %s;", qual, constraint)
+	switch {
+	case !ch.GetFrom() && ch.GetTo():
+		return addStmt, dropStmt
+	case ch.GetFrom() && !ch.GetTo():
+		return dropStmt, addStmt
+	}
+	return "", ""
 }
 
 // renderEnumValuesChange handles both directions of enum-type evolution:

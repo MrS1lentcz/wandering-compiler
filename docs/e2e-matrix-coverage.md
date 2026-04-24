@@ -94,28 +94,24 @@ resolutions. D33 solved this for `carrier_change`; these
 axes need the equivalent design decision before we can wire
 them into the matrix.
 
-##### D.1 `pk` enable / disable (10 skips)
+##### D.1 `pk` enable / disable — **RESOLVED via D39** (2026-04-25)
 
-**Current behaviour.** Plan.Diff emits a `pk_flip` Finding.
-`engine.injectStrategyOps` ignores it (not carrier_change).
-Resolution of any strategy is silently lost — no Op emitted.
+Option C shipped: single-column PK flip is NEEDS_CONFIRM with an
+engine-rendered template; multi-column PK swap (two pk_flip
+findings on one table) hard-errors pointing at CUSTOM_MIGRATION.
 
-**Decision wanted.**
-1. **Option A**: `pk_flip` stays CUSTOM_MIGRATION-only (user
-   always writes the SQL via `--decide`). PG PK changes are
-   non-trivial (constraint drop + add + potentially column
-   rewrite); author knows the transaction boundaries better
-   than a template.
-2. **Option B**: Engine auto-renders `ALTER TABLE ... DROP
-   CONSTRAINT <table>_pkey; ALTER TABLE ... ADD PRIMARY KEY
-   (<cols>);` for DROP_AND_CREATE resolution. Works for most
-   small tables; ugly for large ones (full table rebuild).
-3. **Option C**: Hybrid — engine auto-renders for single-column
-   PK flips; refuses composite PK changes as CUSTOM_MIGRATION-
-   only.
+- `pk/enable` CUSTOM_MIGRATION → NEEDS_CONFIRM. Template =
+  `ALTER TABLE t ADD PRIMARY KEY (col);`. Risk = apply fails on
+  NULLs or duplicates.
+- `pk/disable` CUSTOM_MIGRATION → NEEDS_CONFIRM. Template =
+  `ALTER TABLE t DROP CONSTRAINT <table>_pkey;`. Risk = FK
+  referential graph surprises.
+- Swap (id disable + uuid enable on one table) still routes
+  through CUSTOM_MIGRATION. Engine hard-errors with the count of
+  concurrent pk_flip findings + a `--decide … =custom:<sql>`
+  pointer.
 
-**My suggestion.** Option A. PK flips are rare; CUSTOM_MIGRATION
-matches the "no silent coercion" rule.
+Green on PG 14-18. See D39 in iteration-2.md.
 
 ##### D.2 `pg_custom_type` (5 skips)
 
@@ -168,22 +164,19 @@ All three sub-axes now exercised end-to-end on PG 14-18:
 
 See D38 in iteration-2.md.
 
-##### D.5 `element_reshape` (5 skips)
+##### D.5 `element_reshape` — **CONFIRMED as CUSTOM_MIGRATION** (2026-04-25)
 
-**Current behaviour.** Plan.Diff emits an
-`element_carrier_reshape` Finding. Same ignore-on-resolution
-issue as pk_flip.
+Per the D37 principle (CUSTOM_MIGRATION only for genuinely non-
+deterministic transitions), MAP value-carrier / LIST element-
+carrier reshape is the canonical non-deterministic case: a
+`string→int64` reshape of every element has no automatic
+template (which encoding? parse-with-default or parse-or-skip?
+what about unparseable values?). Stays CUSTOM_MIGRATION with
+the Finding path wired as today. B1 hard-error list keeps
+`element_carrier_reshape` as CUSTOM-only.
 
-**Decision wanted.** MAP value-carrier / LIST element-carrier
-change — auto-renderable?
-
-1. **Option A**: CUSTOM_MIGRATION-only. Element-type changes
-   are data-migration territory (every value re-encoded).
-2. **Option B**: Engine auto-emits DropColumn + AddColumn
-   (structural reset; data loss acknowledged).
-
-**My suggestion.** Option A — same "no silent coercion"
-rationale as carrier_change default.
+No D-record — this is a no-change confirmation of existing
+behaviour.
 
 ---
 

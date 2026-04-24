@@ -2375,6 +2375,88 @@ author remap), so it stays CUSTOM_MIGRATION-only.
 regenerated to absorb whitespace drift between Go toolchain
 versions; no semantic change.
 
+### D39 — `pk_flip` single-column NEEDS_CONFIRM (multi-column swap stays CUSTOM) (added 2026-04-25)
+
+**Status: locked + shipped.** Closes docs/e2e-matrix-coverage.md
+D.1 (10 previously-skipped cells). Third D37-principle graduation:
+single-column PK enable/disable is deterministic, so it moves off
+CUSTOM_MIGRATION onto NEEDS_CONFIRM with an engine-rendered
+template. Composite PK swaps (old PK column disable + new PK
+column enable on the same table) are non-deterministic enough
+that they stay CUSTOM_MIGRATION — engine detects the swap shape
+up front and hard-errors with a concrete pointer.
+
+**Template.**
+
+```sql
+-- pk/enable (prev.Pk=false, curr.Pk=true)
+ALTER TABLE t ADD PRIMARY KEY (col);
+-- down
+ALTER TABLE t DROP CONSTRAINT t_pkey;
+
+-- pk/disable (prev.Pk=true, curr.Pk=false)
+ALTER TABLE t DROP CONSTRAINT t_pkey;
+-- down
+ALTER TABLE t ADD PRIMARY KEY (col);
+```
+
+Constraint name follows PG's auto-naming rule `<table>_pkey`.
+Iter-1 emits PKs inline or as table-level `PRIMARY KEY (...)` lines
+without explicit CONSTRAINT names, so DROP CONSTRAINT always hits
+the auto-named one.
+
+**What shipped.**
+
+- `proto/domains/compiler/types/plan.proto` — new FactChange
+  variant `PrimaryKeyChange { bool from = 1; bool to = 2; }`
+  (field 14 inside the `oneof variant`; message right next to
+  `UniqueChange`).
+- `docs/classification/constraint.yaml` A6 — `pk/enable` +
+  `pk/disable` strategy flip CUSTOM_MIGRATION → NEEDS_CONFIRM.
+  Rationales rewritten around the template + composite caveat.
+- `srcgo/domains/compiler/engine/inject.go` — `pk_flip` pulled
+  out of the B1 hard-error list into a dedicated
+  `injectPkFlip`. Rejects non-NEEDS_CONFIRM, counts sibling
+  pk_flip findings on the same table (iterating the sorted
+  `allPairs` slice the dispatcher already has), hard-errors on
+  composite swap with the pointer. Emits AlterColumn with
+  PrimaryKeyChange(from=prev.Pk, to=curr.Pk).
+- `srcgo/domains/compiler/emit/postgres/alter_table.go` — new
+  `renderPrimaryKeyChange(qual, col, ch)`; case in the FactChange
+  dispatcher. Directionality via ch.From / ch.To.
+- `srcgo/domains/compiler/engine/risk.go` — existing
+  `pk_flip_enable` (HIGH, rewrite=false since PG builds an
+  index — scaleswith=row_count for the index build duration)
+  and `pk_flip_disable` (HIGH, FK-referential surprise) profiles
+  retained. `factChangeKind` gains a `FactChange_PrimaryKey` case
+  that returns the tiered key based on To. `mapFindingAxisToProfileKey`
+  for `pk_flip` now inspects the Finding's Column context
+  (prev.Pk vs curr.Pk) to return the right tier (earlier it
+  returned `pk_flip_disable` unconditionally — good enough for
+  severity but lost the enable-specific rationale on HIGH).
+- E2E cells — `pk/enable` + `pk/disable` in
+  `e2e/constraint_cells.go`. Schema shape: two-column table with
+  an `id` counter (non-PK) and a `target` INT64 whose Pk flag
+  flips. Green on PG 14-18.
+- `srcgo/domains/compiler/engine/pk_flip_test.go` — three tests
+  (enable + disable NEEDS_CONFIRM paths, wrong-strategy
+  hard-error). Swap hard-error covered by
+  `TestPlan_PkFlip_SwapHardErrors` in custom_type_test.go
+  (renamed from the B1-era `TestPlan_B1_PkFlip_NonCustomHardErrors`;
+  test still asserts the composite-swap error message).
+
+**B1 hard-error list after D39: `enum_fqn_change`,
+`element_carrier_reshape`.**
+
+- `enum_fqn_change` is mixed — if values overlap between two
+  enum FQNs, a deterministic USING cast would work; if they
+  diverge, it's a CUSTOM_MIGRATION remap. Potential D-record if
+  the distinction ever becomes worth encoding; parked for now.
+- `element_carrier_reshape` confirmed as CUSTOM_MIGRATION (see
+  docs/e2e-matrix-coverage.md D.5); genuinely non-deterministic
+  (MAP value / LIST element carrier transitions need per-element
+  author remap).
+
 ### D38 — `default` identity lifecycle + `auto_kind_change` in-axis fix (added 2026-04-25)
 
 **Status: locked + shipped.** Closes docs/e2e-matrix-coverage.md

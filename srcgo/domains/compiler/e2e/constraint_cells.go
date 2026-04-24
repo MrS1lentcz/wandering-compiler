@@ -56,6 +56,8 @@ func constraintCell(e classifier.ConstraintEntry) Cell {
 		pgCustomTypeSynth(&c, e.CaseID)
 	case "enum_values":
 		enumValuesSynth(&c, e.CaseID)
+	case "pk":
+		pkSynth(&c, e.CaseID)
 	default:
 		c.SkipReason = fmt.Sprintf("axis %s not yet synthesizable (future wave)", e.Axis)
 	}
@@ -334,6 +336,45 @@ func enumValuesSynth(c *Cell, caseID string) {
 		c.Curr = wrapOneColumn(mkCol("alpha", "beta"))
 	default:
 		c.SkipReason = fmt.Sprintf("enum_values case %q not synthesised (fqn_change / rename_in_place land as follow-ups)", caseID)
+	}
+}
+
+// pkSynth — D39. Single-column PK flip via NEEDS_CONFIRM. Uses a
+// dedicated non-PK BIGINT counter id as the "fixed" column (so the
+// harness's wrapOneColumn shape doesn't apply — we build our own
+// two-column schema where the target is the flipping PK column).
+// enable = prev no PK, curr target is PK. disable = inverse.
+func pkSynth(c *Cell, caseID string) {
+	mk := func(targetIsPk bool) *irpb.Schema {
+		var pkList []string
+		if targetIsPk {
+			pkList = []string{"target"}
+		}
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "t", MessageFqn: "e2e.T",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1,
+					Carrier: irpb.Carrier_CARRIER_INT64,
+					Type:    irpb.SemType_SEM_COUNTER,
+					DbType:  irpb.DbType_DBT_BIGINT},
+				{Name: "target", ProtoName: "target", FieldNumber: 2,
+					Carrier: irpb.Carrier_CARRIER_INT64,
+					Type:    irpb.SemType_SEM_ID,
+					DbType:  irpb.DbType_DBT_BIGINT,
+					Pk:      targetIsPk},
+			},
+			PrimaryKey: pkList,
+		}}}
+	}
+	switch caseID {
+	case "enable":
+		c.Prev = mk(false)
+		c.Curr = mk(true)
+	case "disable":
+		c.Prev = mk(true)
+		c.Curr = mk(false)
+	default:
+		c.SkipReason = fmt.Sprintf("pk case %q not synthesised", caseID)
 	}
 }
 

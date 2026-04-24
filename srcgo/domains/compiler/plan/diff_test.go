@@ -571,8 +571,8 @@ func TestDiffAlterColumnPKFlip_WithClassifier(t *testing.T) {
 	if len(got.Findings) != 1 || got.Findings[0].GetAxis() != "pk_flip" {
 		t.Fatalf("findings = %v, want 1 pk_flip finding", got.Findings)
 	}
-	if got.Findings[0].GetProposed() != planpb.Strategy_CUSTOM_MIGRATION {
-		t.Errorf("proposed strategy = %s, want CUSTOM_MIGRATION", got.Findings[0].GetProposed())
+	if got.Findings[0].GetProposed() != planpb.Strategy_NEEDS_CONFIRM {
+		t.Errorf("proposed strategy = %s, want NEEDS_CONFIRM (D39)", got.Findings[0].GetProposed())
 	}
 }
 

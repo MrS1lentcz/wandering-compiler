@@ -196,6 +196,11 @@ message FactChange {
     // INT32→INT64, …) need the USING clause explicit rather than
     // synthesised by cast-keyword heuristics.
     TypeChange               type_change         = 13;
+    // D39 — column PK flip. from=false,to=true → ALTER TABLE ADD
+    // PRIMARY KEY (col); from=true,to=false → ALTER TABLE DROP
+    // CONSTRAINT <table>_pkey. NEEDS_CONFIRM only; engine rejects
+    // multi-column PK swaps on the same table (those remain CUSTOM).
+    PrimaryKeyChange         primary_key         = 14;
   }
 }
 
@@ -213,6 +218,7 @@ message PgOptionsChange       { w17.compiler.ir.PgOptions from = 1; w17.compiler
 message CommentChange         { string from = 1; string to = 2; }
 message GeneratedExprChange   { string from = 1; string to = 2; }
 message UniqueChange          { bool from = 1; bool to = 2; }
+message PrimaryKeyChange      { bool from = 1; bool to = 2; }
 
 // TypeChange — D33 cross-carrier ALTER TABLE ... ALTER COLUMN ...
 // TYPE shape. Carries the IR Column snapshots (prev = from_column,

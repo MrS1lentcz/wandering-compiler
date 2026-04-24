@@ -151,15 +151,15 @@ cells:
     case: enable
     from: "false"
     to: "true"
-    strategy: CUSTOM_MIGRATION
-    rationale: "PK change is table-rebuild territory (NOT NULL + UNIQUE preconditions; composite PK interactions). Default = author keeps existing rows as PKs via custom SQL; DROP_AND_CREATE fallback for fresh seed."
+    strategy: NEEDS_CONFIRM
+    rationale: "D39 — single-column PK enable template is deterministic: ALTER TABLE ADD PRIMARY KEY (col). Risk: apply fails if any row has NULL or duplicates. User confirms. Multi-column PK swap (old PK col + new PK col on same table) is composite and stays CUSTOM_MIGRATION — engine hard-errors with a pointer when it detects two pk_flip findings on one table."
 
   - axis: pk
     case: disable
     from: "true"
     to: "false"
-    strategy: CUSTOM_MIGRATION
-    rationale: "Dropping PK breaks FKs referencing here; author writes FK-rewrite plan."
+    strategy: NEEDS_CONFIRM
+    rationale: "D39 — ALTER TABLE DROP CONSTRAINT <table>_pkey. DDL-only, column values preserved. Risk: FKs referencing this table's PK are dropped by PG with CASCADE-like semantics on the PK — user confirms awareness. Single-column only; PK swap remains CUSTOM."
 
   # ── A7 generated_expr (GENERATED ALWAYS AS ... STORED) ───────
   - axis: generated_expr
