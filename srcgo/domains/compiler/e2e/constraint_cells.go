@@ -19,6 +19,7 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/classifier"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
+	pgpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/w17/pg"
 )
 
 // allConstraintCells iterates classifier.AllConstraintCells() and
@@ -51,6 +52,8 @@ func constraintCell(e classifier.ConstraintEntry) Cell {
 		commentSynth(&c, e.CaseID)
 	case "unique":
 		uniqueSynth(&c, e.CaseID)
+	case "pg_custom_type":
+		pgCustomTypeSynth(&c, e.CaseID)
 	default:
 		c.SkipReason = fmt.Sprintf("axis %s not yet synthesizable (future wave)", e.Axis)
 	}
@@ -202,6 +205,67 @@ func commentSynth(c *Cell, caseID string) {
 		c.Curr = wrapOneColumn(make("the target column"))
 	default:
 		c.SkipReason = fmt.Sprintf("comment case %q not synthesised", caseID)
+	}
+}
+
+// pgCustomTypeSynth covers the D36 registered-conversion path.
+// Builds prev / curr schemas where the `payload` column flips
+// between two alias-registered custom_types whose registry has
+// convertible_to set, so engine renders ALTER COLUMN TYPE ...
+// USING <rendered cast>. The CUSTOM_MIGRATION default strategy is
+// honoured by the harness via stub SQL (since the YAML default is
+// CUSTOM_MIGRATION, user opt-in to registered conversion flows
+// via the test's Resolution override).
+// pgCustomTypeSynth uses real PG types (JSONB, JSON) wrapped behind
+// non-reserved aliases so the PG container recognises the sql_type
+// without requiring CREATE DOMAIN / CREATE TYPE extension setup.
+// `payload_jsonb` → JSONB, `payload_json` → JSON, with registered
+// `col::json` cast — round-trippable on stock postgres.
+func pgCustomTypeSynth(c *Cell, caseID string) {
+	registry := map[string]*pgpb.CustomType{
+		"payload_jsonb": {
+			Alias: "payload_jsonb", SqlType: "JSONB",
+			ConvertibleTo: []*pgpb.Conversion{
+				{Type: "payload_json", Cast: "{{.Col}}::json",
+					Rationale: "JSONB → JSON: PG implicit cast preserves structure, drops ordering + uniqueness guarantees."},
+			},
+		},
+		"payload_json": {
+			Alias: "payload_json", SqlType: "JSON",
+			ConvertibleFrom: []*pgpb.Conversion{
+				{Type: "payload_jsonb", Cast: "{{.Col}}::jsonb"},
+			},
+			ConvertibleTo: []*pgpb.Conversion{
+				{Type: "payload_jsonb", Cast: "{{.Col}}::jsonb",
+					Rationale: "JSON → JSONB: PG parses and normalises."},
+			},
+		},
+	}
+	mkSchema := func(alias, sqlType string) *irpb.Schema {
+		s := wrapOneColumn(&irpb.Column{
+			Name: "target", ProtoName: "target", FieldNumber: 2,
+			Carrier: irpb.Carrier_CARRIER_STRING,
+			Type:    irpb.SemType_SEM_TEXT,
+			Pg: &irpb.PgOptions{
+				CustomType:      sqlType,
+				CustomTypeAlias: alias,
+			},
+		})
+		s.PgCustomTypes = registry
+		return s
+	}
+	switch caseID {
+	case "any":
+		c.Prev = mkSchema("payload_jsonb", "JSONB")
+		c.Curr = mkSchema("payload_json", "JSON")
+		// Override default strategy: classifier.yaml says
+		// CUSTOM_MIGRATION, but the registry provides a registered
+		// conversion — opt into LOSSLESS_USING to exercise the D36
+		// Commit B engine path end-to-end (template render → ALTER
+		// TABLE ... TYPE ... USING <cast>).
+		c.Strategy = planpb.Strategy_LOSSLESS_USING
+	default:
+		c.SkipReason = fmt.Sprintf("pg_custom_type case %q not synthesised", caseID)
 	}
 }
 

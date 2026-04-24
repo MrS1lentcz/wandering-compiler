@@ -126,9 +126,12 @@ func planBucket(
 	}
 
 	// D35 — risk analysis. Deterministic pure function of the plan +
-	// findings; runs after splice so CUSTOM_MIGRATION user SQL is
-	// also annotated at the top. Emitted always (no opt-out).
-	risks := analyzeRisks(result.Plan, result.Findings)
+	// UNRESOLVED findings; runs after splice so CUSTOM_MIGRATION
+	// user SQL is also annotated. Resolved findings get their risk
+	// via the Op-level walk (TypeChange FactChange carries the
+	// registered-vs-unregistered distinction via UsingUp), so only
+	// unresolved entries need the Finding-path risk.
+	risks := analyzeRisks(result.Plan, unresolved)
 	if header := renderRiskComments(risks); header != "" {
 		up = header + up
 		down = header + down

@@ -87,15 +87,26 @@ var riskProfiles = map[string]riskProfile{
 			"Metadata-only but an FK referential graph surprise is common.",
 		recommendation: "Enumerate inbound FKs via pg_constraint first; plan FK drops / rewrites before applying.",
 	},
-	"custom_type_change": {
-		opKind:     "custom_type_change",
+	// D36 — pg_custom_type change has two severity tiers depending on
+	// whether the author registered a conversion path in the
+	// (w17.pg.project) / (w17.pg.module) custom_types registry.
+	"pg_custom_type_registered": {
+		opKind:     "pg_custom_type_registered",
+		severity:   "MEDIUM",
+		rewrite:    true,
+		lockType:   "ACCESS_EXCLUSIVE",
+		scalesWith: "row_count",
+		rationale: "ALTER COLUMN TYPE via a registered conversion — template is deterministic but PG still rewrites every row under an ACCESS_EXCLUSIVE lock.",
+		recommendation: "For large tables consider expand-contract — add a parallel column with the new custom_type, backfill in batches, switch reads, drop the old column.",
+	},
+	"pg_custom_type_unregistered": {
+		opKind:     "pg_custom_type_unregistered",
 		severity:   "HIGH",
 		rewrite:    true,
 		lockType:   "ACCESS_EXCLUSIVE",
 		scalesWith: "row_count",
-		rationale: "(w17.pg.field).custom_type is an opaque PG type escape hatch; switching it typically requires column " +
-			"rebuild with author-supplied cast SQL since the compiler has no template for arbitrary types.",
-		recommendation: "Supply the migration via --decide col=custom:<sql-file> with explicit USING cast or drop-and-recreate.",
+		rationale: "custom_type change without a registered conversion in (w17.pg.project/module).custom_types. Author must supply the migration via --decide col=custom:<sql-file>; compiler can't template an arbitrary opaque-type transition.",
+		recommendation: "Either register a convertible_to / convertible_from entry between the two custom_type aliases, or supply CUSTOM_MIGRATION SQL with an explicit USING cast.",
 	},
 	"element_carrier_reshape": {
 		opKind:     "element_carrier_reshape",
@@ -498,6 +509,24 @@ func factChangeKind(fc *planpb.FactChange) string {
 	case *planpb.FactChange_DefaultValue:
 		return "default_change"
 	case *planpb.FactChange_TypeChange:
+		// TypeChange originates from either carrier_change or
+		// pg_custom_type finding resolution. Distinguish by whether
+		// the from / to columns declare a custom_type alias — if
+		// either side does, this is the pg_custom_type path;
+		// otherwise plain carrier.
+		fromAlias := v.TypeChange.GetFromColumn().GetPg().GetCustomTypeAlias()
+		toAlias := v.TypeChange.GetToColumn().GetPg().GetCustomTypeAlias()
+		if fromAlias != "" || toAlias != "" {
+			// UsingUp non-empty → conversion template was registered.
+			// Empty → unregistered path (shouldn't normally reach risk
+			// analyser since injectCustomTypeChange hard-errors on
+			// unregistered LOSSLESS_USING, but DROP_AND_CREATE path
+			// produces TypeChange-less Ops anyway).
+			if v.TypeChange.GetUsingUp() != "" {
+				return "pg_custom_type_registered"
+			}
+			return "pg_custom_type_unregistered"
+		}
 		return "carrier_change"
 	}
 	return ""
@@ -506,16 +535,24 @@ func factChangeKind(fc *planpb.FactChange) string {
 // mapFindingAxisToProfileKey converts a ReviewFinding.Axis string
 // into the canonical riskProfiles key. Finding axes already carry
 // strategy context (carrier_change, pk_flip); here we just add the
-// enable/disable suffix for pk.
+// enable/disable suffix for pk, and map pg_custom_type to the
+// unregistered profile (author still deciding path).
 func mapFindingAxisToProfileKey(f *planpb.ReviewFinding) string {
 	axis := f.GetAxis()
-	if axis == "pk_flip" {
+	switch axis {
+	case "pk_flip":
 		// Not enough state on the Finding alone to distinguish enable
 		// vs disable; ColumnRef is the flipping column — use a generic
 		// pk_flip profile for now. Future: carry case into ReviewFinding.
 		// For this first cut both enable/disable share the disable
 		// profile's text — still accurate for severity + lock.
 		return "pk_flip_disable"
+	case "pg_custom_type":
+		// Unresolved pg_custom_type finding — author hasn't decided
+		// path yet. Flag as unregistered (worst-case HIGH); if author
+		// later supplies --decide with a registered conversion, the
+		// Op-level walk emits pg_custom_type_registered instead.
+		return "pg_custom_type_unregistered"
 	}
 	return axis
 }

@@ -2150,11 +2150,10 @@ other cap — emission uses it, cap list names it.
 
 ### D36 — Typed custom_types registry (project + domain, no opaque strings) (added 2026-04-25)
 
-**Status: partial — Commit A shipped (registry foundation); B + C
-follow.** Replaces the opaque `(w17.pg.field).custom_type: "<raw
-SQL>"` escape hatch with a typed registry. Every custom type is
-**registered once** at project or domain level and **referenced
-by alias** at field level.
+**Status: locked + shipped (all three commits).** Replaces the
+opaque `(w17.pg.field).custom_type: "<raw SQL>"` escape hatch with
+a typed registry. Every custom type is **registered once** at
+project or domain level and **referenced by alias** at field level.
 
 **Why this replaces the string-based escape hatch.**
 
@@ -2273,12 +2272,25 @@ for legacy fields that haven't migrated.
 - **Commit A** (shipped): proto + IR registry + loader
   extraction + existing fixture migration + 10 registry unit
   tests.
-- **Commit B** (next): engine `custom_type_change` Op injection
-  via registry conversion lookup + B1 hard-error on non-CUSTOM
-  resolutions for axes without templates.
-- **Commit C** (next): E2E matrix cells for custom_type changes
-  (registered + unregistered paths) + D35 risk profile update
-  distinguishing registered vs opaque conversions.
+- **Commit B** (shipped): engine `injectCustomTypeChange` reads
+  the registry, renders `convertible_to`/`from` cast templates,
+  emits `ALTER COLUMN TYPE … USING <rendered>`; unregistered
+  alias transitions hard-error pointing at the missing
+  `convertible_to` entry; DROP_AND_CREATE strategy still
+  available. B1 fix: `pk_flip` / `enum_fqn_change` /
+  `enum_remove_value` / `element_carrier_reshape` on non-CUSTOM
+  resolution now hard-errors instead of silent-empty-migrating.
+- **Commit C** (shipped): E2E constraint_cells.go `pg_custom_type`
+  synth (JSONB↔JSON behind aliases, LOSSLESS_USING override to
+  exercise registered path); green PG 14–18. D35 risk split into
+  `pg_custom_type_registered` (MEDIUM, template-driven rewrite)
+  vs `pg_custom_type_unregistered` (HIGH, author-supplied SQL);
+  `factChangeKind` routes via `PgOptions.custom_type_alias` +
+  `TypeChange.UsingUp` non-empty. Unresolved Findings emit the
+  unregistered (worst-case) profile; resolved TypeChange Ops
+  emit the correct tier via the Op-level walk — dedup achieved
+  by passing `unresolved` (not all findings) into
+  `analyzeRisks`.
 
 **Rationale (user, 2026-04-25):**
 
