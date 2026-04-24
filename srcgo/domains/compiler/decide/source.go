@@ -1,4 +1,7 @@
-// Package cli parses `--decide` CLI flags into engine Resolutions.
+// Package decide parses `--decide` CLI flags into engine Resolutions.
+// It's a D30 adapter — sits as a sibling to `engine/`, never
+// underneath it. The engine stays pure (no file I/O, no flag
+// parsing); this package owns the external surface that feeds it.
 //
 // Flag syntax:
 //
@@ -15,13 +18,13 @@
 //
 //	--decide <table>.<column>:<axis>=<strategy>
 //
-// Per D30, CLISource is a pre-processing helper that produces a slice
+// Per D30, Decisions is a pre-processing helper that produces a slice
 // of Resolutions. Callers typically wrap the slice in memory.Source to
-// satisfy engine.ResolutionSource. CLISource does not implement
+// satisfy engine.ResolutionSource. Decisions does not implement
 // ResolutionSource directly because the Resolution → ReviewFinding
 // binding requires access to the findings list (finding IDs are hashes
 // the CLI can't predict up-front).
-package cli
+package decide
 
 import (
 	"fmt"

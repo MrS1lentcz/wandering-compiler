@@ -598,8 +598,9 @@ dfc2253  engine: CustomSQL splicing on CUSTOM_MIGRATION
   ResolutionSource interfaces, checks.go (FactChange → NamedSQL).
 - `srcgo/domains/compiler/engine/memory/` — Memory impls (tests).
 - `srcgo/domains/compiler/engine/filesystem/` — FilesystemSink.
-- `srcgo/domains/compiler/engine/cli/` — Decisions parser for
-  `--decide` flag.
+- `srcgo/domains/compiler/decide/` — Decisions parser for
+  `--decide` flag. Sibling to `engine/`, not underneath it —
+  engine stays pure (D30); adapters live outside the engine tree.
 
 ### Classifier source of truth
 

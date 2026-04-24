@@ -1,10 +1,10 @@
-package cli_test
+package decide_test
 
 import (
 	"fmt"
 	"testing"
 
-	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/cli"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/decide"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
@@ -34,7 +34,7 @@ func TestParse_Strategy(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.flag, func(t *testing.T) {
-			d, err := cli.Parse([]string{tc.flag}, nil)
+			d, err := decide.Parse([]string{tc.flag}, nil)
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
@@ -63,7 +63,7 @@ func TestParse_CustomSQL(t *testing.T) {
 	loader := memoryLoader{
 		"/tmp/migrate.sql": "UPDATE users SET email = lower(email) WHERE email IS NOT NULL;",
 	}
-	d, err := cli.Parse(
+	d, err := decide.Parse(
 		[]string{"users.email=custom:/tmp/migrate.sql"},
 		loader.Load,
 	)
@@ -85,7 +85,7 @@ func TestParse_CustomSQL(t *testing.T) {
 
 func TestParse_AxisSpecific(t *testing.T) {
 	// axis:carrier_change precedes column-wide.
-	d, err := cli.Parse([]string{
+	d, err := decide.Parse([]string{
 		"users.email=safe",
 		"users.email:carrier_change=drop_and_create",
 	}, nil)
@@ -115,7 +115,7 @@ func TestParse_AxisSpecific(t *testing.T) {
 }
 
 func TestParse_Unresolved(t *testing.T) {
-	d, err := cli.Parse([]string{"users.email=safe"}, nil)
+	d, err := decide.Parse([]string{"users.email=safe"}, nil)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestParse_Errors(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := cli.Parse([]string{tc.flag}, nil)
+			_, err := decide.Parse([]string{tc.flag}, nil)
 			if err == nil {
 				t.Fatalf("Parse accepted invalid flag %q", tc.flag)
 			}
@@ -161,7 +161,7 @@ func TestParse_Errors(t *testing.T) {
 }
 
 func TestParse_DuplicateKeyErrors(t *testing.T) {
-	_, err := cli.Parse([]string{
+	_, err := decide.Parse([]string{
 		"users.email=safe",
 		"users.email=drop_and_create",
 	}, nil)
@@ -172,7 +172,7 @@ func TestParse_DuplicateKeyErrors(t *testing.T) {
 
 func TestParse_CustomLoaderFailure(t *testing.T) {
 	loader := memoryLoader{} // empty
-	_, err := cli.Parse(
+	_, err := decide.Parse(
 		[]string{"users.email=custom:/nonexistent.sql"},
 		loader.Load,
 	)

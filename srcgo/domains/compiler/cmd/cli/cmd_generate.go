@@ -16,8 +16,8 @@ import (
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/postgres"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/redis"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit/sqlite"
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/decide"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine"
-	cliresolve "github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/cli"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/engine/filesystem"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/ir"
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/loader"
@@ -104,7 +104,7 @@ func (c *GenerateCmd) Run() error {
 	// Parse --decide flags (may be empty). Deferred loading of custom
 	// SQL files happens here — if a flag references a missing file,
 	// we surface the error before the expensive pipeline runs.
-	decisions, err := cliresolve.Parse(c.Decide, cliresolve.DefaultSQLLoader)
+	decisions, err := decide.Parse(c.Decide, decide.DefaultSQLLoader)
 	if err != nil {
 		return fmt.Errorf("wc generate: --decide: %w", err)
 	}

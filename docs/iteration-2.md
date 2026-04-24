@@ -1789,9 +1789,12 @@ packages so engine tests never touch them):
 
 ```go
 // ResolutionSource — supplies resolutions to the engine. Impls:
-//   - MemorySource   (tests)
-//   - CLISource      (parses --decide flags + --decisions YAML)
-//   - PlatformSource (D29 future; calls hosted tool API)
+//   - MemorySource    (tests)
+//   - decide.Decisions (parses --decide flags + --decisions YAML;
+//                       lives in domains/compiler/decide/, NEVER
+//                       under engine/ — adapters sit outside the
+//                       pure engine tree)
+//   - PlatformSource  (D29 future; calls hosted tool API)
 type ResolutionSource interface {
     Lookup(findingID string) (Resolution, bool)
     All() []Resolution
@@ -1854,8 +1857,9 @@ layer on top.
 - **Phase 2** (classifier + `diff.go` refactor): implements `Plan()`
   with `ResolutionSource` injected. Same LOC budget as before
   (~400-600).
-- **Phase 3** (`--decide` flag): becomes the `CLISource`
-  implementation. ~50 LOC flag parser; trivial.
+- **Phase 3** (`--decide` flag): becomes the `decide.Decisions`
+  implementation in `domains/compiler/decide/` (sibling to
+  `engine/`, not underneath it). ~50 LOC flag parser; trivial.
 - **Phase 4** (check.sql emit): **unblocked.** Engine emits
   check SQL as `Migration.Checks[]` strings. Storage layout is
   Sink's concern.
@@ -1870,8 +1874,8 @@ Today's pipeline inlines `os.WriteFile` calls throughout
 `cli+ir+emit`. Refactor under D30:
 
 1. `cli` becomes: parse flags → load prev/curr IR → build
-   `CLISource` → `Plan(prev, curr, source.All())` → pass result
-   into `FilesystemSink.Write(plan)`.
+   `decide.Decisions` → `Plan(prev, curr, resolutions)` → pass
+   result into `FilesystemSink.Write(plan)`.
 2. `emit/postgres` stops writing files; returns strings +
    manifest structs upstream.
 3. `FilesystemSink` lands in a new package
