@@ -5,6 +5,13 @@ package irtest.pg_override_with_string_check;
 import "w17/db.proto";
 import "w17/field.proto";
 import "w17/pg/field.proto";
+import "w17/pg/project.proto";
+
+option (w17.pg.project) = {
+  custom_types: [
+    { alias: "jsonb_custom", sql_type: "JSONB" }
+  ]
+};
 
 message X {
   option (w17.db.table) = { name: "xs" };
@@ -12,6 +19,6 @@ message X {
   int64  id      = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
   string payload = 2 [
     (w17.field)    = { type: TEXT, pattern: "^{.*}$" },
-    (w17.pg.field) = { custom_type: "JSONB" }
+    (w17.pg.field) = { custom_type: "jsonb_custom" }
   ];
 }

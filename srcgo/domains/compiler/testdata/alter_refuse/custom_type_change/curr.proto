@@ -4,6 +4,15 @@ package altertest;
 import "w17/db.proto";
 import "w17/field.proto";
 import "w17/pg/field.proto";
+import "w17/pg/project.proto";
+
+// D36 — register both aliases for the alter roundtrip.
+option (w17.pg.project) = {
+  custom_types: [
+    { alias: "my_text_v1", sql_type: "my_text_v1" },
+    { alias: "my_text_v2", sql_type: "my_text_v2" }
+  ]
+};
 
 // custom_type change is REFUSE — author owns that escape-hatch path.
 message Doc {

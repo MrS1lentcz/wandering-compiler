@@ -76,6 +76,15 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 		}
 	}
 
+	// D36 — build the PG custom_types registry from project + module
+	// FileOptions before per-file passes. Aliases get validated for
+	// uniqueness / no-shadowing here; per-column resolution happens
+	// later in applyPgOverrides.
+	customTypes, regErr := buildRegistry(files)
+	if regErr != nil {
+		allErrs = append(allErrs, regErr)
+	}
+
 	// Per-file build pass. buildTable reads per-table
 	// (w17.db.table).connection overrides through the shared
 	// connection registry.
@@ -85,6 +94,7 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 			lf:          lf,
 			msgByTable:  map[string]*loader.LoadedMessage{},
 			connByName:  connByName,
+			customTypes: customTypes,
 		}
 		fileSchema := &irpb.Schema{}
 		b.resolveNamespace(fileSchema)
@@ -374,6 +384,12 @@ type builder struct {
 	// `(w17.db.module).connection.name`; consulted by buildTable for
 	// per-table `(w17.db.table).connection` overrides.
 	connByName map[string]*irpb.Connection
+	// customTypes — D36 PG custom_types registry. Built in BuildMany's
+	// pre-pass from (w17.pg.project) + (w17.pg.module) options across
+	// the loaded file set; consulted by applyPgOverrides when the
+	// field-level (w17.pg.field).custom_type alias needs resolving.
+	// Nil when no PG custom types are registered anywhere.
+	customTypes *CustomTypeRegistry
 }
 
 func (b *builder) err(e *diag.Error) { b.errs = append(b.errs, e) }
@@ -1195,13 +1211,51 @@ func (b *builder) validateStringNumericOptions(carrier irpb.Carrier, semType irp
 // before attachChecks so the synth layer can see when PG storage is
 // redirected via `custom_type` and skip string-only synths that would
 // fail at apply on the overridden column type.
+//
+// D36 — `(w17.pg.field).custom_type` now carries an alias, not a raw
+// SQL type. Resolution against the merged project + domain registry
+// happens here. Unregistered alias surfaces as a build error with a
+// pointer to where the registration belongs.
 func (b *builder) applyPgOverrides(col *irpb.Column, lf *loader.LoadedField) {
 	if lf.PgField == nil {
 		return
 	}
+	alias := lf.PgField.GetCustomType()
+	if alias == "" {
+		// Field has (w17.pg.field) but no custom_type — only
+		// required_extensions matters (legacy path during D36
+		// transition; will be deprecated when registry covers
+		// every type).
+		col.Pg = &irpb.PgOptions{
+			RequiredExtensions: append([]string(nil), lf.PgField.GetRequiredExtensions()...),
+		}
+		return
+	}
+	entry, ok := b.customTypes.Lookup(alias)
+	if !ok {
+		b.err(diag.Atf(lf.Desc, "field %q: (w17.pg.field).custom_type alias %q not registered",
+			string(lf.Desc.Name()), alias).
+			WithWhy("custom_type now references an alias from (w17.pg.project) or (w17.pg.module) custom_types — D36 removed the raw-SQL escape hatch in favour of typed registration").
+			WithFix(fmt.Sprintf("register %q in project.proto's (w17.pg.project).custom_types (project-wide) or this domain's (w17.pg.module).custom_types (domain-only). Example:\n  custom_types: [{ alias: %q, sql_type: \"<PG type>\", required_extensions: [...] }]", alias, alias)))
+		return
+	}
+	// Merge field-level required_extensions (legacy passthrough during
+	// D36 transition) with registry entry's. Dedupe via map.
+	extSet := map[string]struct{}{}
+	for _, e := range entry.GetRequiredExtensions() {
+		extSet[e] = struct{}{}
+	}
+	for _, e := range lf.PgField.GetRequiredExtensions() {
+		extSet[e] = struct{}{}
+	}
+	exts := make([]string, 0, len(extSet))
+	for e := range extSet {
+		exts = append(exts, e)
+	}
 	col.Pg = &irpb.PgOptions{
-		CustomType:         lf.PgField.GetCustomType(),
-		RequiredExtensions: append([]string(nil), lf.PgField.GetRequiredExtensions()...),
+		CustomType:         entry.GetSqlType(),
+		RequiredExtensions: exts,
+		CustomTypeAlias:    alias,
 	}
 }
 

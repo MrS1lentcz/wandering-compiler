@@ -2148,6 +2148,150 @@ the cap list noise-wise. Lean: record it, let downstream filter
 for "interesting caps" if the UI wants. Consistent with every
 other cap — emission uses it, cap list names it.
 
+### D36 — Typed custom_types registry (project + domain, no opaque strings) (added 2026-04-25)
+
+**Status: partial — Commit A shipped (registry foundation); B + C
+follow.** Replaces the opaque `(w17.pg.field).custom_type: "<raw
+SQL>"` escape hatch with a typed registry. Every custom type is
+**registered once** at project or domain level and **referenced
+by alias** at field level.
+
+**Why this replaces the string-based escape hatch.**
+
+Pre-D36, `custom_type` was a free-form SQL string treated as
+opaque by the compiler — could typo silently, duplicated
+`required_extensions` across fields, and gave the engine no
+hook for D33-style template-driven migrations when the type
+changed. The registry fixes all three: typos fail at IR build,
+extensions live once per type, and conversions between types
+are declared up front (commit B wires them through the engine).
+
+**Three-layer model.**
+
+1. **Project level** — `(w17.pg.project).custom_types` in a
+   single file (convention: `project.proto` at proto root).
+   Types shared across the whole project (common: hstore,
+   citext, shared embedding-dimension aliases).
+2. **Domain level** — `(w17.pg.module).custom_types` per domain
+   (per-file today; merged across files of one BuildMany call).
+   Domain-specific types only one domain uses.
+3. **Field level** — `(w17.pg.field).custom_type: "alias"` just
+   references the registered alias. No more raw SQL strings.
+
+```proto
+// project.proto (at proto root, one per repo):
+option (w17.pg.project) = {
+  custom_types: [
+    {
+      alias: "hstore",
+      sql_type: "HSTORE",
+      required_extensions: ["hstore"]
+      convertible_to: [
+        { type: "jsonb", cast: "hstore_to_jsonb({{.Col}})" }
+      ]
+    }
+    {
+      alias: "embedding_1536",
+      sql_type: "vector(1536)",
+      required_extensions: ["vector"]
+    }
+  ]
+};
+
+// domain .proto — references by alias:
+message Doc {
+  string content = 3 [(w17.pg.field) = { custom_type: "hstore" }];
+}
+```
+
+**Invariants enforced at IR build time.**
+
+- Alias is a valid identifier (NAMEDATALEN, snake_case-ish).
+- Alias does not collide with native PG type keywords
+  (text/jsonb/integer/uuid/inet/...) — reserved list in
+  `ir/registry.go`.
+- Alias is unique within the project registry.
+- Alias is unique within each domain registry (across module
+  files of that domain).
+- **No shadowing between project and domain** — a domain alias
+  that matches a project alias is a compile error, not a silent
+  override.
+- At most one file per BuildMany may declare
+  `(w17.pg.project)` — multiple = compile error.
+- Field-level alias must resolve against the merged registry;
+  unresolved alias surfaces as `diag.Error` with guidance to
+  register at project or domain level.
+
+**Conversion paths (D33 extension).**
+
+Each `CustomType` carries `convertible_to` + `convertible_from`
+lists. Each entry: target/source type + Go-template cast (same
+syntax as classifier.yaml's `using:`). Engine commit B consumes
+these when user opts into a non-CUSTOM strategy for a
+custom_type_change finding — renders the cast template into the
+ALTER TABLE USING clause.
+
+**IR proto changes.**
+
+- `(w17.pg.field).custom_type`: semantic flips to "alias string"
+  (verbatim-SQL semantic removed). Field name unchanged for
+  readability.
+- `(w17.pg.field).required_extensions`: DEPRECATED — registry
+  entry's `required_extensions` is now the source of truth.
+  Retained as an additive passthrough during transition;
+  aliases in the registry drive the real list.
+- `Column.Pg` (irpb.PgOptions): new field `custom_type_alias`
+  carries the alias verbatim for diff identity. Separate from
+  `custom_type` (resolved sql_type) so the diff detects alias
+  changes even when sql_type happens to match across two
+  different registered aliases.
+
+**plan.Diff change.**
+
+Alias identity replaces raw-SQL comparison. `(prev.alias,
+prev.sql_type)` vs `(curr.alias, curr.sql_type)` — either
+difference triggers `pg_custom_type` finding. Previous behaviour
+(string equality on sql_type) is preserved as a secondary check
+for legacy fields that haven't migrated.
+
+**Migration (existing fixtures).**
+
+- `pg_dialect/input.proto` — registered `hstore` +
+  `pg_macaddr` aliases at project level, fields reference by
+  alias. Golden SQL unchanged except for a table-comment text
+  update (proto layout shift moved the descriptor's leading-
+  comment attachment).
+- `alter_refuse/custom_type_change/{prev,curr}.proto` —
+  registered `my_text_v1` + `my_text_v2` at project level on
+  both sides.
+- 4 error fixtures under `ir/testdata/errors/` using
+  `custom_type` migrated to register aliases; original
+  validation errors still fire.
+
+**Commits (this D-record):**
+
+- **Commit A** (shipped): proto + IR registry + loader
+  extraction + existing fixture migration + 10 registry unit
+  tests.
+- **Commit B** (next): engine `custom_type_change` Op injection
+  via registry conversion lookup + B1 hard-error on non-CUSTOM
+  resolutions for axes without templates.
+- **Commit C** (next): E2E matrix cells for custom_type changes
+  (registered + unregistered paths) + D35 risk profile update
+  distinguishing registered vs opaque conversions.
+
+**Rationale (user, 2026-04-25):**
+
+> "líbila by se mi následující mechanika: 1) v rámci domény mohu
+> 'nainstalovat custom typy' - popíšu, z jakých typů jdou
+> přirozeně convertovat a taky do jakých, a jakou extensionu
+> potřebují, případně jaká je syntax pro cast. Zároveň v rámci
+> té registrace mohu udělat alias pro ten field."
+
+User follow-up confirmed: single file at proto root, typed
+proto (not YAML), consistent with rest of project; no stdlib
+(every alias explicit in repo = zero magic).
+
 ### D35 — Deterministic risk analysis (always-emit advisory) (added 2026-04-25)
 
 **Status: locked + shipped.** Every migration carries a risk

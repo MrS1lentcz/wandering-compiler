@@ -238,8 +238,23 @@ message PgOptions {
   reserved 1, 2, 3, 4;
   reserved "jsonb", "inet", "tsvector", "hstore";
 
+  // Resolved SQL type from the registry's CustomType.sql_type. Set by
+  // ir.Build after looking up `(w17.pg.field).custom_type` (which
+  // carries the alias) against the merged project + domain registry.
+  // Emitters consume this verbatim as the column type.
   string custom_type = 10;
+
+  // Resolved required_extensions from CustomType.required_extensions.
+  // Emitter / engine.buildManifest aggregates these into
+  // Manifest.RequiredExtensions for platform pre-apply visibility.
   repeated string required_extensions = 11;
+
+  // D36 — alias the field declared via (w17.pg.field).custom_type.
+  // Stored verbatim for diff identity: alias change between prev and
+  // curr triggers a custom_type_change finding even if sql_type
+  // coincidentally matches (e.g. project redefined alias). Empty
+  // when the column doesn't use a custom_type.
+  string custom_type_alias = 12;
 }
 
 message Index {

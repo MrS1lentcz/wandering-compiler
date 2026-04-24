@@ -5,6 +5,7 @@ package m10.pg_dialect;
 import "w17/db.proto";
 import "w17/field.proto";
 import "w17/pg/field.proto";
+import "w17/pg/project.proto";  // D36 — custom_types registry
 
 // Grand-tour fixture: core Types that used to be PG-specific flags
 // (JSON, IP, TSEARCH — lifted into field.Type by D13) plus the
@@ -12,8 +13,33 @@ import "w17/pg/field.proto";
 // still genuinely PG-only (HSTORE, MACADDR, pgvector, PostGIS).
 //
 // HSTORE graduates from a curated flag to a map-carrier AUTO dispatch
-// in iter-1.6; until then it lives through custom_type. Our test-apply
-// harness installs hstore per DB so the fixture applies on stock
+// in iter-1.6; until then it lives through the D36 custom_types
+// registry. Our test-apply harness installs hstore per DB so the
+// fixture applies on stock postgres:18-alpine.
+
+// D36 — project options. Single-file fixture so project + domain +
+// field annotations all coexist in one .proto. Real projects keep
+// (w17.pg.project) in a dedicated project.proto at proto root.
+option (w17.pg.project) = {
+  custom_types: [
+    {
+      alias: "hstore"
+      sql_type: "HSTORE"
+      required_extensions: ["hstore"]
+      description: "PG hstore extension — key-value text-text store"
+    },
+    {
+      alias: "pg_macaddr"
+      sql_type: "MACADDR"
+      description: "Native PG MACADDR type (registered via alias because 'macaddr' lowercase collides with reserved native type keywords; alias differentiates the registered entry)"
+    }
+  ]
+};
+// Grand-tour inventory — exercises PG-specific types via the D36
+// custom_types registry (HSTORE through alias "hstore", MACADDR
+// through alias "pg_macaddr"), plus core Types for JSON / IP /
+// TSEARCH (lifted into field.Type by D13). Our test-apply harness
+// installs hstore per DB so the fixture applies on stock
 // postgres:18-alpine.
 message Inventory {
   option (w17.db.table) = {
@@ -36,14 +62,15 @@ message Inventory {
   string search_idx  = 4 [(w17.field) = { type: TSEARCH }];
   string attributes  = 5 [
     (w17.field)    = { type: TEXT, null: true },
-    // required_extensions: non-empty — exercises the IR passthrough
-    // that the platform will aggregate per-schema into `CREATE
-    // EXTENSION` statements. Metadata only at iter-1; visible in IR.
-    (w17.pg.field) = { custom_type: "HSTORE", required_extensions: ["hstore"] }
+    // D36 — alias references project registry; required_extensions
+    // resolved from registry, not repeated per-field.
+    (w17.pg.field) = { custom_type: "hstore" }
   ];
 
   string mac         = 6 [
     (w17.field)    = { type: TEXT },
-    (w17.pg.field) = { custom_type: "MACADDR" }
+    // D36 — alias "pg_macaddr" avoids collision with reserved
+    // native-type keyword "macaddr".
+    (w17.pg.field) = { custom_type: "pg_macaddr" }
   ];
 }

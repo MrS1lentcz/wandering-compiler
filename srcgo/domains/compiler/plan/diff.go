@@ -447,12 +447,19 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column, cls *cl
 		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "element_reshape", cell))
 		return nil, findings, nil
 	}
+	// D36 — detection runs on alias identity (post-registry resolution)
+	// + falls back to sql_type comparison for legacy fields that may
+	// not carry an alias yet (empty custom_type on both sides → no-op).
+	prevAlias := prev.GetPg().GetCustomTypeAlias()
+	currAlias := curr.GetPg().GetCustomTypeAlias()
 	prevPgCT := prev.GetPg().GetCustomType()
 	currPgCT := curr.GetPg().GetCustomType()
-	if prevPgCT != currPgCT {
+	aliasChanged := prevAlias != currAlias
+	sqlTypeChanged := prevPgCT != currPgCT
+	if aliasChanged || sqlTypeChanged {
 		if cls == nil {
 			return nil, nil, fmt.Errorf("column %q (#%d): (w17.pg.field).custom_type change %q→%q is REFUSE-strategy (custom_type is author-owned)",
-				curr.GetName(), curr.GetFieldNumber(), prevPgCT, currPgCT)
+				curr.GetName(), curr.GetFieldNumber(), prevAlias, currAlias)
 		}
 		cell := cls.Constraint("pg_custom_type", "any")
 		findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "pg_custom_type", cell))

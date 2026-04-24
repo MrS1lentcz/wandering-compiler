@@ -33,6 +33,14 @@ type LoadedFile struct {
 	File     protoreflect.FileDescriptor
 	Module   *dbpb.Module
 	Messages []*LoadedMessage
+
+	// D36 — per-file dialect-specific module + project options.
+	// Carried separately from `Module` because the per-dialect
+	// extensions (PG, future MySQL) live in their own proto namespaces
+	// per D32. Either may be nil when the corresponding annotation
+	// isn't applied to this file.
+	PgModule  *pgpb.PgModule
+	PgProject *pgpb.PgProject
 }
 
 // LoadedMessage is one top-level proto message with its decoded
@@ -116,6 +124,17 @@ func Load(ctx context.Context, path string, importPaths []string) (*LoadedFile, 
 	}
 	if proto.HasExtension(fileOpts, dbpb.E_Module) {
 		loaded.Module = proto.GetExtension(fileOpts, dbpb.E_Module).(*dbpb.Module)
+	}
+	// D36 — per-dialect file options. PgModule = domain-level PG
+	// concerns (custom_types registry); PgProject = project-wide PG
+	// registry. Either may be set independently of (w17.db.module);
+	// IR build merges across all loaded files into one resolved
+	// registry.
+	if proto.HasExtension(fileOpts, pgpb.E_Module) {
+		loaded.PgModule = proto.GetExtension(fileOpts, pgpb.E_Module).(*pgpb.PgModule)
+	}
+	if proto.HasExtension(fileOpts, pgpb.E_Project) {
+		loaded.PgProject = proto.GetExtension(fileOpts, pgpb.E_Project).(*pgpb.PgProject)
 	}
 
 	msgs := file.Messages()

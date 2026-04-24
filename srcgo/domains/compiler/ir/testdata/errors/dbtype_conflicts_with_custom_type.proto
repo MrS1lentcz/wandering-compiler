@@ -3,6 +3,13 @@ package irtest.dbtype_conflicts_with_custom_type;
 import "w17/db.proto";
 import "w17/field.proto";
 import "w17/pg/field.proto";
+import "w17/pg/project.proto";
+
+option (w17.pg.project) = {
+  custom_types: [
+    { alias: "citext_v1", sql_type: "CITEXT" }
+  ]
+};
 
 message X {
   option (w17.db.table) = { name: "xs" };
@@ -13,6 +20,6 @@ message X {
   string data = 2 [
     (w17.field)     = { type: TEXT },
     (w17.db.column) = { db_type: JSONB },
-    (w17.pg.field)  = { custom_type: "CITEXT" }
+    (w17.pg.field)  = { custom_type: "citext_v1" }
   ];
 }
