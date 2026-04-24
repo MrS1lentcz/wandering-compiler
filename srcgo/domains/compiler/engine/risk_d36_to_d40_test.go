@@ -125,6 +125,71 @@ func TestRiskHeader_D39_PkFlipDisable(t *testing.T) {
 	}
 }
 
+// TestSortRisksByOpKind_SameSeverityBucket exercises the inner
+// swap branch of sortRisksByOpKind. Two HIGH-severity risks on
+// the same migration (enum_values_remove + pk_flip_disable on
+// different columns of one table) → both end up in the HIGH
+// bucket and sortRisksByOpKind orders them alphabetically by
+// op_kind. Without the swap, insertion-order would put pk first
+// (since the differ visits columns in declaration order); the
+// expected post-sort order has enum_values_remove first.
+func TestSortRisksByOpKind_SameSeverityBucket(t *testing.T) {
+	cls := testClassifier(t)
+	mk := func(targetPk bool, enumValues []string) *irpb.Schema {
+		nums := make([]int64, len(enumValues))
+		for i := range enumValues {
+			nums[i] = int64(i + 1)
+		}
+		var pk []string
+		if targetPk {
+			pk = []string{"id"}
+		}
+		return &irpb.Schema{Tables: []*irpb.Table{{
+			Name: "things", MessageFqn: "mod.Thing",
+			Columns: []*irpb.Column{
+				{Name: "id", ProtoName: "id", FieldNumber: 1,
+					Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID,
+					DbType: irpb.DbType_DBT_BIGINT, Pk: targetPk},
+				{Name: "kind", ProtoName: "kind", FieldNumber: 2,
+					Carrier:     irpb.Carrier_CARRIER_STRING,
+					Type:        irpb.SemType_SEM_ENUM,
+					EnumFqn:     "mod.Kind",
+					EnumNames:   enumValues,
+					EnumNumbers: nums},
+			},
+			PrimaryKey: pk,
+		}}}
+	}
+	prev := mk(true, []string{"alpha", "beta", "gamma"})
+	curr := mk(false, []string{"alpha", "beta"})
+	probe, _ := engine.Plan(prev, curr, cls, nil, pgOnlyEmitter)
+	if len(probe.Findings) != 2 {
+		t.Fatalf("want 2 findings (pk_flip + enum_values_remove), got %d", len(probe.Findings))
+	}
+	var res []*planpb.Resolution
+	for _, f := range probe.Findings {
+		res = append(res, &planpb.Resolution{
+			FindingId: f.GetId(),
+			Strategy:  planpb.Strategy_NEEDS_CONFIRM,
+			Actor:     "test",
+		})
+	}
+	plan, err := engine.Plan(prev, curr, cls, res, pgOnlyEmitter)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	up := plan.Migrations[0].GetUpSql()
+	enumIdx := strings.Index(up, "[enum_values_remove]")
+	pkIdx := strings.Index(up, "[pk_flip_disable]")
+	if enumIdx < 0 || pkIdx < 0 {
+		t.Fatalf("both risks expected in header; got enumIdx=%d pkIdx=%d\n%s", enumIdx, pkIdx, up)
+	}
+	if enumIdx > pkIdx {
+		t.Errorf("alphabetical sort within HIGH bucket: enum_values_remove < pk_flip_disable;"+
+			" got enum at %d, pk at %d", enumIdx, pkIdx)
+	}
+}
+
 // TestSortRisksByOpKind exercises the multi-risk sort path. Two
 // independent NEEDS_CONFIRM transitions on the same migration:
 // pk_flip + default_identity_drop. analyzeRisks should emit two

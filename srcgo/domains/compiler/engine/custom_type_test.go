@@ -88,6 +88,41 @@ func TestPlan_CustomTypeChange_RegisteredPath(t *testing.T) {
 	}
 }
 
+// TestPlan_CustomTypeChange_ConvertibleFromFallback — coverage for
+// the second branch of lookupCustomTypeCast. Forward conversion is
+// registered as convertible_from on the to-alias side rather than
+// convertible_to on the from-alias side; lookupCustomTypeCast falls
+// through to the second map lookup.
+func TestPlan_CustomTypeChange_ConvertibleFromFallback(t *testing.T) {
+	cls := testClassifier(t)
+	registry := map[string]*pgpb.CustomType{
+		"my_text_v1": {Alias: "my_text_v1", SqlType: "my_text_v1"},
+		"my_text_v2": {
+			Alias: "my_text_v2", SqlType: "my_text_v2",
+			ConvertibleFrom: []*pgpb.Conversion{
+				{Type: "my_text_v1", Cast: "{{.Col}}::my_text_v2"},
+			},
+		},
+	}
+	prev := mkCustomTypeSchema("my_text_v1", "my_text_v1", registry)
+	curr := mkCustomTypeSchema("my_text_v2", "my_text_v2", registry)
+
+	probe, _ := engine.Plan(prev, curr, cls, nil, pgOnlyEmitter)
+	res := []*planpb.Resolution{{
+		FindingId: probe.Findings[0].GetId(),
+		Strategy:  planpb.Strategy_LOSSLESS_USING,
+		Actor:     "test",
+	}}
+	plan, err := engine.Plan(prev, curr, cls, res, pgOnlyEmitter)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	up := plan.Migrations[0].GetUpSql()
+	if !strings.Contains(up, "USING payload::my_text_v2") {
+		t.Errorf("convertible_from fallback should still render USING:\n%s", up)
+	}
+}
+
 func TestPlan_CustomTypeChange_UnregisteredPath_HardError(t *testing.T) {
 	cls := testClassifier(t)
 	registry := map[string]*pgpb.CustomType{
