@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/writer"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
@@ -82,7 +84,53 @@ func (s *Sink) writeMigration(m *planpb.Migration) error {
 	if err := s.writeChecks(dir, m.GetChecks()); err != nil {
 		return err
 	}
+	if err := s.writeManifest(dir, m.GetManifest()); err != nil {
+		return err
+	}
 	return nil
+}
+
+// writeManifest serialises the Migration.Manifest to
+// `<Basename>.manifest.json` beside up/down/check artifacts. Nil or
+// empty manifests (no caps, no extensions, no applied resolutions)
+// write nothing — AC #1 preservation for runs that don't need an
+// audit file. The output is canonical protojson: Multiline=false,
+// UseProtoNames=true, alphabetical field order via
+// EmitUnpopulated=false, so re-runs produce byte-identical JSON.
+func (s *Sink) writeManifest(dir string, m *planpb.Manifest) error {
+	if m == nil {
+		return nil
+	}
+	if len(m.GetAppliedResolutions()) == 0 &&
+		len(m.GetCapabilities()) == 0 &&
+		len(m.GetRequiredExtensions()) == 0 {
+		return nil
+	}
+	buf, err := manifestMarshaler.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("manifest marshal: %w", err)
+	}
+	// protojson.Marshal has intentional whitespace jitter for wire-
+	// compat debuggability; Indent=""→compact output kills that.
+	// Trailing newline keeps file-diff tooling tidy.
+	path := filepath.Join(dir, s.Basename+".manifest.json")
+	if err := os.WriteFile(path, append(buf, '\n'), 0o644); err != nil {
+		return fmt.Errorf("manifest file %s: %w", path, err)
+	}
+	return nil
+}
+
+// manifestMarshaler is the shared protojson.MarshalOptions for
+// manifest output. Kept package-level so the options are one source
+// of truth across Sink.Write + tests that assert byte-identical
+// output. UseProtoNames=true matches the on-wire field names the
+// deploy client keys against; Multiline=false + Indent="" = compact
+// canonical form (determinism).
+var manifestMarshaler = protojson.MarshalOptions{
+	UseProtoNames:   true,
+	EmitUnpopulated: false,
+	Multiline:       false,
+	Indent:          "",
 }
 
 // writeChecks materialises each NamedSQL check as a separate file
