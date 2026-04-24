@@ -4,7 +4,11 @@ package ir.mco;
 import "w17/db.proto";
 
 // side.proto only declares the side connection; it has no tables
-// of its own in this fixture.
+// of its own in this fixture. Uses REDIS (KEY_VALUE category) so
+// the PG + side pairing respects D34 — one RELATIONAL + one
+// KEY_VALUE connection per domain is the canonical multi-
+// connection shape. SQLite previously used here would collide
+// on the D34 same-category rule (SQLite is RELATIONAL).
 option (w17.db.module) = {
-  connection: { name: "side", dialect: SQLITE, version: "3" }
+  connection: { name: "side", dialect: REDIS, version: "7" }
 };

@@ -163,6 +163,45 @@ func BuildMany(files []*loader.LoadedFile) (*irpb.Schema, error) {
 		seen[k] = src.GetName()
 	}
 
+	// D34 invariant: at most one connection per category within a
+	// domain. PG + MySQL in one domain = two RELATIONAL dialects,
+	// rejected. PG + Redis (RELATIONAL + KEY_VALUE) is fine. Filters
+	// CategoryUnspecified so DIALECT_UNSPECIFIED connections (which
+	// already failed per-file validation above) don't cascade into
+	// a confusing second error.
+	{
+		type catSrc struct {
+			dialect irpb.Dialect
+			name    string
+			lf      *loader.LoadedFile
+		}
+		seenByCategory := map[Category]catSrc{}
+		for _, lf := range files {
+			if lf.Module == nil || lf.Module.GetConnection() == nil {
+				continue
+			}
+			src := lf.Module.GetConnection()
+			if src.GetDialect() == dbpb.Dialect_DIALECT_UNSPECIFIED {
+				continue
+			}
+			d := dialectToIR(src.GetDialect())
+			cat := DialectCategory(d)
+			if cat == CategoryUnspecified {
+				continue
+			}
+			if prior, dup := seenByCategory[cat]; dup && prior.dialect != d {
+				allErrs = append(allErrs, diag.Atf(lf.File,
+					"domain already has a %s connection (%v under %q); a domain may run at most one connection per category",
+					cat, prior.dialect, prior.name).
+					WithWhy("D34 makes each dialect category (RELATIONAL / KEY_VALUE / MESSAGE_BROKER) exclusive within a domain — mixing two relational DBs (e.g. PG + MySQL) is a multi-domain architecture, each domain picks its own backend").
+					WithFix("split the offending modules into two domains (each with its own "+cat.String()+" backend), or drop one of the connections"))
+			}
+			if _, dup := seenByCategory[cat]; !dup {
+				seenByCategory[cat] = catSrc{dialect: d, name: src.GetName(), lf: lf}
+			}
+		}
+	}
+
 	if len(allErrs) > 0 {
 		return nil, errors.Join(allErrs...)
 	}

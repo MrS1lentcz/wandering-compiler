@@ -1,0 +1,16 @@
+syntax = "proto3";
+package ir.mcsc;
+
+import "w17/db.proto";
+import "w17/field.proto";
+
+// Main module declares a POSTGRES connection (RELATIONAL category).
+option (w17.db.module) = {
+  connection: { name: "main", dialect: POSTGRES, version: "18" }
+};
+
+message User {
+  option (w17.db.table) = { name: "users" };
+  int64  id   = 1 [(w17.field) = { type: ID, pk: true, default_auto: IDENTITY }];
+  string name = 2 [(w17.field) = { type: CHAR, max_len: 64 }];
+}

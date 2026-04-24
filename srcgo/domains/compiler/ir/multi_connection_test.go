@@ -70,8 +70,8 @@ func TestBuildManyPerTableConnectionOverride(t *testing.T) {
 		t.Fatalf("feature_flags table missing")
 	}
 	c := flag.GetConnection()
-	if c == nil || c.GetName() != "side" || c.GetDialect() != irpb.Dialect_SQLITE {
-		t.Errorf("feature_flags.Connection = %v, want {side, SQLITE, 3}", c)
+	if c == nil || c.GetName() != "side" || c.GetDialect() != irpb.Dialect_REDIS {
+		t.Errorf("feature_flags.Connection = %v, want {side, REDIS, 7}", c)
 	}
 }
 
@@ -83,6 +83,45 @@ func TestBuildManyUnknownConnectionOverride(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on unknown connection override")
 	}
+}
+
+// TestBuildManySameCategoryRejected — D34 enforcement: two
+// RELATIONAL dialects (POSTGRES + SQLITE) in the same domain
+// are rejected at IR build time with a diag.Error naming the
+// category + prior connection.
+func TestBuildManySameCategoryRejected(t *testing.T) {
+	main := mustLoad(t, "testdata/multi_connection_same_category/main.proto")
+	dev := mustLoad(t, "testdata/multi_connection_same_category/dev.proto")
+
+	_, err := ir.BuildMany([]*loader.LoadedFile{main, dev})
+	if err == nil {
+		t.Fatal("expected D34 error on two RELATIONAL connections in one domain")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"RELATIONAL",
+		"D34",
+		"split",
+	} {
+		if !containsSubstring(msg, want) {
+			t.Errorf("error message missing %q, got:\n%s", want, msg)
+		}
+	}
+}
+
+// containsSubstring is a substring check that tolerates the
+// multi-line diag.Error format.
+func containsSubstring(haystack, needle string) bool {
+	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
+}
+
+func indexOf(haystack, needle string) int {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return i
+		}
+	}
+	return -1
 }
 
 func mustLoad(t *testing.T, path string) *loader.LoadedFile {

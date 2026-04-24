@@ -1,0 +1,11 @@
+syntax = "proto3";
+package ir.mcsc;
+
+import "w17/db.proto";
+
+// dev.proto declares a SECOND RELATIONAL connection (SQLite) —
+// this violates D34 which requires at most one connection per
+// category within a domain. BuildMany rejects the pair.
+option (w17.db.module) = {
+  connection: { name: "dev", dialect: SQLITE, version: "3" }
+};
