@@ -42,11 +42,12 @@ from `docs/conventions-global/`:
   they carry special documentation + 100% coverage. The documentation
   half is done; the 100% coverage half is Phase B of the iter-1
   close-out sweep (see `docs/iteration-1-coverage.md`).
-- **Makefile surface** (`tooling.md §Core Targets`) — standard targets
-  `configure / install / up / audit / seed / nuke / neoc / migrate / e2e
-  / loadtest` are missing. Current Makefile carries only `build /
-  schemagen / test / test-apply`. Acceptable at skeleton; must land
-  before `poc` transition.
+- **Makefile surface** ✓ **resolved 2026-04-25.** All conventional
+  targets present; `up / seed / neoc / migrate / makemigrations /
+  loadtest` keep their conventional name + emit a one-line
+  explanation pointing at the right surface (compiler is a CLI
+  tool, not a service stack). `audit` target wires `go vet` +
+  `cover-all.sh` cross-package coverage report.
 - **Shared lib tier absent** (`go.md §srcgo Structure`) — `srcgo/lib/`
   and `srcgo/x/` don't exist yet. `naming/`, `writer/`, `diag/` look
   domain-general and are candidates to lift when a second consumer
