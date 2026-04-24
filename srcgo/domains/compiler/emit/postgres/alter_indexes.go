@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
@@ -164,10 +166,16 @@ func indexTableShell(ctx *planpb.TableCtx, cols []*irpb.Column, idx, _from *irpb
 // `Indexes` field swapped — used by the Replace path so we can
 // re-render the from side for down without mutating the shared
 // shell.
+//
+// Uses proto.Clone (not a Go-level value copy) because proto
+// messages carry an internal MessageState with a sync.Mutex; a
+// shallow copy trips `go vet` and risks concurrent-state confusion
+// if the clone outlives the original in another goroutine. The
+// cost is negligible for the small shell we're cloning.
 func replaceIndexes(t *irpb.Table, idxs []*irpb.Index) *irpb.Table {
-	clone := *t
+	clone := proto.Clone(t).(*irpb.Table)
 	clone.Indexes = idxs
-	return &clone
+	return clone
 }
 
 // columnByProto rebuilds the proto-name → Column lookup the iter-1

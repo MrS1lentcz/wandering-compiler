@@ -661,3 +661,89 @@ Other live threads:
   defaults to `./docs/classification` (repo-root relative).
   Makefile test-apply sets the var; production users can
   override if they ship YAMLs elsewhere.
+
+---
+
+## 2026-04-25 — M4 Layer A+B + pre-Layer-C cleanup
+
+**Status.** M4 Layer A (capability usage tracking) + Layer B
+(manifest.json output) shipped. Adapter layering corrected
+(`engine/cli/` lifted to `decide/` sibling per D30).
+`test-apply` harness now runs the PG 14–18 matrix dynamically via
+`scripts/test-apply.sh`. Pre-Layer-C coverage push from 91.6% →
+~94% cross-package. Layer C (MySQL stub) explicitly paused by
+user direction — infra is ready to plug in, cleanup must close
+first.
+
+### Commit trail (2026-04-25, pre-Layer-C)
+
+```
+0ccbc1d emit+engine: M4 Layer A — capability usage tracking + Manifest population
+2881b12 filesystem: M4 Layer B — manifest.json alongside up/down.sql
+7be9c9a decide: lift --decide flag parser out of engine/ into its own package
+c13841c test-apply: matrix harness across PG 14-18 (last 5 majors)
+9388203 engine+emit: lock dialect contract before MySQL stub (D32 + tests)
+<pending> chore: pre-Layer-C cleanup (vet fix + coverage push + doc refresh)
+```
+
+### Where things landed
+
+- `srcgo/domains/compiler/emit/usage.go` — collector passed through
+  `DialectEmitter.EmitOp(op, *Usage)`; nil-safe; records
+  TRANSACTIONAL_DDL once per non-empty run.
+- `srcgo/domains/compiler/engine/plan.go buildManifest` —
+  unions emitter-reported caps with catalog-derived Extensions
+  (via optional `DialectCapabilities`) and IR-level
+  `(w17.pg.field).required_extensions` on columns the plan
+  touches.
+- `srcgo/domains/compiler/engine/filesystem/sink.go` — writes
+  `<Basename>.manifest.json` when Manifest has any populated
+  slot; canonical `protojson.Marshal`; empty Manifest = no file.
+- `srcgo/domains/compiler/decide/` — `--decide` flag parser,
+  `DefaultSQLLoader`, `Decisions.ResolveAll`. Sibling to
+  `engine/` per the D30 adapter rule.
+- `scripts/test-apply.sh <dialect> <version>` — dialect-
+  parametrised harness; per-fixture `.min-pg-version` gate
+  (uuid_pk → 18+). Makefile drives
+  `PG_VERSIONS = 14 15 16 17 18` by default.
+- `testdata/pg_dialect/expected.manifest.json` — first manifest
+  golden; opt-in per fixture; guards cap instrumentation drift.
+
+### D32 pinned (2026-04-25)
+
+Per-dialect authoring pass-through stays parallel:
+`proto/w17/<dialect>/field.proto` per dialect + per-dialect IR
+slot (`Column.Pg`, future `Column.Mysql`). No generalised
+`variants[]` map. MySQL lands as its own extension file when
+Layer C opens. See `iteration-2.md` D32 for rationale.
+
+### Where to resume next session
+
+**Layer C — MySQL emitter stub.** All hard blockers closed:
+- Compile-time `DialectCapabilities` assertion on SQL dialects.
+- Multi-dialect engine orchestration tests
+  (`TestPlan_MultiDialect_*`).
+- Proto extension pattern locked (D32).
+- `test-apply` matrix ready to add `MYSQL_VERSIONS`.
+- Manifest golden path opt-in per fixture.
+
+Layer C adds:
+1. `proto/w17/mysql/field.proto` + `(w17.mysql.field)`.
+2. `Column.Mysql MysqlOptions` in `ir.proto` + IR builder read.
+3. `srcgo/domains/compiler/emit/mysql/` — Emitter + catalog.
+4. `pickEmitter` wire-up (today returns "not implemented").
+5. `scripts/test-apply.sh` case `mysql)` arm + Makefile
+   `MYSQL_VERSIONS = <last 5 majors, verified live>` +
+   `test-apply-mysql` target.
+6. Third bucket in `TestPlan_MultiDialect_HappyPath`.
+7. A MySQL grand-tour fixture with its own
+   `expected.manifest.json`.
+
+### Still owed (soft, non-blocking)
+
+- Makefile standard targets (pre-poc gate): `configure /
+  install / up / audit / seed / nuke / neoc / migrate / e2e /
+  loadtest`.
+- Core-fn 100% coverage for registered >50 LOC functions (per
+  quality.md special-description rule). Partially covered today.
+- Push coverage back to iter-1 baseline 97.8% (current ~94%).

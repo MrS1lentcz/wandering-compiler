@@ -5,9 +5,36 @@ file is where ideas and parked work land so they don't drift. Each entry
 has a **why**, a **sketch** of the implementation direction, and a
 **preconditions** note (what must ship before it's tractable).
 
-`iteration-2.md` (the actual spec) will cherry-pick from here and
-formalise, same way `iteration-1.md` started. Until then, entries here
-are unordered and un-prioritised.
+`iteration-2.md` (the actual spec) cherry-picks from here and
+formalises entries as they graduate.
+
+## Status as of 2026-04-25
+
+**Shipped** (formalised in `iteration-2.md` M-records):
+- M1 Alter-diff — full op surface + applied-state (D27).
+- M2 Multi-file schemas + cross-file FK.
+- M3 Multi-connection per domain (D26).
+- M4 Layer A — capability usage tracking → Manifest (D31).
+- M4 Layer B — FilesystemSink writes manifest.json.
+- D28 Migration-safety classification matrix + classifier pkg.
+- D30 Engine isolation (pure `Plan` + `Sink`/`ResolutionSource`).
+- D32 Per-dialect authoring pass-through (parallel proto ext).
+- Per-dialect test-apply matrix (PG 14–18 dynamic, scripts/).
+
+**Next open in iter-2:**
+- M4 Layer C — MySQL emitter stub (paused by user direction;
+  infrastructure ready to plug in).
+- Pre-Layer-C cleanup — coverage push, Makefile standard targets,
+  core-fn 100% coverage backlog.
+
+**Still parked (iter-3+):**
+- DQL (Doctrine-inspired ORM).
+- Local schema validator.
+- Hosted platform + deploy client (D29 north-star).
+
+Individual entries below are left as written for historical
+context — don't re-derive from the entry if `iteration-2.md` has
+a formalised D-record.
 
 ---
 

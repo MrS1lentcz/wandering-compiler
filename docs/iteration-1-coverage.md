@@ -277,6 +277,46 @@ the backlog stays explicit.
 - **MSSQL- / Oracle-specific types** — iter-2+ when those emitters
   land.
 
+### 3.3-ter 2026-04-25 pre-Layer-C refresh
+
+After M3 (multi-connection) and M4 Layer A+B (capability usage
+tracking + manifest.json), cross-package coverage drifted from
+97.8% to **91.6%** — the new surface (PG cap instrumentation,
+engine/checks.go NEEDS_CONFIRM dispatch, engine/plan.go
+splice/manifest paths, FilesystemSink manifest writer) landed
+faster than tests.
+
+Pre-Layer-C coverage push closed the gap to **93.7%** with:
+- `engine/checks_helpers_test.go` — classifier dispatch helpers
+  (`classifyNumericCase`, `classifyAllowedExtensionsCase`,
+  `defaultCaseFor`, `isEmptyDefault`, `qualifiedTableName`,
+  `scaleOf`, `contains`, `stringSet`). All eight were at 0%.
+- `engine/splice_test.go` —
+  `splitByResolution` mixed resolved/unresolved cases,
+  `spliceCustomMigrations` multiple pairs + pass-through +
+  empty-CustomSql, `bucketTables` nil sides.
+- `emit/postgres/dbtype_keyword_test.go` — every DbType keyword +
+  every cap-tagging branch of `recordDbTypeCap`.
+- `decide/loader_test.go` — `DefaultSQLLoader` happy path +
+  missing-file error.
+- `testdata/pg_dialect/expected.manifest.json` + new
+  `goldens_manifest_test.go` — first manifest golden (opt-in
+  per-fixture; guards cap instrumentation drift going into
+  Layer C).
+
+Remaining ~4% gap concentrates in three categories: (a) the
+pre-existing iter-1 deliberate exceptions in §3.3-bis below,
+(b) lightly-tested CLI orchestration in `cmd/cli/` (end-to-end
+wc-generate tests don't exercise every flag combination — 48%
+local coverage reflects this), (c) `alter_table.go`
+`renderGeneratedExprChange` three-way dispatch + a handful of
+defensive paths the fixture corpus doesn't touch.
+
+The 93.7% baseline is the new floor against which Layer C
+will be measured. Ship Layer C tests alongside the MySQL
+emitter itself — do not accept further drift without a
+matching coverage decision documented here.
+
 ### 3.3-bis 2026-04-22/23 Phase-B sweep — remaining ~2% gap
 
 After the two-day Phase-B sweep (refactor → fixture sweep → unit tests
