@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
@@ -27,33 +28,35 @@ type Emitter struct{}
 // Name returns the stable dialect identifier.
 func (Emitter) Name() string { return "postgres" }
 
-// EmitOp dispatches on the Op variant.
-func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
+// EmitOp dispatches on the Op variant. The usage collector records
+// D16 capability IDs every dispatch site touches; nil disables
+// tracking (Usage.Use is nil-safe).
+func (e Emitter) EmitOp(op *planpb.Op, usage *emit.Usage) (up string, down string, err error) {
 	switch v := op.GetVariant().(type) {
 	case *planpb.Op_AddTable:
-		return e.emitAddTable(v.AddTable.GetTable())
+		return e.emitAddTable(v.AddTable.GetTable(), usage)
 	case *planpb.Op_DropTable:
-		return e.emitDropTable(v.DropTable.GetTable())
+		return e.emitDropTable(v.DropTable.GetTable(), usage)
 	case *planpb.Op_RenameTable:
-		return e.emitRenameTable(v.RenameTable)
+		return e.emitRenameTable(v.RenameTable, usage)
 	case *planpb.Op_SetTableNamespace:
-		return e.emitSetTableNamespace(v.SetTableNamespace)
+		return e.emitSetTableNamespace(v.SetTableNamespace, usage)
 	case *planpb.Op_SetTableComment:
-		return e.emitSetTableComment(v.SetTableComment)
+		return e.emitSetTableComment(v.SetTableComment, usage)
 	case *planpb.Op_AddColumn:
-		return e.emitAddColumn(v.AddColumn)
+		return e.emitAddColumn(v.AddColumn, usage)
 	case *planpb.Op_DropColumn:
-		return e.emitDropColumn(v.DropColumn)
+		return e.emitDropColumn(v.DropColumn, usage)
 	case *planpb.Op_RenameColumn:
 		return e.emitRenameColumn(v.RenameColumn)
 	case *planpb.Op_AlterColumn:
-		return e.emitAlterColumn(v.AlterColumn)
+		return e.emitAlterColumn(v.AlterColumn, usage)
 	case *planpb.Op_AddIndex:
-		return e.emitAddIndex(v.AddIndex)
+		return e.emitAddIndex(v.AddIndex, usage)
 	case *planpb.Op_DropIndex:
 		return e.emitDropIndex(v.DropIndex)
 	case *planpb.Op_ReplaceIndex:
-		return e.emitReplaceIndex(v.ReplaceIndex)
+		return e.emitReplaceIndex(v.ReplaceIndex, usage)
 	case *planpb.Op_AddRawIndex:
 		return e.emitAddRawIndex(v.AddRawIndex)
 	case *planpb.Op_DropRawIndex:
@@ -61,11 +64,11 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 	case *planpb.Op_ReplaceRawIndex:
 		return e.emitReplaceRawIndex(v.ReplaceRawIndex)
 	case *planpb.Op_AddForeignKey:
-		return e.emitAddForeignKey(v.AddForeignKey)
+		return e.emitAddForeignKey(v.AddForeignKey, usage)
 	case *planpb.Op_DropForeignKey:
 		return e.emitDropForeignKey(v.DropForeignKey)
 	case *planpb.Op_ReplaceForeignKey:
-		return e.emitReplaceForeignKey(v.ReplaceForeignKey)
+		return e.emitReplaceForeignKey(v.ReplaceForeignKey, usage)
 	case *planpb.Op_AddCheck:
 		return e.emitAddCheck(v.AddCheck)
 	case *planpb.Op_DropCheck:
@@ -91,11 +94,15 @@ func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
 // DROP INDEX (reverse) + DROP TABLE + DROP TYPE (reverse), down
 // re-creates the table from the carried prev-side ir.Table the same
 // way emitAddTable would have.
-func (e Emitter) emitDropTable(t *irpb.Table) (up string, down string, err error) {
+func (e Emitter) emitDropTable(t *irpb.Table, usage *emit.Usage) (up string, down string, err error) {
 	if t.GetName() == "" {
 		return "", "", fmt.Errorf("postgres: DropTable with empty name (builder invariant violated)")
 	}
-	addUp, _, err := e.emitAddTable(t)
+	// A DropTable still emits the prior CREATE in its down body; we
+	// run emitAddTable with the same usage collector so caps exposed
+	// by the rehydrated schema (JSONB, GIN index, …) land on the
+	// manifest even when the net effect of the run is a drop.
+	addUp, _, err := e.emitAddTable(t, usage)
 	if err != nil {
 		return "", "", err
 	}
@@ -104,8 +111,14 @@ func (e Emitter) emitDropTable(t *irpb.Table) (up string, down string, err error
 		colByProto[c.GetProtoName()] = c
 	}
 	qualTable := qualifiedTable(t)
+	if t.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	enumTypes := collectPgEnumTypes(t)
-	_, idxNames, err := renderIndexes(t, colByProto)
+	if len(enumTypes) > 0 {
+		usage.Use(emit.CapEnumType)
+	}
+	_, idxNames, err := renderIndexes(t, colByProto, usage)
 	if err != nil {
 		return "", "", err
 	}
@@ -122,7 +135,7 @@ func (e Emitter) emitDropTable(t *irpb.Table) (up string, down string, err error
 // CREATE INDEX tail, COMMENT ON tail (D22), then down-migration.
 // Column and constraint layout follows the reference in
 // iteration-1-models.md.
-func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error) {
+func (e Emitter) emitAddTable(t *irpb.Table, usage *emit.Usage) (up string, down string, err error) {
 	if t.GetName() == "" {
 		return "", "", fmt.Errorf("postgres: AddTable with empty name (builder invariant violated)")
 	}
@@ -131,18 +144,24 @@ func (e Emitter) emitAddTable(t *irpb.Table) (up string, down string, err error)
 		colByProto[c.GetProtoName()] = c
 	}
 	qualTable := qualifiedTable(t)
+	if t.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	enumTypes := collectPgEnumTypes(t)
+	if len(enumTypes) > 0 {
+		usage.Use(emit.CapEnumType)
+	}
 
 	var upB strings.Builder
 	writeEnumTypePrelude(&upB, t, enumTypes)
-	if err := writeCreateTable(&upB, t, colByProto, qualTable); err != nil {
+	if err := writeCreateTable(&upB, t, colByProto, qualTable, usage); err != nil {
 		return "", "", err
 	}
-	idxNames, err := writeIndexStatements(&upB, t, colByProto, qualTable)
+	idxNames, err := writeIndexStatements(&upB, t, colByProto, qualTable, usage)
 	if err != nil {
 		return "", "", err
 	}
-	writeCommentStatements(&upB, t, qualTable)
+	writeCommentStatements(&upB, t, qualTable, usage)
 	return upB.String(), renderTableDown(t, qualTable, idxNames, enumTypes), nil
 }
 
@@ -162,11 +181,11 @@ func writeEnumTypePrelude(b *strings.Builder, t *irpb.Table, enumTypes []pgEnumT
 // established order. Returns an error when any column / check renderer
 // refuses the IR as invalid (should be caught at IR build time; this is
 // a defense-in-depth boundary).
-func writeCreateTable(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string) error {
+func writeCreateTable(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string, usage *emit.Usage) error {
 	fmt.Fprintf(b, "CREATE TABLE %s (\n", qualTable)
 	lines := make([]string, 0, len(t.GetColumns()))
 	for _, col := range t.GetColumns() {
-		line, err := renderColumn(t, col, colByProto)
+		line, err := renderColumn(t, col, colByProto, usage)
 		if err != nil {
 			return err
 		}
@@ -226,8 +245,8 @@ func renderCompositePrimaryKey(t *irpb.Table, colByProto map[string]*irpb.Column
 // writeIndexStatements appends the structured + raw CREATE INDEX
 // statements after CREATE TABLE. Returns the index names in emission
 // order so the down-migration can drop them in reverse.
-func writeIndexStatements(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string) ([]string, error) {
-	idxStmts, idxNames, err := renderIndexes(t, colByProto)
+func writeIndexStatements(b *strings.Builder, t *irpb.Table, colByProto map[string]*irpb.Column, qualTable string, usage *emit.Usage) ([]string, error) {
+	idxStmts, idxNames, err := renderIndexes(t, colByProto, usage)
 	if err != nil {
 		return nil, err
 	}
@@ -256,9 +275,10 @@ func writeIndexStatements(b *strings.Builder, t *irpb.Table, colByProto map[stri
 // Deterministic order: table first, then columns in declaration order.
 // Down: no explicit reset needed — DROP TABLE removes entries in
 // pg_description transitively.
-func writeCommentStatements(b *strings.Builder, t *irpb.Table, qualTable string) {
+func writeCommentStatements(b *strings.Builder, t *irpb.Table, qualTable string, usage *emit.Usage) {
 	commentStmts := collectCommentStmts(t, qualTable)
 	if len(commentStmts) > 0 {
+		usage.Use(emit.CapCommentOn)
 		b.WriteString("\n\n")
 		b.WriteString(strings.Join(commentStmts, "\n"))
 	}

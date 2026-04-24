@@ -83,7 +83,7 @@ func TestDbTypeOrEffectiveUnspecified(t *testing.T) {
 		Name: "label", ProtoName: "label",
 		Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_TEXT,
 	}
-	got, err := dbTypeOrEffective(irpb.DbType_DB_TYPE_UNSPECIFIED, col, "configs")
+	got, err := dbTypeOrEffective(irpb.DbType_DB_TYPE_UNSPECIFIED, col, "configs", nil)
 	if err != nil {
 		t.Fatalf("dbTypeOrEffective: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestDbTypeOrEffectiveUnspecified(t *testing.T) {
 
 // TestDbTypeOrEffectiveNilSnapshotErrors — defensive branch.
 func TestDbTypeOrEffectiveNilSnapshotErrors(t *testing.T) {
-	if _, err := dbTypeOrEffective(irpb.DbType_DB_TYPE_UNSPECIFIED, nil, "t"); err == nil {
+	if _, err := dbTypeOrEffective(irpb.DbType_DB_TYPE_UNSPECIFIED, nil, "t", nil); err == nil {
 		t.Fatal("nil column with UNSPECIFIED DbType accepted; want error")
 	}
 }

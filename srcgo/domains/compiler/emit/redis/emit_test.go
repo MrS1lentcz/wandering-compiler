@@ -27,7 +27,7 @@ func TestEmitAddTableKeyspaceComment(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{
 		Table: &irpb.Table{Name: "users", MessageFqn: "shop.User"},
 	}}}
-	up, down, err := redis.Emitter{}.EmitOp(op)
+	up, down, err := redis.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestEmitDropTablePattern(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{
 		Table: &irpb.Table{Name: "legacy", MessageFqn: "shop.Legacy"},
 	}}}
-	up, _, err := redis.Emitter{}.EmitOp(op)
+	up, _, err := redis.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestEmitRenameTablePattern(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{
 		FromName: "users", ToName: "accounts",
 	}}}
-	up, down, err := redis.Emitter{}.EmitOp(op)
+	up, down, err := redis.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestEmitColumnOpsAreNoOps(t *testing.T) {
 		{Variant: &planpb.Op_AddForeignKey{AddForeignKey: &planpb.AddForeignKey{Ctx: &planpb.TableCtx{TableName: "t"}}}},
 	}
 	for _, op := range ops {
-		up, down, err := redis.Emitter{}.EmitOp(op)
+		up, down, err := redis.Emitter{}.EmitOp(op, nil)
 		if err != nil {
 			t.Errorf("EmitOp(%T): %v", op.GetVariant(), err)
 			continue
@@ -103,7 +103,7 @@ func TestEmitWcMigrationsInsertZadd(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsInsert{WcMigrationsInsert: &planpb.WcMigrationsInsert{
 		Timestamp: "20260423T120000Z",
 	}}}
-	up, down, err := redis.Emitter{}.EmitOp(op)
+	up, down, err := redis.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestEmitWcMigrationsInsertZadd(t *testing.T) {
 
 // TestEmitEmptyOpErrors — empty Op surfaces an informative error.
 func TestEmitEmptyOpErrors(t *testing.T) {
-	if _, _, err := (redis.Emitter{}).EmitOp(&planpb.Op{}); err == nil {
+	if _, _, err := (redis.Emitter{}).EmitOp(&planpb.Op{}, nil); err == nil {
 		t.Fatal("empty Op accepted; want error")
 	}
 }
@@ -125,7 +125,7 @@ func TestEmitEmptyOpErrors(t *testing.T) {
 // TestEmitWcMigrationsCreate — lazy-init comment; down DEL.
 func TestEmitWcMigrationsCreate(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsCreate{WcMigrationsCreate: &planpb.WcMigrationsCreate{}}}
-	up, down, err := redis.Emitter{}.EmitOp(op)
+	up, down, err := redis.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestEmitWcMigrationsCreate(t *testing.T) {
 // TestEmitAddTableEmptyName — defensive.
 func TestEmitAddTableEmptyName(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: &irpb.Table{}}}}
-	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (redis.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty table name accepted; want error")
 	}
 }
@@ -148,7 +148,7 @@ func TestEmitAddTableEmptyName(t *testing.T) {
 // TestEmitDropTableEmptyName — defensive.
 func TestEmitDropTableEmptyName(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: &irpb.Table{}}}}
-	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (redis.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty table name accepted; want error")
 	}
 }
@@ -156,7 +156,7 @@ func TestEmitDropTableEmptyName(t *testing.T) {
 // TestEmitRenameTableEmptyNames — defensive.
 func TestEmitRenameTableEmptyNames(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_RenameTable{RenameTable: &planpb.RenameTable{FromName: "a"}}}
-	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (redis.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty to accepted; want error")
 	}
 }
@@ -164,7 +164,7 @@ func TestEmitRenameTableEmptyNames(t *testing.T) {
 // TestEmitWcMigrationsInsertEmptyTimestamp — defensive.
 func TestEmitWcMigrationsInsertEmptyTimestamp(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsInsert{WcMigrationsInsert: &planpb.WcMigrationsInsert{}}}
-	if _, _, err := (redis.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (redis.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty timestamp accepted; want error")
 	}
 }

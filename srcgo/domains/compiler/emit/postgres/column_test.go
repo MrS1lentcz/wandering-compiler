@@ -64,7 +64,7 @@ func TestPgColumnFromDbType(t *testing.T) {
 				Precision: c.prec,
 				Scale:     c.scale,
 			}
-			got, err := columnType("t", col)
+			got, err := columnType("t", col, nil)
 			if c.wantErr != "" {
 				if err == nil {
 					t.Fatalf("expected error containing %q, got SQL %q", c.wantErr, got)
@@ -117,7 +117,7 @@ func TestPgColumnFromDbType_Unknown(t *testing.T) {
 		// instead of silently returning empty SQL.
 		DbType: irpb.DbType(9999),
 	}
-	_, err := pgColumnFromDbType(col)
+	_, err := pgColumnFromDbType(col, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown db_type, got nil")
 	}

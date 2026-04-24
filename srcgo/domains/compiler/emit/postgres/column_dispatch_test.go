@@ -118,7 +118,7 @@ func TestColumnTypePerCarrierDispatch(t *testing.T) {
 				ElementIsMessage: c.elemMsg,
 				Pg:              c.pg,
 			}
-			got, err := columnType(c.table, col)
+			got, err := columnType(c.table, col, nil)
 			if c.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want error containing %q, got SQL %q", c.wantErr, got)
@@ -177,7 +177,7 @@ func TestPgArrayOfElementError(t *testing.T) {
 		Type:           irpb.SemType_SEM_DECIMAL,
 		// No Precision — element columnType errors out.
 	}
-	_, err := pgArrayOf(col)
+	_, err := pgArrayOf(col, nil)
 	if err == nil {
 		t.Fatal("expected err when element has no precision, got nil")
 	}
@@ -218,7 +218,7 @@ func TestDefaultExprVariants(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := defaultExpr(col, c.def)
+			got, err := defaultExpr(col, c.def, nil)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -232,7 +232,7 @@ func TestDefaultExprVariants(t *testing.T) {
 	// the emitter must surface a clear error instead of silently
 	// returning empty SQL.
 	t.Run("unknown variant", func(t *testing.T) {
-		_, err := defaultExpr(col, &irpb.Default{})
+		_, err := defaultExpr(col, &irpb.Default{}, nil)
 		if err == nil {
 			t.Fatal("want error for unset variant, got nil")
 		}
@@ -266,7 +266,7 @@ func TestAutoExprVariants(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			col := &irpb.Column{Type: c.sem}
-			got, err := autoExpr(col, c.kind)
+			got, err := autoExpr(col, c.kind, nil)
 			if c.wantErr != "" {
 				if err == nil {
 					t.Fatalf("want error containing %q, got SQL %q", c.wantErr, got)

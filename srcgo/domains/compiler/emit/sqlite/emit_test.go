@@ -36,7 +36,7 @@ func TestEmitOpReturnsNotImplemented(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			up, down, err := sqlite.Emitter{}.EmitOp(tc.op)
+			up, down, err := sqlite.Emitter{}.EmitOp(tc.op, nil)
 			if err == nil {
 				t.Fatal("expected not-implemented error, got nil")
 			}
@@ -78,7 +78,7 @@ func TestPlanEmitSurfacesStubError(t *testing.T) {
 	p := &planpb.MigrationPlan{Ops: []*planpb.Op{
 		{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: &irpb.Table{Name: "x"}}}},
 	}}
-	up, down, err := emit.Emit(sqlite.Emitter{}, p)
+	up, down, _, err := emit.Emit(sqlite.Emitter{}, p)
 	if err == nil {
 		t.Fatal("expected error from stub, got nil")
 	}

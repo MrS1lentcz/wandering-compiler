@@ -94,7 +94,7 @@ func runAlterPipeline(t *testing.T, dir string) (up, down string) {
 	if err != nil {
 		t.Fatalf("plan.Diff: %v", err)
 	}
-	up, down, err = emit.Emit(postgres.Emitter{}, p.Plan)
+	up, down, _, err = emit.Emit(postgres.Emitter{}, p.Plan)
 	if err != nil {
 		t.Fatalf("emit.Emit: %v", err)
 	}

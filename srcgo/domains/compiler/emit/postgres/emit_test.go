@@ -82,7 +82,7 @@ func TestMoneyRendersNumeric(t *testing.T) {
 	}
 	table := &irpb.Table{Name: "t", Columns: []*irpb.Column{col}}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestCompositePKRendersTableLevel(t *testing.T) {
 		PrimaryKey: []string{"user_id", "group_id"},
 	}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestCompositePKRendersTableLevel(t *testing.T) {
 // Unknown op variant returns a clear error (M5 stub exercises the same
 // contract — this keeps the postgres impl honest).
 func TestUnknownOpVariantErrors(t *testing.T) {
-	_, _, err := postgres.Emitter{}.EmitOp(&planpb.Op{})
+	_, _, err := postgres.Emitter{}.EmitOp(&planpb.Op{}, nil)
 	if err == nil {
 		t.Fatal("empty Op succeeded; want error on unsupported variant")
 	}
@@ -169,11 +169,11 @@ func TestEmitDropTableMirrorsAddTable(t *testing.T) {
 	addOp := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
 	dropOp := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: table}}}
 
-	addUp, _, err := postgres.Emitter{}.EmitOp(addOp)
+	addUp, _, err := postgres.Emitter{}.EmitOp(addOp, nil)
 	if err != nil {
 		t.Fatalf("AddTable: %v", err)
 	}
-	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp)
+	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp, nil)
 	if err != nil {
 		t.Fatalf("DropTable: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestEmitDropTableMirrorsAddTable(t *testing.T) {
 // SQL.
 func TestDropTableEmptyNameErrors(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropTable{DropTable: &planpb.DropTable{Table: &irpb.Table{}}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty table name accepted on DropTable, want error")
 	}
 }
@@ -222,7 +222,7 @@ func TestEmitAddColumnPlain(t *testing.T) {
 		},
 		Column: col,
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestEmitAddColumnWithCheck(t *testing.T) {
 		Ctx:    &planpb.TableCtx{TableName: "users"},
 		Column: col,
 	}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestEmitAddColumnEnum(t *testing.T) {
 		},
 		Column: col,
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -298,7 +298,7 @@ func TestEmitSetTableNamespaceSchemaToSchema(t *testing.T) {
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
 		ToNamespace:   "analytics",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestEmitSetTableNamespaceNoneToSchema(t *testing.T) {
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
 		ToNamespace:   "reporting",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestEmitSetTableNamespaceSchemaToNone(t *testing.T) {
 		FromNamespace: "reporting",
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_NONE,
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -363,7 +363,7 @@ func TestEmitSetTableNamespaceBothNonSchemaRename(t *testing.T) {
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_PREFIX,
 		ToNamespace:   "new",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestEmitSetTableNamespaceSchemaChain(t *testing.T) {
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
 		ToNamespace:   "audit",
 	}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestEmitSetTableNamespaceNoneToPrefixChain(t *testing.T) {
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA,
 		ToNamespace:   "audit",
 	}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestEmitSetTableNamespaceRejectsNoOp(t *testing.T) {
 		FromMode:      irpb.NamespaceMode_NAMESPACE_MODE_NONE,
 		ToMode:        irpb.NamespaceMode_NAMESPACE_MODE_NONE,
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("no-op SetTableNamespace accepted; want error")
 	}
 }
@@ -439,7 +439,7 @@ func TestEmitDropIndexDirect(t *testing.T) {
 			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -464,7 +464,7 @@ func TestEmitAlterColumnNumericNoScale(t *testing.T) {
 			}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -496,7 +496,7 @@ func TestEmitAlterColumnGeneratedExprRemove(t *testing.T) {
 			}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -531,7 +531,7 @@ func TestEmitAlterColumnGeneratedExprChange(t *testing.T) {
 			}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestEmitReplaceIndexFromNameChange(t *testing.T) {
 			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestEmitDropIndexEmptyName(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "users"},
 		Index: &irpb.Index{},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty-name DropIndex accepted; want error")
 	}
 }
@@ -588,7 +588,7 @@ func TestEmitReplaceForeignKeyAllFields(t *testing.T) {
 			{Name: "customer_id", ProtoName: "customer_id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -608,7 +608,7 @@ func TestEmitReplaceCheckCoversBothSides(t *testing.T) {
 		From:   &irpb.Check{Variant: &irpb.Check_Length{Length: &irpb.LengthCheck{Min: intPtr(3)}}},
 		To:     &irpb.Check{Variant: &irpb.Check_Length{Length: &irpb.LengthCheck{Min: intPtr(10)}}},
 	}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestEmitRenameTable(t *testing.T) {
 		},
 		FromName: "users", ToName: "accounts",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -651,7 +651,7 @@ func TestEmitSetTableComment(t *testing.T) {
 		From: "",
 		To:   "user accounts",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -676,7 +676,7 @@ func TestEmitRenameColumn(t *testing.T) {
 		FromName:    "name",
 		ToName:      "display_name",
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -695,7 +695,7 @@ func TestEmitRenameColumnNoOpRefused(t *testing.T) {
 		Ctx: &planpb.TableCtx{TableName: "users"},
 		FromName: "name", ToName: "name",
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("RenameColumn from==to accepted, want error")
 	}
 }
@@ -713,7 +713,7 @@ func TestEmitAddIndexStructured(t *testing.T) {
 			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -736,7 +736,7 @@ func TestEmitReplaceIndex(t *testing.T) {
 			{Name: "email", ProtoName: "email", Carrier: irpb.Carrier_CARRIER_STRING, Type: irpb.SemType_SEM_EMAIL, MaxLen: 255},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -752,7 +752,7 @@ func TestEmitRawIndexRoundtrip(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "posts"},
 		Index: &irpb.RawIndex{Name: "posts_search_gin", Body: "USING gin (search_tsv)"},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(addOp)
+	up, down, err := postgres.Emitter{}.EmitOp(addOp, nil)
 	if err != nil {
 		t.Fatalf("AddRawIndex: %v", err)
 	}
@@ -775,7 +775,7 @@ func TestEmitAddForeignKey(t *testing.T) {
 			{Name: "customer_id", ProtoName: "customer_id", Carrier: irpb.Carrier_CARRIER_INT64, Type: irpb.SemType_SEM_ID},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -799,7 +799,7 @@ func TestEmitAddCheck(t *testing.T) {
 		Column: col,
 		Check:  &irpb.Check{Variant: &irpb.Check_Blank{Blank: &irpb.BlankCheck{}}},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestEmitAddRawCheck(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "orders"},
 		Check: &irpb.RawCheck{Name: "orders_dates_ordered", Expr: "start_date <= end_date"},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -841,7 +841,7 @@ func TestEmitAlterColumnNullable(t *testing.T) {
 			{Variant: &planpb.FactChange_Nullable{Nullable: &planpb.NullableChange{From: false, To: true}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -864,7 +864,7 @@ func TestEmitAlterColumnMaxLen(t *testing.T) {
 			{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{From: 64, To: 200}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -888,7 +888,7 @@ func TestEmitAlterColumnMultipleFacts(t *testing.T) {
 			{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{From: 64, To: 200}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -917,7 +917,7 @@ func TestEmitAlterColumnDbTypeUsing(t *testing.T) {
 			}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -939,7 +939,7 @@ func TestEmitAlterColumnUniqueAdd(t *testing.T) {
 			{Variant: &planpb.FactChange_Unique{Unique: &planpb.UniqueChange{From: false, To: true}}},
 		},
 	}}}
-	up, down, err := postgres.Emitter{}.EmitOp(op)
+	up, down, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -976,7 +976,7 @@ func TestEmitAlterColumnGeneratedExprAdd(t *testing.T) {
 			}}},
 		},
 	}}}
-	up, _, err := postgres.Emitter{}.EmitOp(op)
+	up, _, err := postgres.Emitter{}.EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -1000,11 +1000,11 @@ func TestEmitDropColumnRoundtrip(t *testing.T) {
 		Ctx:    &planpb.TableCtx{TableName: "users"},
 		Column: col,
 	}}}
-	addUp, _, err := postgres.Emitter{}.EmitOp(addOp)
+	addUp, _, err := postgres.Emitter{}.EmitOp(addOp, nil)
 	if err != nil {
 		t.Fatalf("AddColumn: %v", err)
 	}
-	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp)
+	dropUp, dropDown, err := postgres.Emitter{}.EmitOp(dropOp, nil)
 	if err != nil {
 		t.Fatalf("DropColumn: %v", err)
 	}
@@ -1018,7 +1018,7 @@ func TestEmitDropColumnRoundtrip(t *testing.T) {
 // name. Defensive branch against an ir.Build invariant violation.
 func TestAddTableEmptyNameErrors(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: &irpb.Table{}}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty table name accepted, want error")
 	}
 }
@@ -1033,7 +1033,7 @@ func TestCompositePKUnknownFieldErrors(t *testing.T) {
 		PrimaryKey: []string{"a", "ghost_column"},
 	}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	_, _, err := (postgres.Emitter{}).EmitOp(op, nil)
 	if err == nil {
 		t.Fatal("composite PK with unknown field accepted, want error")
 	}
@@ -1059,7 +1059,7 @@ func TestRenderColumnErrorPropagates(t *testing.T) {
 		}},
 	}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	_, _, err := (postgres.Emitter{}).EmitOp(op, nil)
 	if err == nil {
 		t.Fatal("expected err when column has no precision, got nil")
 	}
@@ -1085,7 +1085,7 @@ func TestRenderIndexErrorPropagates(t *testing.T) {
 		},
 	}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	_, _, err := (postgres.Emitter{}).EmitOp(op)
+	_, _, err := (postgres.Emitter{}).EmitOp(op, nil)
 	if err == nil {
 		t.Fatal("expected err for unknown index field, got nil")
 	}
@@ -1110,7 +1110,7 @@ func TestSchemaNamespaceEmit(t *testing.T) {
 		},
 	}
 	op := &planpb.Op{Variant: &planpb.Op_AddTable{AddTable: &planpb.AddTable{Table: table}}}
-	up, down, err := (postgres.Emitter{}).EmitOp(op)
+	up, down, err := (postgres.Emitter{}).EmitOp(op, nil)
 	if err != nil {
 		t.Fatalf("EmitOp: %v", err)
 	}
@@ -1142,7 +1142,7 @@ func runPipeline(t *testing.T, protoPath string) (up, down string) {
 	if err != nil {
 		t.Fatalf("plan.Diff: %v", err)
 	}
-	up, down, err = emit.Emit(postgres.Emitter{}, p.Plan)
+	up, down, _, err = emit.Emit(postgres.Emitter{}, p.Plan)
 	if err != nil {
 		t.Fatalf("emit.Emit: %v", err)
 	}

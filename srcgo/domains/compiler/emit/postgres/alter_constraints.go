@@ -3,6 +3,7 @@ package postgres
 import (
 	"fmt"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
@@ -10,12 +11,16 @@ import (
 // emitAddForeignKey renders ALTER TABLE … ADD CONSTRAINT <name>
 // FOREIGN KEY (col) REFERENCES <tgt>(<tgt_col>) [ON DELETE <action>];
 // down drops the constraint.
-func (e Emitter) emitAddForeignKey(afk *planpb.AddForeignKey) (string, string, error) {
+func (e Emitter) emitAddForeignKey(afk *planpb.AddForeignKey, usage *emit.Usage) (string, string, error) {
 	fk := afk.GetFk()
 	if fk == nil {
 		return "", "", fmt.Errorf("postgres: AddForeignKey with nil ForeignKey")
 	}
 	tbl := tableShellFromCtx(afk.GetCtx(), nil)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
+	recordFKActionCap(usage, fk.GetOnDelete())
 	qual := qualifiedTable(tbl)
 	srcCol, err := resolveSqlColName(afk.GetColumns(), fk.GetColumn())
 	if err != nil {
@@ -24,6 +29,18 @@ func (e Emitter) emitAddForeignKey(afk *planpb.AddForeignKey) (string, string, e
 	up := renderAddFK(qual, afk.GetConstraintName(), srcCol, fk, tbl)
 	down := renderDropFK(qual, afk.GetConstraintName())
 	return up, down, nil
+}
+
+// recordFKActionCap tags the catalog cap for a non-default ON DELETE
+// action. CASCADE / SET NULL are universal and need no cap. RESTRICT
+// and SET DEFAULT get explicit caps so the manifest reflects them.
+func recordFKActionCap(usage *emit.Usage, a irpb.FKAction) {
+	switch a {
+	case irpb.FKAction_FK_ACTION_RESTRICT:
+		usage.Use(emit.CapOnDeleteRestrict)
+	case irpb.FKAction_FK_ACTION_SET_DEFAULT:
+		usage.Use(emit.CapOnDeleteSetDefault)
+	}
 }
 
 // emitDropForeignKey renders ALTER TABLE … DROP CONSTRAINT <name>;
@@ -47,12 +64,17 @@ func (e Emitter) emitDropForeignKey(dfk *planpb.DropForeignKey) (string, string,
 // emitReplaceForeignKey emits drop+add on both sides — PG can ALTER
 // CONSTRAINT only for DEFERRABLE (out of scope iter-2). Any change
 // to columns / target / on_delete forces drop+recreate.
-func (e Emitter) emitReplaceForeignKey(rfk *planpb.ReplaceForeignKey) (string, string, error) {
+func (e Emitter) emitReplaceForeignKey(rfk *planpb.ReplaceForeignKey, usage *emit.Usage) (string, string, error) {
 	from, to := rfk.GetFrom(), rfk.GetTo()
 	if from == nil || to == nil {
 		return "", "", fmt.Errorf("postgres: ReplaceForeignKey missing from/to")
 	}
 	tbl := tableShellFromCtx(rfk.GetCtx(), nil)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
+	recordFKActionCap(usage, to.GetOnDelete())
+	recordFKActionCap(usage, from.GetOnDelete())
 	qual := qualifiedTable(tbl)
 	fromCol, err := resolveSqlColName(rfk.GetColumns(), from.GetColumn())
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
@@ -12,10 +13,13 @@ import (
 // drops the index. Reuses renderIndexes via a single-index synthetic
 // table so the structured-vs-raw + method + per-field-sort + storage
 // rendering stays in one place.
-func (e Emitter) emitAddIndex(ai *planpb.AddIndex) (string, string, error) {
+func (e Emitter) emitAddIndex(ai *planpb.AddIndex, usage *emit.Usage) (string, string, error) {
 	tbl := indexTableShell(ai.GetCtx(), ai.GetColumns(), ai.GetIndex(), nil)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	colByProto := columnByProto(ai.GetColumns())
-	stmts, names, err := renderIndexes(tbl, colByProto)
+	stmts, names, err := renderIndexes(tbl, colByProto, usage)
 	if err != nil {
 		return "", "", err
 	}
@@ -38,11 +42,14 @@ func (e Emitter) emitDropIndex(di *planpb.DropIndex) (string, string, error) {
 	up := fmt.Sprintf("DROP INDEX IF EXISTS %s;", qualifiedIdentifier(tbl, idx.GetName()))
 	// Rebuild via emitAddIndex inverse to keep the down branch
 	// aligned with what AddIndex would produce on its up.
+	// DropIndex: no caps on up; down re-creates via emitAddIndex but
+	// we don't credit caps to this op (drop is the net effect). Pass
+	// nil so the rebuild doesn't leak caps into the manifest.
 	addUp, _, err := e.emitAddIndex(&planpb.AddIndex{
 		Ctx:     di.GetCtx(),
 		Index:   idx,
 		Columns: di.GetColumns(),
-	})
+	}, nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -52,15 +59,18 @@ func (e Emitter) emitDropIndex(di *planpb.DropIndex) (string, string, error) {
 // emitReplaceIndex emits DROP <from> + CREATE <to>; down inverts.
 // PG has no ALTER INDEX for shape (fields, method, unique, include,
 // storage) so any change collapses to drop + recreate.
-func (e Emitter) emitReplaceIndex(ri *planpb.ReplaceIndex) (string, string, error) {
+func (e Emitter) emitReplaceIndex(ri *planpb.ReplaceIndex, usage *emit.Usage) (string, string, error) {
 	from, to := ri.GetFrom(), ri.GetTo()
 	if from == nil || to == nil {
 		return "", "", fmt.Errorf("postgres: ReplaceIndex missing from/to")
 	}
 	tbl := indexTableShell(ri.GetCtx(), ri.GetColumns(), to, from)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 
 	addOps := []*irpb.Index{to}
-	addStmts, addNames, err := renderIndexes(replaceIndexes(tbl, addOps), columnByProto(ri.GetColumns()))
+	addStmts, addNames, err := renderIndexes(replaceIndexes(tbl, addOps), columnByProto(ri.GetColumns()), usage)
 	if err != nil {
 		return "", "", fmt.Errorf("postgres: ReplaceIndex render to: %w", err)
 	}
@@ -71,8 +81,10 @@ func (e Emitter) emitReplaceIndex(ri *planpb.ReplaceIndex) (string, string, erro
 	dropFrom := fmt.Sprintf("DROP INDEX IF EXISTS %s;", qualifiedIdentifier(tbl, from.GetName()))
 	dropTo := fmt.Sprintf("DROP INDEX IF EXISTS %s;", qualifiedIdentifier(tbl, addNames[0]))
 
-	// Build symmetric down via re-emitting the from side.
-	addBackStmts, _, err := renderIndexes(replaceIndexes(tbl, []*irpb.Index{from}), columnByProto(ri.GetColumns()))
+	// Build symmetric down via re-emitting the from side — share the
+	// usage collector so any method/include cap the rollback re-
+	// introduces shows on the manifest.
+	addBackStmts, _, err := renderIndexes(replaceIndexes(tbl, []*irpb.Index{from}), columnByProto(ri.GetColumns()), usage)
 	if err != nil {
 		return "", "", fmt.Errorf("postgres: ReplaceIndex render from (down): %w", err)
 	}

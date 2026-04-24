@@ -16,6 +16,7 @@ package sqlite
 import (
 	"errors"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
@@ -29,6 +30,6 @@ func (Emitter) Name() string { return "sqlite" }
 // message is the same regardless of op variant — consumers that
 // branch on dialect (CLI --dialect flag, later back-compat lint)
 // surface it to the user verbatim.
-func (Emitter) EmitOp(_ *planpb.Op) (up string, down string, err error) {
+func (Emitter) EmitOp(_ *planpb.Op, _ *emit.Usage) (up string, down string, err error) {
 	return "", "", errors.New("sqlite emitter: not implemented in iteration-1")
 }

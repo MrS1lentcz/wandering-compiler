@@ -91,7 +91,7 @@ func planBucket(
 	if err != nil {
 		return nil, nil, err
 	}
-	up, down, err := emit.Emit(emitter, result.Plan)
+	up, down, usage, err := emit.Emit(emitter, result.Plan)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -118,7 +118,7 @@ func planBucket(
 		UpSql:      up,
 		DownSql:    down,
 		Checks:     collectChecks(result.Plan, cls),
-		Manifest:   buildManifest(applied),
+		Manifest:   buildManifest(applied, usage, emitter, bkt),
 	}, unresolved, nil
 }
 
@@ -189,14 +189,94 @@ func splitByResolution(
 	return unresolved, applied, pairs
 }
 
-// buildManifest assembles the Manifest for a Migration. Today only
-// carries the applied-resolution audit trail; required_extensions +
-// capabilities land in M4 (emitter-driven usage tracking).
-func buildManifest(applied []*planpb.AppliedResolution) *planpb.Manifest {
-	if len(applied) == 0 {
+// buildManifest assembles the Manifest for a Migration. Populates
+// three slots (M4 Layer A):
+//
+//   - AppliedResolutions: audit trail of decisions applied this run.
+//   - Capabilities:       sorted, deduped union of D16 cap IDs the
+//                         emitter recorded via Usage.Use() during
+//                         emission.
+//   - RequiredExtensions: sorted, deduped union of
+//                         (a) each used cap's catalog
+//                             Requirement.Extensions, and
+//                         (b) IR-level (w17.pg.field).required_extensions
+//                             on every column the plan references
+//                             (Add/Drop/Alter-column ops).
+//
+// Returns nil when none of the three slots contribute anything — an
+// empty manifest is an "I/O artifact is unnecessary" signal to Sinks
+// (no manifest.json file written).
+func buildManifest(applied []*planpb.AppliedResolution, usage *emit.Usage, emitter emit.DialectEmitter, bkt *bucket) *planpb.Manifest {
+	caps := usage.Sorted()
+	reqExt := collectRequiredExtensions(caps, emitter, bkt)
+	if len(applied) == 0 && len(caps) == 0 && len(reqExt) == 0 {
 		return nil
 	}
-	return &planpb.Manifest{AppliedResolutions: applied}
+	return &planpb.Manifest{
+		AppliedResolutions: applied,
+		Capabilities:       caps,
+		RequiredExtensions: reqExt,
+	}
+}
+
+// collectRequiredExtensions unions catalog-derived extensions for
+// every used cap with IR-level required_extensions on the columns
+// the bucket's plan references. Sorted + deduped.
+//
+// Emitters without a DialectCapabilities impl (redis today)
+// contribute no catalog-derived entries; the IR-level slice still
+// flows through so authors on non-PG dialects can surface extension
+// names via `(w17.pg.field).required_extensions` regardless of
+// dialect awareness at the emit layer.
+func collectRequiredExtensions(caps []string, emitter emit.DialectEmitter, bkt *bucket) []string {
+	set := map[string]struct{}{}
+	if dc, ok := emitter.(emit.DialectCapabilities); ok {
+		for _, cap := range caps {
+			req, known := dc.Requirement(cap)
+			if !known {
+				continue
+			}
+			for _, ext := range req.Extensions {
+				if ext == "" {
+					continue
+				}
+				set[ext] = struct{}{}
+			}
+		}
+	}
+	for _, t := range bucketTables(bkt) {
+		for _, col := range t.GetColumns() {
+			for _, ext := range col.GetPg().GetRequiredExtensions() {
+				if ext == "" {
+					continue
+				}
+				set[ext] = struct{}{}
+			}
+		}
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for ext := range set {
+		out = append(out, ext)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// bucketTables returns every IR table the bucket touches across
+// prev + curr snapshots. Duplicates are harmless — the caller
+// dedupes downstream.
+func bucketTables(bkt *bucket) []*irpb.Table {
+	var out []*irpb.Table
+	if bkt.prev != nil {
+		out = append(out, bkt.prev.GetTables()...)
+	}
+	if bkt.curr != nil {
+		out = append(out, bkt.curr.GetTables()...)
+	}
+	return out
 }
 
 // indexResolutions builds an O(1) finding_id → Resolution map. Nil

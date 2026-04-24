@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
@@ -17,17 +18,20 @@ import (
 // columns. Down inverts via DROP COLUMN (+ DROP TYPE for ENUMs;
 // PG drops dependent CHECK constraints automatically when the column
 // drops).
-func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
+func (e Emitter) emitAddColumn(ac *planpb.AddColumn, usage *emit.Usage) (string, string, error) {
 	col := ac.GetColumn()
 	if col == nil {
 		return "", "", fmt.Errorf("postgres: AddColumn with nil column")
 	}
 	ctx := ac.GetCtx()
 	tbl := tableShellFromCtx(ctx, col)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	qual := qualifiedTable(tbl)
 	colByProto := map[string]*irpb.Column{col.GetProtoName(): col}
 
-	colLine, err := renderColumn(tbl, col, colByProto)
+	colLine, err := renderColumn(tbl, col, colByProto, usage)
 	if err != nil {
 		return "", "", fmt.Errorf("postgres: AddColumn %s.%s: %w", ctx.GetTableName(), col.GetProtoName(), err)
 	}
@@ -48,6 +52,9 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 	}
 
 	enumCreate, enumDrop := renderEnumTypeStatements(tbl, col)
+	if enumCreate != "" {
+		usage.Use(emit.CapEnumType)
+	}
 
 	var upB strings.Builder
 	upB.WriteString(enumCreate)
@@ -63,6 +70,7 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 		fmt.Fprintf(&upB, "\nALTER TABLE %s ADD %s;", qual, ckLine)
 	}
 	if c := col.GetComment(); c != "" {
+		usage.Use(emit.CapCommentOn)
 		fmt.Fprintf(&upB, "\nCOMMENT ON COLUMN %s.%s IS %s;", qual, col.GetName(), sqlStringLiteral(c))
 	}
 
@@ -80,7 +88,7 @@ func (e Emitter) emitAddColumn(ac *planpb.AddColumn) (string, string, error) {
 // qualification: the old name is qualified with the same namespace
 // the new name lives in (RENAME doesn't move schemas — that's
 // SetTableNamespace's job).
-func (e Emitter) emitRenameTable(rt *planpb.RenameTable) (string, string, error) {
+func (e Emitter) emitRenameTable(rt *planpb.RenameTable, usage *emit.Usage) (string, string, error) {
 	from, to := rt.GetFromName(), rt.GetToName()
 	if from == "" || to == "" {
 		return "", "", fmt.Errorf("postgres: RenameTable missing from/to name (from=%q to=%q)", from, to)
@@ -89,6 +97,9 @@ func (e Emitter) emitRenameTable(rt *planpb.RenameTable) (string, string, error)
 		return "", "", fmt.Errorf("postgres: RenameTable no-op (from=%q to=%q)", from, to)
 	}
 	ctx := rt.GetCtx()
+	if ctx.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	tblFrom := tableShellFromCtx(&planpb.TableCtx{
 		TableName:     from,
 		NamespaceMode: ctx.GetNamespaceMode(),
@@ -119,8 +130,11 @@ func (e Emitter) emitRenameTable(rt *planpb.RenameTable) (string, string, error)
 //
 // Down inverts. PG metadata-only operations, data-preserving in
 // all cases.
-func (e Emitter) emitSetTableNamespace(stn *planpb.SetTableNamespace) (string, string, error) {
+func (e Emitter) emitSetTableNamespace(stn *planpb.SetTableNamespace, usage *emit.Usage) (string, string, error) {
 	from, to := stn.GetFromMode(), stn.GetToMode()
+	if modeUsesSchema(from) || modeUsesSchema(to) {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	fromName, toName := stn.GetTableNameFrom(), stn.GetTableNameTo()
 	fromNs, toNs := stn.GetFromNamespace(), stn.GetToNamespace()
 
@@ -211,8 +225,12 @@ func qualifyName(mode irpb.NamespaceMode, ns, name string) string {
 // emitSetTableComment renders COMMENT ON TABLE ... IS '<text>';.
 // Empty `to` drops the comment via `IS NULL`. Symmetric: down
 // restores the prev value (also via `IS NULL` if prev was empty).
-func (e Emitter) emitSetTableComment(stc *planpb.SetTableComment) (string, string, error) {
+func (e Emitter) emitSetTableComment(stc *planpb.SetTableComment, usage *emit.Usage) (string, string, error) {
+	usage.Use(emit.CapCommentOn)
 	tbl := tableShellFromCtx(stc.GetCtx(), nil)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	qual := qualifiedTable(tbl)
 	up := fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qual, commentLiteral(stc.GetTo()))
 	down := fmt.Sprintf("COMMENT ON TABLE %s IS %s;", qual, commentLiteral(stc.GetFrom()))
@@ -251,17 +269,20 @@ func (e Emitter) emitRenameColumn(rc *planpb.RenameColumn) (string, string, erro
 // TABLE statement per fact, separated by newlines. Down inverts the
 // list: each FactChange's symmetric inverse, in REVERSE order so a
 // down rollback unwinds in the order applied.
-func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn) (string, string, error) {
+func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn, usage *emit.Usage) (string, string, error) {
 	if ac.GetColumnName() == "" {
 		return "", "", fmt.Errorf("postgres: AlterColumn with empty column_name")
 	}
 	tbl := tableShellFromCtx(ac.GetCtx(), nil)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	qual := qualifiedTable(tbl)
 	colName := ac.GetColumnName()
 
 	var ups, downs []string
 	for _, fc := range ac.GetChanges() {
-		up, down, err := renderFactChange(qual, colName, fc, ac.GetColumn(), ac.GetPrevColumn())
+		up, down, err := renderFactChange(qual, colName, fc, ac.GetColumn(), ac.GetPrevColumn(), usage)
 		if err != nil {
 			return "", "", fmt.Errorf("postgres: AlterColumn %s.%s: %w", ac.GetCtx().GetTableName(), colName, err)
 		}
@@ -285,30 +306,33 @@ func (e Emitter) emitAlterColumn(ac *planpb.AlterColumn) (string, string, error)
 // for variants that need richer context than their own from/to values
 // (GeneratedExpr's column-type prefix, DbType's effective-type
 // derivation when the other side is UNSPECIFIED).
-func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, prevColumn *irpb.Column) (string, string, error) {
+func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, prevColumn *irpb.Column, usage *emit.Usage) (string, string, error) {
 	switch v := fc.GetVariant().(type) {
 	case *planpb.FactChange_Nullable:
 		up, down := renderNullableChange(qualTable, colName, v.Nullable)
 		return up, down, nil
 	case *planpb.FactChange_DefaultValue:
-		return renderDefaultChange(qualTable, colName, v.DefaultValue)
+		return renderDefaultChange(qualTable, colName, v.DefaultValue, usage)
 	case *planpb.FactChange_MaxLen:
 		up, down := renderMaxLenChange(qualTable, colName, v.MaxLen)
 		return up, down, nil
 	case *planpb.FactChange_NumericPrecision:
+		usage.Use(emit.CapNumeric)
 		up, down := renderNumericPrecisionChange(qualTable, colName, v.NumericPrecision)
 		return up, down, nil
 	case *planpb.FactChange_DbType:
-		return renderDbTypeChange(qualTable, colName, v.DbType, column, prevColumn)
+		return renderDbTypeChange(qualTable, colName, v.DbType, column, prevColumn, usage)
 	case *planpb.FactChange_Unique:
 		up, down := renderUniqueChange(qualTable, colName, v.Unique)
 		return up, down, nil
 	case *planpb.FactChange_GeneratedExpr:
-		return renderGeneratedExprChange(qualTable, colName, v.GeneratedExpr, column, prevColumn)
+		return renderGeneratedExprChange(qualTable, colName, v.GeneratedExpr, column, prevColumn, usage)
 	case *planpb.FactChange_Comment:
+		usage.Use(emit.CapCommentOn)
 		up, down := renderColumnCommentChange(qualTable, colName, v.Comment)
 		return up, down, nil
 	case *planpb.FactChange_EnumValues:
+		usage.Use(emit.CapEnumType)
 		up, down := renderEnumValuesChange(qualTable, colName, v.EnumValues)
 		return up, down, nil
 	case *planpb.FactChange_AllowedExtensions:
@@ -346,12 +370,12 @@ func renderNullableChange(qual, col string, ch *planpb.NullableChange) (string, 
 // default expression rendering re-uses iter-1's defaultExpr against
 // a synthetic Column carrying the relevant fields. Returns an error
 // if defaultExpr refuses (defensive against IR slip).
-func renderDefaultChange(qual, col string, ch *planpb.DefaultChange) (string, string, error) {
-	upStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetTo())
+func renderDefaultChange(qual, col string, ch *planpb.DefaultChange, usage *emit.Usage) (string, string, error) {
+	upStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetTo(), usage)
 	if err != nil {
 		return "", "", err
 	}
-	downStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetFrom())
+	downStmt, err := defaultStmt(qual, col, "SET DEFAULT", ch.GetFrom(), usage)
 	if err != nil {
 		return "", "", err
 	}
@@ -368,12 +392,12 @@ func renderDefaultChange(qual, col string, ch *planpb.DefaultChange) (string, st
 // defaultStmt builds one `ALTER TABLE … ALTER COLUMN … SET DEFAULT
 // <expr>;` for a non-nil Default; returns "" for nil so caller can
 // substitute DROP DEFAULT.
-func defaultStmt(qual, col, action string, def *irpb.Default) (string, error) {
+func defaultStmt(qual, col, action string, def *irpb.Default, usage *emit.Usage) (string, error) {
 	if def == nil || def.GetVariant() == nil {
 		return "", nil
 	}
 	synthetic := &irpb.Column{Name: col}
-	expr, err := defaultExpr(synthetic, def)
+	expr, err := defaultExpr(synthetic, def, usage)
 	if err != nil {
 		return "", err
 	}
@@ -419,12 +443,12 @@ func numericTypeSQL(precision int32, scale *int32) string {
 // When the FactChange carries DBT_UNSPECIFIED on one side (preset
 // storage default), derive the effective type from the column snapshot
 // via columnType() so both sides of the ALTER carry real SQL types.
-func renderDbTypeChange(qual, col string, ch *planpb.DbTypeChange, curr, prev *irpb.Column) (string, string, error) {
-	toType, err := dbTypeOrEffective(ch.GetTo(), curr, qualToTable(qual))
+func renderDbTypeChange(qual, col string, ch *planpb.DbTypeChange, curr, prev *irpb.Column, usage *emit.Usage) (string, string, error) {
+	toType, err := dbTypeOrEffective(ch.GetTo(), curr, qualToTable(qual), usage)
 	if err != nil {
 		return "", "", fmt.Errorf("DbType to: %w", err)
 	}
-	fromType, err := dbTypeOrEffective(ch.GetFrom(), prev, qualToTable(qual))
+	fromType, err := dbTypeOrEffective(ch.GetFrom(), prev, qualToTable(qual), usage)
 	if err != nil {
 		return "", "", fmt.Errorf("DbType from: %w", err)
 	}
@@ -437,14 +461,61 @@ func renderDbTypeChange(qual, col string, ch *planpb.DbTypeChange, curr, prev *i
 // when the enum is UNSPECIFIED (preset storage). Keeps the ALTER
 // TYPE clause well-formed across all (UNSPECIFIED↔explicit) and
 // (explicit↔explicit) transitions.
-func dbTypeOrEffective(t irpb.DbType, col *irpb.Column, tableName string) (string, error) {
+func dbTypeOrEffective(t irpb.DbType, col *irpb.Column, tableName string, usage *emit.Usage) (string, error) {
 	if t != irpb.DbType_DB_TYPE_UNSPECIFIED {
+		recordDbTypeCap(usage, t)
 		return dbTypeKeyword(t), nil
 	}
 	if col == nil {
 		return "", fmt.Errorf("UNSPECIFIED DbType with no column snapshot")
 	}
-	return columnType(tableName, col)
+	return columnType(tableName, col, usage)
+}
+
+// recordDbTypeCap mirrors pgColumnFromDbType's cap-tagging for the
+// ALTER TYPE path (dbTypeKeyword returns just the keyword and skips
+// the column-scoped usage recording). Keeping them separate avoids
+// threading usage through the single-arg keyword helper, which tests
+// use for golden rendering without a live collector.
+func recordDbTypeCap(usage *emit.Usage, t irpb.DbType) {
+	switch t {
+	case irpb.DbType_DBT_CITEXT:
+		usage.Use(emit.CapExtCitext)
+	case irpb.DbType_DBT_JSON:
+		usage.Use(emit.CapJSON)
+	case irpb.DbType_DBT_JSONB:
+		usage.Use(emit.CapJSONB)
+	case irpb.DbType_DBT_HSTORE:
+		usage.Use(emit.CapExtHstore)
+	case irpb.DbType_DBT_INET:
+		usage.Use(emit.CapINET)
+	case irpb.DbType_DBT_CIDR:
+		usage.Use(emit.CapCIDR)
+	case irpb.DbType_DBT_MACADDR:
+		usage.Use(emit.CapMACADDR)
+	case irpb.DbType_DBT_TSVECTOR:
+		usage.Use(emit.CapTSVECTOR)
+	case irpb.DbType_DBT_UUID:
+		usage.Use(emit.CapUUID)
+	case irpb.DbType_DBT_DOUBLE_PRECISION:
+		usage.Use(emit.CapDoublePrecision)
+	case irpb.DbType_DBT_NUMERIC:
+		usage.Use(emit.CapNumeric)
+	case irpb.DbType_DBT_DATE:
+		usage.Use(emit.CapDate)
+	case irpb.DbType_DBT_TIME:
+		usage.Use(emit.CapTime)
+	case irpb.DbType_DBT_TIMESTAMP:
+		usage.Use(emit.CapTimestamp)
+	case irpb.DbType_DBT_TIMESTAMPTZ:
+		usage.Use(emit.CapTimestampTZ)
+	case irpb.DbType_DBT_INTERVAL:
+		usage.Use(emit.CapInterval)
+	case irpb.DbType_DBT_BYTEA, irpb.DbType_DBT_BLOB:
+		usage.Use(emit.CapBYTEA)
+	case irpb.DbType_DBT_BOOLEAN:
+		usage.Use(emit.CapBoolean)
+	}
 }
 
 // dbTypeKeyword renders the bare PG type keyword for a DbType enum
@@ -565,12 +636,13 @@ func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange) (stri
 // renderGeneratedExprChange — DROP+ADD when add or change. DIRECT
 // (DROP EXPRESSION on PG 13+) when remove. Column snapshots supply
 // the column type (prefix before GENERATED ALWAYS AS).
-func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange, curr, prev *irpb.Column) (string, string, error) {
+func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange, curr, prev *irpb.Column, usage *emit.Usage) (string, string, error) {
 	from, to := ch.GetFrom(), ch.GetTo()
 	tableName := qualToTable(qual)
+	usage.Use(emit.CapGeneratedColumn)
 	switch {
 	case from == "" && to != "":
-		toType, err := columnType(tableName, curr)
+		toType, err := columnType(tableName, curr, usage)
 		if err != nil {
 			return "", "", fmt.Errorf("GeneratedExpr add: column type: %w", err)
 		}
@@ -578,7 +650,7 @@ func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange,
 				qual, col, qual, col, toType, to),
 			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;", qual, col), nil
 	case from != "" && to == "":
-		fromType, err := columnType(tableName, prev)
+		fromType, err := columnType(tableName, prev, usage)
 		if err != nil {
 			return "", "", fmt.Errorf("GeneratedExpr remove: column type: %w", err)
 		}
@@ -586,11 +658,11 @@ func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange,
 			fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s;\nALTER TABLE %s ADD COLUMN %s %s GENERATED ALWAYS AS (%s) STORED;",
 				qual, col, qual, col, fromType, from), nil
 	default:
-		toType, err := columnType(tableName, curr)
+		toType, err := columnType(tableName, curr, usage)
 		if err != nil {
 			return "", "", fmt.Errorf("GeneratedExpr change: column type curr: %w", err)
 		}
-		fromType, err := columnType(tableName, prev)
+		fromType, err := columnType(tableName, prev, usage)
 		if err != nil {
 			return "", "", fmt.Errorf("GeneratedExpr change: column type prev: %w", err)
 		}
@@ -604,13 +676,16 @@ func renderGeneratedExprChange(qual, col string, ch *planpb.GeneratedExprChange,
 // emitDropColumn renders ALTER TABLE ... DROP COLUMN ...; (+ DROP TYPE
 // for ENUMs). Down is the inverse — re-creates the column the same way
 // emitAddColumn would.
-func (e Emitter) emitDropColumn(dc *planpb.DropColumn) (string, string, error) {
+func (e Emitter) emitDropColumn(dc *planpb.DropColumn, usage *emit.Usage) (string, string, error) {
 	col := dc.GetColumn()
 	if col == nil {
 		return "", "", fmt.Errorf("postgres: DropColumn with nil column")
 	}
 	ctx := dc.GetCtx()
 	tbl := tableShellFromCtx(ctx, col)
+	if tbl.GetNamespaceMode() == irpb.NamespaceMode_NAMESPACE_MODE_SCHEMA {
+		usage.Use(emit.CapSchemaQualified)
+	}
 	qual := qualifiedTable(tbl)
 
 	var upB strings.Builder
@@ -620,7 +695,10 @@ func (e Emitter) emitDropColumn(dc *planpb.DropColumn) (string, string, error) {
 		fmt.Fprintf(&upB, "\nDROP TYPE IF EXISTS %s;", qualifiedIdentifier(tbl, typeName))
 	}
 
-	addUp, _, err := e.emitAddColumn(&planpb.AddColumn{Ctx: ctx, Column: col})
+	// Down rebuilds the column; share the usage collector so caps
+	// exposed by the rehydrated shape (JSONB, UUID, …) still land
+	// on the manifest — rollback re-applies them.
+	addUp, _, err := e.emitAddColumn(&planpb.AddColumn{Ctx: ctx, Column: col}, usage)
 	if err != nil {
 		return "", "", err
 	}

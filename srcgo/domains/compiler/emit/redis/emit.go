@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
@@ -56,7 +57,7 @@ func (Emitter) Transactional() bool { return false }
 // EmitOp dispatches on the Op variant. Every output line is a
 // Redis CLI command or a `#` comment (the Redis CLI treats leading
 // `#` as a comment in `redis-cli < file` input).
-func (e Emitter) EmitOp(op *planpb.Op) (up string, down string, err error) {
+func (e Emitter) EmitOp(op *planpb.Op, _ *emit.Usage) (up string, down string, err error) {
 	switch v := op.GetVariant().(type) {
 	case *planpb.Op_AddTable:
 		return e.emitAddTable(v.AddTable)

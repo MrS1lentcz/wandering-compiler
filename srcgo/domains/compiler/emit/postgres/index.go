@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MrS1lentcz/wandering-compiler/srcgo/domains/compiler/emit"
 	irpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/ir"
 )
 
@@ -28,7 +29,7 @@ import (
 //
 // Partial (WHERE) and expression indexes land on (w17.db.table).raw_indexes
 // until the DQL iteration structures them.
-func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []string, names []string, err error) {
+func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column, usage *emit.Usage) (stmts []string, names []string, err error) {
 	for i, idx := range t.GetIndexes() {
 		if idx.GetName() == "" {
 			return nil, nil, fmt.Errorf("postgres: table %s: indexes[%d] has empty name (ir.Build was supposed to resolve it)", t.GetName(), i)
@@ -62,10 +63,12 @@ func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []s
 		// baked the prefix into both identifier names at IR time).
 		fmt.Fprintf(&b, "%s ON %s", idx.GetName(), qualifiedTable(t))
 		if method := indexMethodKeyword(idx.GetMethod()); method != "" {
+			recordIndexMethodCap(usage, idx.GetMethod())
 			fmt.Fprintf(&b, " USING %s", method)
 		}
 		fmt.Fprintf(&b, " (%s)", strings.Join(fieldClauses, ", "))
 		if len(sqlInclude) > 0 {
+			usage.Use(emit.CapIncludeIndex)
 			fmt.Fprintf(&b, " INCLUDE (%s)", strings.Join(sqlInclude, ", "))
 		}
 		if storage := renderStorageOptions(idx.GetStorage()); storage != "" {
@@ -77,6 +80,24 @@ func renderIndexes(t *irpb.Table, colByProto map[string]*irpb.Column) (stmts []s
 		names = append(names, idx.GetName())
 	}
 	return stmts, names, nil
+}
+
+// recordIndexMethodCap records the capability ID for a non-default
+// index method. BTREE / UNSPECIFIED is the emitter's default and maps
+// to no cap entry.
+func recordIndexMethodCap(usage *emit.Usage, m irpb.IndexMethod) {
+	switch m {
+	case irpb.IndexMethod_IDX_GIN:
+		usage.Use(emit.CapGinIndex)
+	case irpb.IndexMethod_IDX_GIST:
+		usage.Use(emit.CapGistIndex)
+	case irpb.IndexMethod_IDX_BRIN:
+		usage.Use(emit.CapBrinIndex)
+	case irpb.IndexMethod_IDX_HASH:
+		usage.Use(emit.CapHashIndex)
+	case irpb.IndexMethod_IDX_SPGIST:
+		usage.Use(emit.CapSpgistIndex)
+	}
 }
 
 // renderIndexField renders a single entry in the index column list:

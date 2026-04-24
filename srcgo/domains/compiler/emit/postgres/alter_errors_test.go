@@ -18,7 +18,7 @@ func TestEmitAddColumnNilColumn(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddColumn{AddColumn: &planpb.AddColumn{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil AddColumn.Column accepted; want error")
 	}
 }
@@ -27,7 +27,7 @@ func TestEmitDropColumnNilColumn(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropColumn{DropColumn: &planpb.DropColumn{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil DropColumn.Column accepted; want error")
 	}
 }
@@ -37,7 +37,7 @@ func TestEmitRenameTableNoOp(t *testing.T) {
 		Ctx:      &planpb.TableCtx{TableName: "users"},
 		FromName: "users", ToName: "users",
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("no-op RenameTable accepted; want error")
 	}
 }
@@ -47,7 +47,7 @@ func TestEmitRenameTableEmptyNames(t *testing.T) {
 		Ctx:      &planpb.TableCtx{TableName: "t"},
 		FromName: "", ToName: "x",
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty from accepted; want error")
 	}
 }
@@ -56,7 +56,7 @@ func TestEmitAddForeignKeyNilFK(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddForeignKey{AddForeignKey: &planpb.AddForeignKey{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil FK accepted; want error")
 	}
 }
@@ -68,7 +68,7 @@ func TestEmitAddForeignKeyMissingColumn(t *testing.T) {
 		ConstraintName: "t_ghost_fkey",
 		Columns:        []*irpb.Column{}, // empty — ghost won't resolve
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("missing column in snapshot accepted; want error")
 	}
 }
@@ -77,7 +77,7 @@ func TestEmitDropForeignKeyNilFK(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropForeignKey{DropForeignKey: &planpb.DropForeignKey{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil FK accepted; want error")
 	}
 }
@@ -88,7 +88,7 @@ func TestEmitReplaceForeignKeyMissingSide(t *testing.T) {
 		From: nil,
 		To:   &irpb.ForeignKey{Column: "x"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil from accepted; want error")
 	}
 }
@@ -97,7 +97,7 @@ func TestEmitAddCheckNilColumn(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_AddCheck{AddCheck: &planpb.AddCheck{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil column accepted; want error")
 	}
 }
@@ -106,7 +106,7 @@ func TestEmitDropCheckNilColumn(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_DropCheck{DropCheck: &planpb.DropCheck{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil column accepted; want error")
 	}
 }
@@ -115,7 +115,7 @@ func TestEmitReplaceCheckNilColumn(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_ReplaceCheck{ReplaceCheck: &planpb.ReplaceCheck{
 		Ctx: &planpb.TableCtx{TableName: "t"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil column accepted; want error")
 	}
 }
@@ -125,7 +125,7 @@ func TestEmitAddRawIndexEmptyName(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "t"},
 		Index: &irpb.RawIndex{}, // empty name
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty-name raw index accepted; want error")
 	}
 }
@@ -135,7 +135,7 @@ func TestEmitDropRawIndexEmptyName(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "t"},
 		Index: &irpb.RawIndex{},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty-name raw index accepted; want error")
 	}
 }
@@ -146,7 +146,7 @@ func TestEmitReplaceRawIndexMissingSide(t *testing.T) {
 		From: nil,
 		To:   &irpb.RawIndex{Name: "x", Body: "(y)"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil from accepted; want error")
 	}
 }
@@ -156,7 +156,7 @@ func TestEmitAddRawCheckEmptyName(t *testing.T) {
 		Ctx:   &planpb.TableCtx{TableName: "t"},
 		Check: &irpb.RawCheck{Expr: "x > 0"}, // empty name
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty-name raw check accepted; want error")
 	}
 }
@@ -167,7 +167,7 @@ func TestEmitReplaceRawCheckMissingSide(t *testing.T) {
 		From: nil,
 		To:   &irpb.RawCheck{Name: "x", Expr: "y > 0"},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil from accepted; want error")
 	}
 }
@@ -177,7 +177,7 @@ func TestEmitReplaceIndexMissingSide(t *testing.T) {
 		Ctx:  &planpb.TableCtx{TableName: "t"},
 		From: nil,
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("nil from accepted; want error")
 	}
 }
@@ -190,7 +190,7 @@ func TestEmitAddCheckEmptyBody(t *testing.T) {
 		// RangeCheck with no bounds = empty body — surface error, not empty SQL.
 		Check: &irpb.Check{Variant: &irpb.Check_Range{Range: &irpb.RangeCheck{}}},
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty-body check accepted; want error")
 	}
 }
@@ -200,7 +200,7 @@ func TestEmitAlterColumnEmptyName(t *testing.T) {
 		Ctx: &planpb.TableCtx{TableName: "t"},
 		// ColumnName intentionally empty.
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty column_name accepted; want error")
 	}
 }
@@ -211,14 +211,14 @@ func TestEmitAlterColumnUnknownVariant(t *testing.T) {
 		ColumnName: "x",
 		Changes:    []*planpb.FactChange{{}}, // variant not set
 	}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("unknown FactChange variant accepted; want error")
 	}
 }
 
 func TestEmitWcMigrationsInsertEmptyTimestamp(t *testing.T) {
 	op := &planpb.Op{Variant: &planpb.Op_WcMigrationsInsert{WcMigrationsInsert: &planpb.WcMigrationsInsert{}}}
-	if _, _, err := (postgres.Emitter{}).EmitOp(op); err == nil {
+	if _, _, err := (postgres.Emitter{}).EmitOp(op, nil); err == nil {
 		t.Fatal("empty timestamp accepted; want error")
 	}
 }

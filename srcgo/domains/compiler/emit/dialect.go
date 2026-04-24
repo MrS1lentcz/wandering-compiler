@@ -20,6 +20,12 @@ import (
 // dispatch (rather than whole-plan) keeps the interface stable as new Op
 // variants (DropTable, AddColumn, …) land: each implementation type-switches
 // on op.GetVariant() and returns an informative error for unknown variants.
+//
+// The usage parameter collects D16 capability IDs referenced during
+// emission. Emitters call usage.Use(cap) at every dispatch site that
+// maps to a catalog cap; a nil *Usage turns every call into a no-op
+// (Usage.Use handles nil receivers), so tests that don't care about
+// tracking can pass nil without boilerplate.
 type DialectEmitter interface {
 	// Name is the stable short name of the dialect ("postgres", "sqlite", …).
 	// Consumed by --dialect flag parsing and diagnostic messages.
@@ -28,7 +34,7 @@ type DialectEmitter interface {
 	// EmitOp renders one Op to a pair of SQL blocks. Each block must be
 	// self-terminating (end with ';') or empty. No trailing newlines — the
 	// plan-level Emit adds separators between ops.
-	EmitOp(op *planpb.Op) (up string, down string, err error)
+	EmitOp(op *planpb.Op, usage *Usage) (up string, down string, err error)
 }
 
 // Transactional is an optional capability marker: emitters whose
@@ -56,15 +62,22 @@ type Transactional interface {
 // Transactional interface, returning false.
 //
 // The final output carries a trailing newline so file-diff tools behave.
-func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string, err error) {
+//
+// The returned *Usage collects every capability ID the emitter referenced
+// during this plan (M4 Layer A). Safe to discard on the call site — nil-
+// safe consumers treat an empty collector identically to no tracking.
+// TRANSACTIONAL_DDL is recorded for transactional dialects whenever the
+// plan produced any output (per-migration, not per-op).
+func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string, usage *Usage, err error) {
 	ops := plan.GetOps()
 	ups := make([]string, 0, len(ops))
 	downs := make([]string, 0, len(ops))
+	usage = NewUsage()
 
 	for i, op := range ops {
-		u, d, opErr := e.EmitOp(op)
+		u, d, opErr := e.EmitOp(op, usage)
 		if opErr != nil {
-			return "", "", fmt.Errorf("emit %s: op[%d]: %w", e.Name(), i, opErr)
+			return "", "", nil, fmt.Errorf("emit %s: op[%d]: %w", e.Name(), i, opErr)
 		}
 		if u != "" {
 			ups = append(ups, u)
@@ -80,9 +93,12 @@ func Emit(e DialectEmitter, plan *planpb.MigrationPlan) (up string, down string,
 	}
 
 	if t, ok := e.(Transactional); ok && !t.Transactional() {
-		return joinBlocks(ups), joinBlocks(downs), nil
+		return joinBlocks(ups), joinBlocks(downs), usage, nil
 	}
-	return wrapTransaction(ups), wrapTransaction(downs), nil
+	if len(ups) > 0 || len(downs) > 0 {
+		usage.Use(CapTransactionalDDL)
+	}
+	return wrapTransaction(ups), wrapTransaction(downs), usage, nil
 }
 
 // wrapTransaction joins non-empty SQL blocks with one blank line between
