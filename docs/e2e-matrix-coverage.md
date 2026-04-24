@@ -1,0 +1,224 @@
+# E2E matrix coverage — what's exercised, what's skipped
+
+As of 2026-04-25 end-of-session. Pairs with
+`srcgo/domains/compiler/e2e/` (build tag `e2e`).
+
+Full matrix run on PG 14–18: **609 PASS / 0 FAIL / 515 SKIP**.
+
+Every SKIP is deliberate — the harness tagged the cell with a
+`SkipReason` explaining what's missing. No skip is a hidden
+failure. This document maps every skip category to either an
+**implementation task** (pure technical work, no decisions) or
+a **decision pending** (waiting on a user-level ruling before
+the engine can render the case cleanly).
+
+---
+
+## SKIP categories
+
+### A. LIST / MAP / MESSAGE carrier synthesizer (270 skips — implementation)
+
+**Cause.** The current `carrierSchema()` in
+`srcgo/domains/compiler/e2e/synth.go` stands up scalar columns
+only (BOOL / STRING / INT32 / INT64 / DOUBLE / TIMESTAMP /
+DURATION / BYTES). Collection carriers need extra context:
+
+- `CARRIER_LIST` — element carrier + element sem (for
+  `TEXT[]`, `INTEGER[]`, …) or `element_is_message=true` for
+  `repeated Foo` → JSONB.
+- `CARRIER_MAP` — element carrier for the value side
+  (K is always string per iter-1.6).
+- `CARRIER_MESSAGE` — proto Message FQN (`Column.MessageFqn`)
+  and the enclosing proto schema's imports.
+
+**Work.** Extend `synth.go` with `listSchema` / `mapSchema` /
+`messageSchema` helpers. Each needs a plausible default
+(e.g. LIST → `repeated string`, MAP → `map<string,string>`,
+MESSAGE → stub `Inner { int64 id = 1; }`). Update
+`carrierSynthSkip()` to stop skipping once the synth covers
+the case.
+
+**Blast radius.** ~270 SKIP → PASS in one commit, per version.
+
+**Decisions needed.** None.
+
+---
+
+### B. dbtype JSON family (30 skips — implementation)
+
+**Cause.** `docs/classification/dbtype.yaml` declares a `JSON`
+family for transitions between `JSON` / `JSONB` / `HSTORE`.
+All three map to carriers in the collection family
+(MAP / LIST), so they hit the same element-context gap as A.
+
+**Work.** Falls out of A automatically — once `mapSchema` lands,
+the JSON family dbtype cells stop skipping.
+
+**Decisions needed.** None.
+
+---
+
+### C. Constraint non-column axes (215 skips)
+
+Table-level + index / FK / check / raw-index / cross-axis
+finding axes. Mixed — most are implementation, a handful need
+decisions.
+
+#### C.1 Pure implementation (185 of 215)
+
+| Axis | Skips | Work |
+|---|---|---|
+| `allowed_extensions` (narrow / disjoint / to_wildcard / from_wildcard / widen) | 25 | Synth prev/curr with differing `(w17.field).allowed_extensions`. Engine path exists (in-axis FactChange). |
+| `table_namespace` (schema_change / prefix_change / mode_switch) | 15 | Synth with `(w17.db.module).schema` vs `prefix` mode. Existing `emitSetTableNamespace` op handles emission. |
+| `generated_expr` (add / drop / change) | 15 | Synth column with `(w17.db.column).generated_expr`. In-axis FactChange path already shipped. |
+| `unique` (enable / disable) | 10 | Routes through Index bucket per constraint.yaml A5 — needs index-level synth (see `index_*` row). |
+| `index_add` / `index_replace` / `index_drop` | 15 | Synth table with `(w17.db.table).indexes` differing. AddIndex/DropIndex/ReplaceIndex ops already emit. |
+| `fk_add` / `fk_replace` / `fk_drop` | 15 | Synth table with `fk` field — needs a target table in the synth schema. Add/Drop/Replace FK ops already emit. |
+| `check_add` / `check_replace` / `check_drop` | 15 | Synth column with CHECK-producing options (`max_len`, `min_len`, `pattern`, `choices`). |
+| `raw_add` / `raw_replace` / `raw_drop` | 15 | Synth with `raw_indexes` or `raw_checks`. |
+| `table_rename` | 5 | Synth with `(w17.db.table).name` differing while FQN stable. |
+| `table_comment` | 5 | Synth with `(w17.db.table).comment`. |
+| `numeric add_bound` | 5 | Needs unbounded-NUMERIC IR shape (sem=NUMBER + db_type=NUMERIC override) — IR currently rejects DECIMAL+precision=0. |
+| `pg_required_extensions` | 5 | Manifest-only update; synth with differing `(w17.pg.field).required_extensions`. |
+
+All ~185 are standalone synth helpers under
+`srcgo/domains/compiler/e2e/constraint_cells.go`. Graduate
+the Skip to a real run by adding the synth + removing the
+SkipReason.
+
+#### C.2 Decisions pending (30 of 215)
+
+These axes produce ReviewFindings today (cross-axis) and the
+engine has no automatic renderer for non-CUSTOM_MIGRATION
+resolutions. D33 solved this for `carrier_change`; these
+axes need the equivalent design decision before we can wire
+them into the matrix.
+
+##### D.1 `pk` enable / disable (10 skips)
+
+**Current behaviour.** Plan.Diff emits a `pk_flip` Finding.
+`engine.injectStrategyOps` ignores it (not carrier_change).
+Resolution of any strategy is silently lost — no Op emitted.
+
+**Decision wanted.**
+1. **Option A**: `pk_flip` stays CUSTOM_MIGRATION-only (user
+   always writes the SQL via `--decide`). PG PK changes are
+   non-trivial (constraint drop + add + potentially column
+   rewrite); author knows the transaction boundaries better
+   than a template.
+2. **Option B**: Engine auto-renders `ALTER TABLE ... DROP
+   CONSTRAINT <table>_pkey; ALTER TABLE ... ADD PRIMARY KEY
+   (<cols>);` for DROP_AND_CREATE resolution. Works for most
+   small tables; ugly for large ones (full table rebuild).
+3. **Option C**: Hybrid — engine auto-renders for single-column
+   PK flips; refuses composite PK changes as CUSTOM_MIGRATION-
+   only.
+
+**My suggestion.** Option A. PK flips are rare; CUSTOM_MIGRATION
+matches the "no silent coercion" rule.
+
+##### D.2 `pg_custom_type` (5 skips)
+
+**Current behaviour.** Plan.Diff emits a `custom_type_change`
+Finding. Same flow as pk_flip — ignored by
+injectStrategyOps, silent-empty migration on resolution.
+
+**Decision wanted.**
+1. **Option A**: CUSTOM_MIGRATION-only. custom_type is already
+   the escape-hatch for opaque PG types (vector, PostGIS,
+   PostGIS, domains) — changing the opaque-type string
+   genuinely requires author SQL.
+2. **Option B**: Engine auto-renders DROP COLUMN + ADD COLUMN
+   for DROP_AND_CREATE (same shape as Layer C Drop+Add cell).
+
+**My suggestion.** Option A. custom_type is opaque; compiler has
+no template to render.
+
+##### D.3 `enum_values` remove (10 skips)
+
+**Current behaviour.** Plan.Diff refuses enum value removal at
+diff time (REFUSE strategy) — not a Finding, a hard error.
+The matrix's `enum_values` skips cover add / remove / combined.
+
+**Decision wanted.** Can we auto-render ENUM value removal?
+
+PostgreSQL has no `ALTER TYPE ... DROP VALUE`. Options:
+1. **Option A**: Stays REFUSE. Author drops+recreates the
+   enum type manually.
+2. **Option B**: Engine synthesises a multi-statement block:
+   `CREATE TYPE <new>`, `ALTER TABLE … ALTER COLUMN TYPE
+   <new> USING (<remapping>)`, `DROP TYPE <old>`, `ALTER TYPE
+   <new> RENAME TO <original>`. Needs a per-cell template +
+   data-remap SQL from the author (which is CUSTOM_MIGRATION-
+   shaped anyway).
+3. **Option C**: Same as B but engine emits only the
+   structural DDL; data-remap is mandatory `--decide enum=...:
+   <sql>`.
+
+**My suggestion.** Option A for enum_values remove (keep REFUSE);
+enum_values add stays SAFE with ALTER TYPE ADD VALUE (already
+shipped).
+
+##### D.4 `default` identity_add / identity_drop / auto_kind_change (15 skips)
+
+**Current behaviour.** Classifier declares
+identity_add=CUSTOM_MIGRATION, identity_drop=NEEDS_CONFIRM,
+auto_kind_change=SAFE. Engine's in-axis DefaultChange emitter
+doesn't special-case IDENTITY lifecycle; identity_add
+silently produces a `DEFAULT AUTO_IDENTITY` clause (invalid
+IR).
+
+**Decision wanted.**
+1. identity_add — template `LOCK TABLE; SET seq to MAX; ADD
+   GENERATED ... AS IDENTITY;` or CUSTOM_MIGRATION-only?
+2. identity_drop — `ALTER COLUMN DROP IDENTITY;` (simple)
+   auto-rendered or CUSTOM_MIGRATION-only?
+3. auto_kind_change — what's the actual in-axis path?
+   `AUTO_NOW → literal timestamp` is SAFE in classifier but
+   engine has no specialised render.
+
+**My suggestion.**
+- identity_drop → engine auto-renders `ALTER COLUMN DROP
+  IDENTITY` (simple, PG 10+); user opts in via
+  `--decide col=needs_confirm`.
+- identity_add → CUSTOM_MIGRATION-only (LOCK-seed-add triad
+  has too much project-specific state).
+- auto_kind_change → engine auto-renders via the existing
+  DefaultChange path (should just work; needs synth fix).
+
+##### D.5 `element_reshape` (5 skips)
+
+**Current behaviour.** Plan.Diff emits an
+`element_carrier_reshape` Finding. Same ignore-on-resolution
+issue as pk_flip.
+
+**Decision wanted.** MAP value-carrier / LIST element-carrier
+change — auto-renderable?
+
+1. **Option A**: CUSTOM_MIGRATION-only. Element-type changes
+   are data-migration territory (every value re-encoded).
+2. **Option B**: Engine auto-emits DropColumn + AddColumn
+   (structural reset; data loss acknowledged).
+
+**My suggestion.** Option A — same "no silent coercion"
+rationale as carrier_change default.
+
+---
+
+## Summary
+
+- **Implementation-pending**: ~485 SKIPs. Roughly 5 focused
+  synthesizer commits land them all. Each commit is a standalone
+  wave — LIST carriers, MAP carriers, MESSAGE carrier,
+  constraint table-level, constraint index/fk/check/raw.
+- **Decision-pending**: ~30 SKIPs across 5 axes (pk,
+  pg_custom_type, enum_values remove, default identity lifecycle,
+  element_reshape). My recommendation for each is **keep
+  CUSTOM_MIGRATION-only** unless there's a strong reason to
+  template (matches the "no silent coercion" rule; author owns
+  decisions with data impact).
+
+**When user signs off on the decisions**, the engine gets a
+small D33-style follow-up record (D35 tentatively) that maps
+each decision-pending axis to its renderer. Implementation
+waves can then proceed without blocking on re-review.
