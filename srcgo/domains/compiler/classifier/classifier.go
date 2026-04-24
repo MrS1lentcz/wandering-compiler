@@ -50,6 +50,32 @@ type carrierKey struct{ from, to string }          // trimmed enum names (BOOL /
 type dbtypeKey struct{ family, from, to string }   // family = STRING/INT/DOUBLE/TIMESTAMP/BYTES/JSON
 type constraintKey struct{ axis, caseID string }   // axis = nullable / max_len / …; case = widen / narrow / …
 
+// CarrierEntry is one (from, to, Cell) triple — for iteration use
+// by tooling (e2e matrix runner, coverage audits). Returned by
+// AllCarrierCells in carrier.yaml declaration order.
+type CarrierEntry struct {
+	From, To irpb.Carrier
+	Cell     Cell
+}
+
+// AllCarrierCells returns every carrier transition in the loaded
+// matrix. Sorted by (from, to) enum value for deterministic output.
+// Synthesised cells (for (from,to) not in YAML) are NOT returned —
+// the iterator only emits authored cells.
+func (c *Classifier) AllCarrierCells() []CarrierEntry {
+	out := make([]CarrierEntry, 0, len(c.carrier))
+	for k, cell := range c.carrier {
+		from, fromOK := carrierFromName(k.from)
+		to, toOK := carrierFromName(k.to)
+		if !fromOK || !toOK {
+			continue
+		}
+		out = append(out, CarrierEntry{From: from, To: to, Cell: cell})
+	}
+	sortCarrierEntries(out)
+	return out
+}
+
 // Carrier returns the Cell for a carrier-axis transition. When the exact
 // (from, to) pair isn't in the matrix, returns a synthesised
 // CUSTOM_MIGRATION cell (D28 rule: author owns ambiguous paths).
@@ -132,6 +158,40 @@ func (c *Classifier) Rank(s planpb.Strategy) int32 {
 // matches the YAML shorthand (BOOL, STRING, INT32, …).
 func carrierName(c irpb.Carrier) string {
 	return strings.TrimPrefix(c.String(), "CARRIER_")
+}
+
+// carrierFromName reverses carrierName — looks up the irpb.Carrier
+// enum for a YAML shorthand. Used by AllCarrierCells iteration.
+// Returns (CARRIER_UNSPECIFIED, false) for unknown names so callers
+// can filter rather than panic.
+func carrierFromName(name string) (irpb.Carrier, bool) {
+	full := "CARRIER_" + name
+	if v, ok := irpb.Carrier_value[full]; ok {
+		return irpb.Carrier(v), true
+	}
+	return irpb.Carrier_CARRIER_UNSPECIFIED, false
+}
+
+// sortCarrierEntries orders carrier entries by (from, to) enum value
+// so iteration is deterministic across test runs.
+func sortCarrierEntries(entries []CarrierEntry) {
+	// Insertion sort — tiny slices (110 entries max), O(n²) fine.
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0; j-- {
+			if carrierLess(entries[j], entries[j-1]) {
+				entries[j], entries[j-1] = entries[j-1], entries[j]
+				continue
+			}
+			break
+		}
+	}
+}
+
+func carrierLess(a, b CarrierEntry) bool {
+	if a.From != b.From {
+		return a.From < b.From
+	}
+	return a.To < b.To
 }
 
 // dbtypeName trims the "DBT_" prefix (ir.proto DbType convention).

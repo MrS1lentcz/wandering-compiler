@@ -42,6 +42,40 @@ func TestMatrix_Carrier_Representative(t *testing.T) {
 	}
 }
 
+// TestMatrix_Carrier_Full exercises every cell in
+// docs/classification/carrier.yaml against each PG version in the
+// matrix. Iterates `cls.AllCarrierCells()` — additions to YAML
+// automatically become new sub-tests.
+//
+// Cells that can't be synthesized (LIST, MAP, MESSAGE carriers
+// have element/fqn invariants the current synthesizer doesn't
+// fully cover) are marked Skip with a reason. See
+// allCarrierCells() for the skip list.
+func TestMatrix_Carrier_Full(t *testing.T) {
+	cls := loadClassifier(t)
+	cells := allCarrierCells(cls)
+
+	for _, version := range pgVersions() {
+		t.Run("pg"+version, func(t *testing.T) {
+			cont, err := StartPG(version)
+			if err != nil {
+				t.Fatalf("StartPG(%s): %v", version, err)
+			}
+			t.Cleanup(cont.Stop)
+			for _, cell := range cells {
+				cell := cell
+				t.Run(cell.Axis+"_"+cell.Name, func(t *testing.T) {
+					// Parallel inside one version = share one
+					// container via per-cell DB; psql exec is
+					// serialised by Docker exec anyway so
+					// parallelism is mostly about shared warm-up.
+					cell.Run(t, cont, cls)
+				})
+			}
+		})
+	}
+}
+
 // representativeCarrierCells returns a 3-cell sample covering
 // the three strategy dispatch paths engine.injectStrategyOps
 // handles:

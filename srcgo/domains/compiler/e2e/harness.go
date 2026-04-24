@@ -49,6 +49,17 @@ type Cell struct {
 	// SkipReason: non-empty → sub-test skipped with this reason.
 	// Used for cells whose synthesizer isn't supported yet.
 	SkipReason string
+	// ForwardOnly: true → harness runs diff.up but skips
+	// diff.down + prev.down. Used for cells whose reverse
+	// transition is CUSTOM_MIGRATION (asymmetric — automatic
+	// rollback SQL doesn't exist, real rollback needs author-
+	// supplied --decide-reverse). Forward is the testable half.
+	ForwardOnly bool
+
+	// FromCarrier / ToCarrier surface the enum values for
+	// classifier-lookup purposes (reverse-strategy check for
+	// ForwardOnly decoration). Populated by the cell builder.
+	FromCarrier, ToCarrier irpb.Carrier
 }
 
 // Run executes one cell against a container.
@@ -111,6 +122,16 @@ func (c Cell) Run(t *testing.T, cont *PGContainer, cls *classifier.Classifier) {
 	// Phase 5: apply the diff roundtrip.
 	if err := cont.Apply(db, up); err != nil {
 		t.Fatalf("apply diff.up:\n%s\nerr: %v", up, err)
+	}
+	if c.ForwardOnly {
+		// Asymmetric cell — reverse transition is CUSTOM_MIGRATION.
+		// The emitted diff.down SQL will fail PG's implicit-cast
+		// check; apply it anyway would be a false-signal test
+		// failure. Production rollback requires author-supplied
+		// --decide-reverse; harness stops here with forward
+		// applied successfully.
+		t.Logf("forward-only cell — skipping diff.down + prev.down (reverse requires CUSTOM_MIGRATION)")
+		return
 	}
 	if err := cont.Apply(db, down); err != nil {
 		t.Fatalf("apply diff.down:\n%s\nerr: %v", down, err)

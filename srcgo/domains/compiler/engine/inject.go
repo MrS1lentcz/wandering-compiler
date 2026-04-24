@@ -140,9 +140,18 @@ func injectCarrierChange(
 // if its strategy is non-CUSTOM, else falls back to a plain
 // "<col>::<type>" cast.
 //
-// tmpl context keys: {Col, Table} match the classifier docs.
+// Template context keys:
+//   {{.Col}}       — post-rename column name
+//   {{.Table}}     — bare table name (no namespace qualifier)
+//   {{.Project.Encoding}} — project-default bytes encoding
+//                           (hex / utf8 / escape). Defaults to
+//                           "escape" — PG's universally-safe
+//                           encoding that round-trips for every
+//                           byte string. Projects override via
+//                           future w17.yaml Project.Encoding.
+//
 // Template errors fall back to an empty USING — caller's emit
-// omits the clause rather than serialising a broken SQL.
+// omits the clause rather than serialising broken SQL.
 func renderCarrierUsing(
 	cls *classifier.Classifier,
 	prev, curr *irpb.Column,
@@ -151,9 +160,10 @@ func renderCarrierUsing(
 	forward := cls.Carrier(prev.GetCarrier(), curr.GetCarrier())
 	reverse := cls.Carrier(curr.GetCarrier(), prev.GetCarrier())
 
-	data := struct{ Col, Table string }{
-		Col:   curr.GetName(),
-		Table: table.GetName(),
+	data := carrierUsingContext{
+		Col:     curr.GetName(),
+		Table:   table.GetName(),
+		Project: projectContext{Encoding: "escape"},
 	}
 
 	usingUp := renderUsingTemplate(forward.Using, data)
@@ -169,6 +179,24 @@ func renderCarrierUsing(
 		usingDown = renderUsingTemplate(reverse.Using, data)
 	}
 	return usingUp, usingDown
+}
+
+// carrierUsingContext is the template-data bag for carrier.yaml
+// `using:` entries. Exported-looking field names (capitalised) so
+// text/template can reach them.
+type carrierUsingContext struct {
+	Col     string
+	Table   string
+	Project projectContext
+}
+
+// projectContext surfaces project-level settings to classifier
+// templates. Today only Encoding (bytes↔text conversion). Future:
+// Locale, TZ, etc. Lives here rather than classifier pkg because
+// it's rendering-side — classifier is the catalog, engine is the
+// renderer that knows the project.
+type projectContext struct {
+	Encoding string
 }
 
 func renderUsingTemplate(tmpl string, data any) string {
