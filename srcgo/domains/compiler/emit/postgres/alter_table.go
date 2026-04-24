@@ -409,10 +409,21 @@ func defaultStmt(qual, col, action string, def *irpb.Default, usage *emit.Usage)
 // renderMaxLenChange — DIRECT strategy. ALTER COLUMN TYPE VARCHAR(N)
 // works for both widen and narrow; PG rejects narrow at apply if any
 // row exceeds N. Down restores the previous width.
+//
+// max_len == 0 renders as bare VARCHAR (unbounded — equivalent to
+// TEXT in PG). Covers the transition TEXT → VARCHAR(N) and back,
+// where the "from" side has no length constraint.
 func renderMaxLenChange(qual, col string, ch *planpb.MaxLenChange) (string, string) {
-	to := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE VARCHAR(%d);", qual, col, ch.GetTo())
-	from := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE VARCHAR(%d);", qual, col, ch.GetFrom())
+	to := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", qual, col, varcharTypeSQL(ch.GetTo()))
+	from := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s;", qual, col, varcharTypeSQL(ch.GetFrom()))
 	return to, from
+}
+
+func varcharTypeSQL(maxLen int32) string {
+	if maxLen <= 0 {
+		return "VARCHAR"
+	}
+	return fmt.Sprintf("VARCHAR(%d)", maxLen)
 }
 
 // renderColumnCommentChange — DIRECT strategy. COMMENT ON COLUMN …
@@ -435,6 +446,13 @@ func renderNumericPrecisionChange(qual, col string, ch *planpb.NumericPrecisionC
 }
 
 func numericTypeSQL(precision int32, scale *int32) string {
+	if precision <= 0 {
+		// No precision constraint — render bare NUMERIC (PG's
+		// arbitrary-precision form). Covers the INT family →
+		// NUMERIC transition where the INT side carries no
+		// precision.
+		return "NUMERIC"
+	}
 	if scale != nil {
 		return fmt.Sprintf("NUMERIC(%d, %d)", precision, *scale)
 	}

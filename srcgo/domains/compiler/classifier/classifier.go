@@ -76,6 +76,50 @@ func (c *Classifier) AllCarrierCells() []CarrierEntry {
 	return out
 }
 
+// DbTypeEntry is one (family, from, to, Cell) row — iterator output
+// for the dbType matrix.
+type DbTypeEntry struct {
+	Family   string
+	From, To irpb.DbType
+	Cell     Cell
+}
+
+// AllDbTypeCells returns every within-carrier dbType transition
+// in the loaded matrix, sorted by (family, from, to) for
+// determinism.
+func (c *Classifier) AllDbTypeCells() []DbTypeEntry {
+	out := make([]DbTypeEntry, 0, len(c.dbtype))
+	for k, cell := range c.dbtype {
+		from, fromOK := dbtypeFromName(k.from)
+		to, toOK := dbtypeFromName(k.to)
+		if !fromOK || !toOK {
+			continue
+		}
+		out = append(out, DbTypeEntry{Family: k.family, From: from, To: to, Cell: cell})
+	}
+	sortDbTypeEntries(out)
+	return out
+}
+
+// ConstraintEntry is one (axis, case, Cell) row — iterator output
+// for the constraint matrix.
+type ConstraintEntry struct {
+	Axis   string
+	CaseID string
+	Cell   Cell
+}
+
+// AllConstraintCells returns every constraint axis case in the
+// loaded matrix, sorted by (axis, case) for determinism.
+func (c *Classifier) AllConstraintCells() []ConstraintEntry {
+	out := make([]ConstraintEntry, 0, len(c.constraint))
+	for k, cell := range c.constraint {
+		out = append(out, ConstraintEntry{Axis: k.axis, CaseID: k.caseID, Cell: cell})
+	}
+	sortConstraintEntries(out)
+	return out
+}
+
 // Carrier returns the Cell for a carrier-axis transition. When the exact
 // (from, to) pair isn't in the matrix, returns a synthesised
 // CUSTOM_MIGRATION cell (D28 rule: author owns ambiguous paths).
@@ -192,6 +236,57 @@ func carrierLess(a, b CarrierEntry) bool {
 		return a.From < b.From
 	}
 	return a.To < b.To
+}
+
+// dbtypeFromName reverses dbtypeName. Returns
+// (DB_TYPE_UNSPECIFIED, false) for unknown names.
+func dbtypeFromName(name string) (irpb.DbType, bool) {
+	full := "DBT_" + name
+	if v, ok := irpb.DbType_value[full]; ok {
+		return irpb.DbType(v), true
+	}
+	return irpb.DbType_DB_TYPE_UNSPECIFIED, false
+}
+
+func sortDbTypeEntries(entries []DbTypeEntry) {
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0; j-- {
+			if dbtypeLess(entries[j], entries[j-1]) {
+				entries[j], entries[j-1] = entries[j-1], entries[j]
+				continue
+			}
+			break
+		}
+	}
+}
+
+func dbtypeLess(a, b DbTypeEntry) bool {
+	if a.Family != b.Family {
+		return a.Family < b.Family
+	}
+	if a.From != b.From {
+		return a.From < b.From
+	}
+	return a.To < b.To
+}
+
+func sortConstraintEntries(entries []ConstraintEntry) {
+	for i := 1; i < len(entries); i++ {
+		for j := i; j > 0; j-- {
+			if constraintLess(entries[j], entries[j-1]) {
+				entries[j], entries[j-1] = entries[j-1], entries[j]
+				continue
+			}
+			break
+		}
+	}
+}
+
+func constraintLess(a, b ConstraintEntry) bool {
+	if a.Axis != b.Axis {
+		return a.Axis < b.Axis
+	}
+	return a.CaseID < b.CaseID
 }
 
 // dbtypeName trims the "DBT_" prefix (ir.proto DbType convention).

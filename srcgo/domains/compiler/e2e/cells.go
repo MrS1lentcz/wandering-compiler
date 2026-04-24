@@ -15,6 +15,114 @@ import (
 	planpb "github.com/MrS1lentcz/wandering-compiler/srcgo/pb/domains/compiler/types/plan"
 )
 
+// allDbTypeCells iterates classifier.AllDbTypeCells() and builds
+// a runnable Cell for each. DbType transitions are within-carrier
+// in-axis changes — they flow through FactChange_DbType, not
+// ReviewFindings, so no --decide is required and the harness
+// runs them without the probe/resolution phase.
+func allDbTypeCells(cls *classifier.Classifier) []Cell {
+	entries := cls.AllDbTypeCells()
+	out := make([]Cell, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, dbtypeCell(e, cls))
+	}
+	return out
+}
+
+func dbtypeCell(e classifier.DbTypeEntry, cls *classifier.Classifier) Cell {
+	carrier := familyCarrier(e.Family)
+	c := Cell{
+		Axis:     "dbtype",
+		Name:     fmt.Sprintf("%s_%s_to_%s", e.Family, trimDbType(e.From), trimDbType(e.To)),
+		Strategy: e.Cell.Strategy,
+	}
+	if carrier == irpb.Carrier_CARRIER_UNSPECIFIED {
+		c.SkipReason = fmt.Sprintf("synth skip: family %s has no default carrier mapping", e.Family)
+		return c
+	}
+	// JSON family uses MAP/LIST carrier which brings element-carrier
+	// invariants the stub synth doesn't produce cleanly. Skip.
+	if e.Family == "JSON" {
+		c.SkipReason = "synth skip: JSON family requires map/list element context"
+		return c
+	}
+	c.Prev = dbtypeSchema(carrier, e.From)
+	c.Curr = dbtypeSchema(carrier, e.To)
+	// Reverse-direction check: if classifier's reverse lookup is
+	// CUSTOM_MIGRATION (no authored template), mark as forward-only —
+	// harness skips diff.down apply (PG's implicit cast fails; real
+	// rollback would need --decide-reverse).
+	reverse := cls.DbType(carrier, e.To, e.From)
+	if reverse.Strategy == planpb.Strategy_CUSTOM_MIGRATION {
+		c.ForwardOnly = true
+	}
+	return c
+}
+
+// dbtypeSchema builds a minimal schema with a target column at
+// the given (carrier, db_type) pair. Semantic defaults pulled
+// from applyCarrierDefaults; db_type override wins at emit.
+func dbtypeSchema(carrier irpb.Carrier, dbType irpb.DbType) *irpb.Schema {
+	col := &irpb.Column{
+		Name: "target", ProtoName: "target", FieldNumber: 2,
+		Carrier:  carrier,
+		DbType:   dbType,
+		Nullable: true,
+	}
+	applyCarrierDefaults(col)
+	// Specific invariants for dbtypes that require length / precision
+	// beyond the generic defaults applied above.
+	switch dbType {
+	case irpb.DbType_DBT_VARCHAR:
+		if col.GetMaxLen() == 0 {
+			col.MaxLen = 64
+		}
+	case irpb.DbType_DBT_NUMERIC:
+		if col.GetPrecision() == 0 {
+			col.Precision = 12
+		}
+	}
+	return &irpb.Schema{Tables: []*irpb.Table{{
+		Name:       "t",
+		MessageFqn: "e2e.T",
+		Columns: []*irpb.Column{
+			{
+				Name: "id", ProtoName: "id", FieldNumber: 1,
+				Carrier: irpb.Carrier_CARRIER_INT64,
+				Type:    irpb.SemType_SEM_ID,
+				DbType:  irpb.DbType_DBT_BIGINT,
+				Pk:      true,
+			},
+			col,
+		},
+		PrimaryKey: []string{"id"},
+	}}}
+}
+
+func familyCarrier(family string) irpb.Carrier {
+	switch family {
+	case "STRING":
+		return irpb.Carrier_CARRIER_STRING
+	case "INT":
+		return irpb.Carrier_CARRIER_INT64
+	case "DOUBLE":
+		return irpb.Carrier_CARRIER_DOUBLE
+	case "TIMESTAMP":
+		return irpb.Carrier_CARRIER_TIMESTAMP
+	case "BYTES":
+		return irpb.Carrier_CARRIER_BYTES
+	}
+	return irpb.Carrier_CARRIER_UNSPECIFIED
+}
+
+func trimDbType(d irpb.DbType) string {
+	s := d.String()
+	if len(s) > 4 && s[:4] == "DBT_" {
+		return s[4:]
+	}
+	return s
+}
+
 // allCarrierCells iterates classifier.AllCarrierCells() and builds
 // a runnable Cell for each. Unsupported synthesis shapes (LIST,
 // MAP, MESSAGE — element-level invariants need extra work) are

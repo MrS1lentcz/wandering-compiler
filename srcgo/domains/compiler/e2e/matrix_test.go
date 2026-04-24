@@ -42,6 +42,56 @@ func TestMatrix_Carrier_Representative(t *testing.T) {
 	}
 }
 
+// TestMatrix_Constraint_Full exercises every constraint.yaml
+// axis-case pair. Column-level axes (nullable / max_len / numeric
+// / default / comment / unique) are synthesised today; table-
+// level + index/fk/check + cross-axis findings (pk / pg_*) skip
+// with reasons pending follow-up waves.
+func TestMatrix_Constraint_Full(t *testing.T) {
+	cls := loadClassifier(t)
+	cells := allConstraintCells(cls)
+	for _, version := range pgVersions() {
+		t.Run("pg"+version, func(t *testing.T) {
+			cont, err := StartPG(version)
+			if err != nil {
+				t.Fatalf("StartPG(%s): %v", version, err)
+			}
+			t.Cleanup(cont.Stop)
+			for _, cell := range cells {
+				cell := cell
+				t.Run(cell.Axis+"_"+cell.Name, func(t *testing.T) {
+					cell.Run(t, cont, cls)
+				})
+			}
+		})
+	}
+}
+
+// TestMatrix_DbType_Full exercises every within-carrier dbType
+// transition declared in docs/classification/dbtype.yaml. These
+// are in-axis FactChange_DbType ops — no ReviewFinding, no
+// --decide required. Harness runs the prev/curr through Plan +
+// apply-roundtrip directly.
+func TestMatrix_DbType_Full(t *testing.T) {
+	cls := loadClassifier(t)
+	cells := allDbTypeCells(cls)
+	for _, version := range pgVersions() {
+		t.Run("pg"+version, func(t *testing.T) {
+			cont, err := StartPG(version)
+			if err != nil {
+				t.Fatalf("StartPG(%s): %v", version, err)
+			}
+			t.Cleanup(cont.Stop)
+			for _, cell := range cells {
+				cell := cell
+				t.Run(cell.Axis+"_"+cell.Name, func(t *testing.T) {
+					cell.Run(t, cont, cls)
+				})
+			}
+		})
+	}
+}
+
 // TestMatrix_Carrier_Full exercises every cell in
 // docs/classification/carrier.yaml against each PG version in the
 // matrix. Iterates `cls.AllCarrierCells()` — additions to YAML

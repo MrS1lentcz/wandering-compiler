@@ -50,12 +50,18 @@ func (c *PGContainer) Stop() {
 }
 
 func (c *PGContainer) waitReady() error {
+	// Two-stage probe: pg_isready is fast but can return OK before
+	// the server's fully accepting connections on the socket. Follow
+	// up with a real psql query — only return when that round-trips.
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
-		err := exec.Command("docker", "exec", c.ID,
-			"pg_isready", "-U", "postgres", "-q").Run()
-		if err == nil {
-			return nil
+		if exec.Command("docker", "exec", c.ID,
+			"pg_isready", "-U", "postgres", "-q").Run() == nil {
+			if exec.Command("docker", "exec", c.ID,
+				"psql", "-U", "postgres", "-d", "postgres",
+				"-v", "ON_ERROR_STOP=1", "-c", "SELECT 1;").Run() == nil {
+				return nil
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
