@@ -2375,6 +2375,69 @@ author remap), so it stays CUSTOM_MIGRATION-only.
 regenerated to absorb whitespace drift between Go toolchain
 versions; no semantic change.
 
+### D40 — `enum_fqn_change` NEEDS_CONFIRM via shared rebuild template (added 2026-04-25)
+
+**Status: locked + shipped.** Closes the last B1 graduation
+candidate. `enum_values/fqn_change` flips CUSTOM_MIGRATION →
+NEEDS_CONFIRM and shares the D37 rebuild emit path — the engine
+recomputes (added, removed) names from prev vs curr and the
+emitter chooses one of three branches based on the diff.
+
+**Mechanics.** PG type names are derived as `<table>_<col>`,
+independent of the proto enum FQN. So an FQN swap is, PG-wise,
+either:
+- a no-op (identical value sets across the FQN swap),
+- a pure-add (curr has more values, all of prev's values present),
+- or a destructive remap (any prev value missing in curr).
+
+The same `EnumValuesChange` carrier handles all three; the emit
+priority order is:
+1. `RemovedNames` non-empty → 4-statement rebuild seeded from
+   curr's full value list. Concurrently-added values fold in
+   atomically because the new type uses the entire curr list.
+2. Else `AddedNames` non-empty → ALTER TYPE ADD VALUE per name
+   (SAFE pattern under a NEEDS_CONFIRM gate).
+3. Else → comment marker (`-- wc: enum FQN change on <col>:
+   PG type <t>_<col> unchanged (identical value set); no DDL
+   emitted`). Migration record reflects the proto-side intent
+   without DDL.
+
+**What shipped.**
+
+- `docs/classification/constraint.yaml` A10 — `enum_values/fqn_change`
+  CUSTOM_MIGRATION → NEEDS_CONFIRM. Rationale rewritten around the
+  shared template + the "engine writes SQL, user confirms
+  destructive" principle (codified as
+  feedback_strategy_semantics memory).
+- `srcgo/domains/compiler/engine/inject.go` — `injectEnumRemoveValue`
+  renamed to `injectEnumValuesChange` and generalised: now computes
+  both `addedNames` and `removedNames` from prev vs curr enum_names,
+  emits a single `EnumValuesChange` FactChange. Dispatched from the
+  same case for both `enum_values_remove` (D37) and `enum_fqn_change`
+  (D40).
+- `srcgo/domains/compiler/emit/postgres/alter_table.go` —
+  `renderEnumValuesChange` extended with the no-op marker branch
+  for both-empty (FQN swap with identical values). Comment doc
+  updated to describe the three-branch dispatch.
+- E2E cell — `enum_values/fqn_change` synth in
+  `e2e/constraint_cells.go` exercises the rebuild branch (FQN
+  swap with shrinking value set). No-op + ADD-VALUE branches
+  covered by engine unit tests since they're the same template
+  wiring with different inputs.
+- `srcgo/domains/compiler/engine/enum_fqn_test.go` — four engine
+  integration tests covering identical-values no-op, shrinking-
+  values rebuild, growing-values ADD VALUE, wrong-strategy
+  hard-error.
+
+**B1 hard-error list after D40: `element_carrier_reshape`.**
+Genuinely non-deterministic (per-element type remap requires
+author semantic decision); confirmed CUSTOM_MIGRATION-only in
+docs/e2e-matrix-coverage.md D.5. The four-record sweep
+(D36+D37+D38+D39+D40) covers every previously-decision-pending
+axis identified in the e2e skip triage; the only remaining
+deterministic axis under CUSTOM is the per-element reshape and
+that's a deliberate choice.
+
 ### D39 — `pk_flip` single-column NEEDS_CONFIRM (multi-column swap stays CUSTOM) (added 2026-04-25)
 
 **Status: locked + shipped.** Closes docs/e2e-matrix-coverage.md

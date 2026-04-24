@@ -180,20 +180,30 @@ behaviour.
 
 ---
 
-## Summary
+## Summary (2026-04-25 update)
 
-- **Implementation-pending**: ~485 SKIPs. Roughly 5 focused
-  synthesizer commits land them all. Each commit is a standalone
-  wave — LIST carriers, MAP carriers, MESSAGE carrier,
-  constraint table-level, constraint index/fk/check/raw.
-- **Decision-pending**: ~30 SKIPs across 5 axes (pk,
-  pg_custom_type, enum_values remove, default identity lifecycle,
-  element_reshape). My recommendation for each is **keep
-  CUSTOM_MIGRATION-only** unless there's a strong reason to
-  template (matches the "no silent coercion" rule; author owns
-  decisions with data impact).
+- **Implementation-pending**: ~485 SKIPs across non-column
+  synthesizer waves (LIST/MAP/MESSAGE carriers, JSON dbtype family,
+  table-level / index / fk / check / raw constraint axes,
+  numeric add_bound). Each is its own wave; not blocked.
+- **Decision-pending: ALL CLOSED.** D36 → D40 graduated every
+  previously-decision-pending axis to its final classifier
+  strategy:
+  - D.1 pk_flip → D39 (single-column NEEDS_CONFIRM, swap stays CUSTOM)
+  - D.2 pg_custom_type → D36 (typed registry, registered vs unregistered)
+  - D.3 enum_values/remove → D37 (NEEDS_CONFIRM rebuild) +
+    D40 enum_fqn_change (same template, three branches)
+  - D.4 default identity + auto_kind_change → D38
+  - D.5 element_carrier_reshape → confirmed CUSTOM_MIGRATION
+    (genuinely non-deterministic; codified in
+    feedback_strategy_semantics memory)
 
-**When user signs off on the decisions**, the engine gets a
-small D33-style follow-up record (D35 tentatively) that maps
-each decision-pending axis to its renderer. Implementation
-waves can then proceed without blocking on re-review.
+The principle codified along the way:
+**CUSTOM_MIGRATION is reserved for non-deterministic transitions.
+Deterministic-but-destructive = NEEDS_CONFIRM with engine-rendered
+template. Engine writes the SQL; user confirms the destructive
+outcome.** See iteration-2.md D37-D40.
+
+B1 hard-error list residue after D40: only
+`element_carrier_reshape`. Implementation-pending waves can now
+proceed without re-review.

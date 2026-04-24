@@ -782,20 +782,26 @@ func renderPrimaryKeyChange(qual, col string, ch *planpb.PrimaryKeyChange) (stri
 	return "", ""
 }
 
-// renderEnumValuesChange handles both directions of enum-type evolution:
+// renderEnumValuesChange handles every direction of enum-type
+// evolution. Three branches, picked in priority order:
 //
-//   - Added values (SAFE) — ALTER TYPE <t> ADD VALUE 'n' per added
-//     name. PG has no inverse, so down is a comment marker.
-//   - Removed values (NEEDS_CONFIRM, D37) — PG has no DROP VALUE,
-//     so the rebuild is the only path: CREATE TYPE <t>_new AS ENUM
-//     (<curr surviving values>); ALTER COLUMN USING cast; DROP TYPE
-//     old; RENAME new → old. Down inverts: CREATE TYPE <t>_new with
-//     the pre-remove list, ALTER+USING, DROP, RENAME. Cast fails at
-//     apply if a row still carries a removed value — the user
-//     confirmed that risk via --decide needs_confirm.
-//
-// The two cases are mutually exclusive by construction (differ emits
-// one or the other, never both in a single FactChange).
+//   - Removed values present (D37 enum_values_remove or D40
+//     enum_fqn_change with shrinking value set) — PG has no DROP
+//     VALUE, so the rebuild is the only path: CREATE TYPE <t>_new
+//     AS ENUM (<curr full values>); ALTER COLUMN USING cast; DROP
+//     TYPE old; RENAME new → old. The new type is seeded from
+//     curr's full enum_names list, so any concurrently-added values
+//     are folded in atomically. Down rebuilds with prev's full list.
+//     Cast fails at apply if a row still carries a removed value —
+//     user confirmed that risk via --decide needs_confirm.
+//   - Added values only (in-axis SAFE for plain enum extension, or
+//     D40 enum_fqn_change with growing value set) — ALTER TYPE
+//     ADD VALUE per added name. PG has no inverse for ADD VALUE in
+//     a single transaction, so down emits a comment marker.
+//   - Both empty (D40 enum_fqn_change with identical value sets) —
+//     proto-side FQN swap that's a database-side no-op. Emit a
+//     comment marker so the migration record reflects the intent
+//     without any DDL.
 func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange, curr, prev *irpb.Column) (string, string) {
 	typeName := pgEnumTypeName(qualToTable(qual), col)
 	qualType := typeName
@@ -805,6 +811,12 @@ func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange, curr,
 
 	if len(ch.GetRemovedNames()) > 0 {
 		return renderEnumRebuild(qual, col, typeName, qualType, curr, prev)
+	}
+
+	if len(ch.GetAddedNames()) == 0 {
+		marker := fmt.Sprintf("-- wc: enum FQN change on %s: PG type %s unchanged (identical value set);"+
+			" no DDL emitted", col, qualType)
+		return marker, marker
 	}
 
 	var ups, downs []string

@@ -308,12 +308,17 @@ func pgCustomTypeSynth(c *Cell, caseID string) {
 	}
 }
 
-// enumValuesSynth covers two paths:
+// enumValuesSynth covers three paths:
 //   - add: in-axis FactChange, ALTER TYPE ADD VALUE (SAFE, no Finding).
 //   - remove: D37 NEEDS_CONFIRM Finding resolution, engine emits the
 //     4-statement rebuild (CREATE TYPE new / ALTER USING / DROP / RENAME).
+//   - fqn_change: D40 NEEDS_CONFIRM. Engine recomputes added/removed
+//     between prev and curr enum names, then either rebuilds (any
+//     removes), ADDs values (only adds), or emits a no-op marker
+//     (identical sets). E2E synthesises the rebuild branch by
+//     swapping FQN with a shrinking value set.
 func enumValuesSynth(c *Cell, caseID string) {
-	mkCol := func(values ...string) *irpb.Column {
+	mkCol := func(fqn string, values ...string) *irpb.Column {
 		numbers := make([]int64, len(values))
 		for i := range values {
 			numbers[i] = int64(i + 1)
@@ -322,20 +327,26 @@ func enumValuesSynth(c *Cell, caseID string) {
 			Name: "target", ProtoName: "target", FieldNumber: 2,
 			Carrier:     irpb.Carrier_CARRIER_STRING,
 			Type:        irpb.SemType_SEM_ENUM,
-			EnumFqn:     "e2e.Target",
+			EnumFqn:     fqn,
 			EnumNames:   values,
 			EnumNumbers: numbers,
 		}
 	}
 	switch caseID {
 	case "add":
-		c.Prev = wrapOneColumn(mkCol("alpha", "beta"))
-		c.Curr = wrapOneColumn(mkCol("alpha", "beta", "gamma"))
+		c.Prev = wrapOneColumn(mkCol("e2e.Target", "alpha", "beta"))
+		c.Curr = wrapOneColumn(mkCol("e2e.Target", "alpha", "beta", "gamma"))
 	case "remove":
-		c.Prev = wrapOneColumn(mkCol("alpha", "beta", "gamma"))
-		c.Curr = wrapOneColumn(mkCol("alpha", "beta"))
+		c.Prev = wrapOneColumn(mkCol("e2e.Target", "alpha", "beta", "gamma"))
+		c.Curr = wrapOneColumn(mkCol("e2e.Target", "alpha", "beta"))
+	case "fqn_change":
+		// FQN swap with shrinking value set so the e2e exercises the
+		// rebuild branch (most destructive path; no-op + ADD VALUE
+		// branches are covered by engine unit tests).
+		c.Prev = wrapOneColumn(mkCol("e2e.TargetV1", "alpha", "beta", "gamma"))
+		c.Curr = wrapOneColumn(mkCol("e2e.TargetV2", "alpha", "beta"))
 	default:
-		c.SkipReason = fmt.Sprintf("enum_values case %q not synthesised (fqn_change / rename_in_place land as follow-ups)", caseID)
+		c.SkipReason = fmt.Sprintf("enum_values case %q not synthesised (rename_in_place lands as follow-up)", caseID)
 	}
 }
 

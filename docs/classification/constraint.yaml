@@ -242,8 +242,8 @@ cells:
   - axis: enum_values
     case: fqn_change
     description: "enum_fqn \"pkg.A\" → \"pkg.B\""
-    strategy: CUSTOM_MIGRATION
-    rationale: "Different enum entirely — types not compatible. Author writes remap (old value → new value) or opts into DROP_AND_CREATE via --decide if fresh start is intended."
+    strategy: NEEDS_CONFIRM
+    rationale: "D40 — engine reuses the D37 enum rebuild template, driven by curr's enum_names list. Mechanically identical to enum_values/remove: CREATE TYPE new AS ENUM (curr.values), ALTER COLUMN USING col::text::new, DROP TYPE old, RENAME. Risk: USING cast fails at apply if any row carries a value not in curr's enum — same destructive-but-deterministic shape. CUSTOM_MIGRATION fallback still available via Finding options for projects wanting custom remap (e.g. value rename across the FQN swap)."
 
   # ── A11 pg.required_extensions ───────────────────────────────
   - axis: pg_required_extensions

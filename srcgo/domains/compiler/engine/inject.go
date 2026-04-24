@@ -69,12 +69,14 @@ func injectStrategyOps(
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
 			out = append(out, ops...)
-		case "enum_values_remove":
-			// D37 — NEEDS_CONFIRM path. Engine renders the 4-statement
-			// rebuild via emit/postgres renderEnumValuesChange; only
-			// NEEDS_CONFIRM is accepted since the transition is
-			// deterministic but destructive.
-			ops, err := injectEnumRemoveValue(p, bkt)
+		case "enum_values_remove", "enum_fqn_change":
+			// D37 enum_values/remove + D40 enum FQN change share the
+			// rebuild template: CREATE TYPE new AS ENUM (curr.values),
+			// ALTER COLUMN USING col::text::new, DROP TYPE old, RENAME.
+			// Engine computes added + removed from prev vs curr enum
+			// names; emit picks rebuild (removed non-empty), ADD VALUE
+			// (added-only), or no-op.
+			ops, err := injectEnumValuesChange(p, bkt)
 			if err != nil {
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
@@ -101,7 +103,7 @@ func injectStrategyOps(
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
 			out = append(out, ops...)
-		case "enum_fqn_change", "element_carrier_reshape":
+		case "element_carrier_reshape":
 			// D36 B1 — these axes accept only CUSTOM_MIGRATION. User
 			// resolving them to another strategy previously landed
 			// silently (AppliedResolution recorded, no SQL emitted —
@@ -293,30 +295,41 @@ func lookupCustomTypeCast(schema *irpb.Schema, fromAlias, toAlias string) string
 	return ""
 }
 
-// injectEnumRemoveValue — D37. Resolves an `enum_values/remove`
-// ReviewFinding into an AlterColumn op whose FactChange carries
-// the removed names/numbers. The PG emitter renders the full
-// 4-statement rebuild (CREATE TYPE new / ALTER COLUMN USING /
-// DROP TYPE old / RENAME) with the surviving enum values derived
-// from the curr column snapshot.
+// injectEnumValuesChange — D37 + D40. Resolves an enum_values_remove
+// or enum_fqn_change ReviewFinding into an AlterColumn op whose
+// EnumValuesChange FactChange carries (added, removed) sets computed
+// from prev vs curr enum names. The PG emitter chooses between three
+// templates based on the diff:
 //
-// Only NEEDS_CONFIRM is accepted — CUSTOM_MIGRATION would have
-// been handled by the spliceCustomMigrations path before this
-// dispatcher runs, and any other strategy is a misuse (the
-// transition is deterministic; there's nothing for the author
-// to decide semantically beyond "yes, apply the destructive
-// cast").
-func injectEnumRemoveValue(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
+//   - removed non-empty → 4-statement rebuild (CREATE TYPE new /
+//     ALTER COLUMN USING / DROP TYPE old / RENAME). Curr's full
+//     value list seeds the new type, so any concurrently-added
+//     values are folded in; PG-mechanically this is a single
+//     atomic block.
+//   - added-only → ALTER TYPE ADD VALUE per added name (SAFE pattern).
+//   - both empty (FQN change with identical value sets) → emit a
+//     no-op marker; PG type name is `<table>_<col>` independent of
+//     proto FQN, so an identical-values FQN swap is a database-side
+//     no-op.
+//
+// Only NEEDS_CONFIRM is accepted — the transition is deterministic;
+// nothing for the author to decide semantically beyond confirming
+// the destructive USING cast at apply time.
+func injectEnumValuesChange(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
 	if p.Resolution.GetStrategy() != planpb.Strategy_NEEDS_CONFIRM {
-		return nil, fmt.Errorf("enum_values/remove on %s: strategy %s is not supported — only NEEDS_CONFIRM is accepted (supply --decide %s=needs_confirm)",
-			findingKey(p.Finding), p.Resolution.GetStrategy(), findingKey(p.Finding))
+		return nil, fmt.Errorf("%s on %s: strategy %s is not supported — only NEEDS_CONFIRM is accepted (supply --decide %s=needs_confirm)",
+			p.Finding.GetAxis(), findingKey(p.Finding), p.Resolution.GetStrategy(), findingKey(p.Finding))
 	}
 	ref := p.Finding.GetColumn()
 	prevTable, prevCol := findColumnByRef(bkt.prev, ref)
 	_, currCol := findColumnByRef(bkt.curr, ref)
 	if prevCol == nil || currCol == nil {
-		return nil, fmt.Errorf("enum_values_remove: prev/curr column not found via %s/#%d",
-			ref.GetTableFqn(), ref.GetFieldNumber())
+		return nil, fmt.Errorf("%s: prev/curr column not found via %s/#%d",
+			p.Finding.GetAxis(), ref.GetTableFqn(), ref.GetFieldNumber())
+	}
+	prevSet := make(map[string]struct{}, len(prevCol.GetEnumNames()))
+	for _, n := range prevCol.GetEnumNames() {
+		prevSet[n] = struct{}{}
 	}
 	currSet := make(map[string]struct{}, len(currCol.GetEnumNames()))
 	for _, n := range currCol.GetEnumNames() {
@@ -331,6 +344,17 @@ func injectEnumRemoveValue(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
 		removedNames = append(removedNames, n)
 		if i < len(prevCol.GetEnumNumbers()) {
 			removedNumbers = append(removedNumbers, prevCol.GetEnumNumbers()[i])
+		}
+	}
+	var addedNames []string
+	var addedNumbers []int64
+	for i, n := range currCol.GetEnumNames() {
+		if _, ok := prevSet[n]; ok {
+			continue
+		}
+		addedNames = append(addedNames, n)
+		if i < len(currCol.GetEnumNumbers()) {
+			addedNumbers = append(addedNumbers, currCol.GetEnumNumbers()[i])
 		}
 	}
 	ctx := &planpb.TableCtx{
@@ -348,6 +372,8 @@ func injectEnumRemoveValue(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
 			PrevColumn:  prevCol,
 			Changes: []*planpb.FactChange{{
 				Variant: &planpb.FactChange_EnumValues{EnumValues: &planpb.EnumValuesChange{
+					AddedNames:     addedNames,
+					AddedNumbers:   addedNumbers,
 					RemovedNames:   removedNames,
 					RemovedNumbers: removedNumbers,
 				}},
