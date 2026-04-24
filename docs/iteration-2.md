@@ -2304,6 +2304,77 @@ User follow-up confirmed: single file at proto root, typed
 proto (not YAML), consistent with rest of project; no stdlib
 (every alias explicit in repo = zero magic).
 
+### D37 — `enum_values/remove` as NEEDS_CONFIRM with engine-rendered rebuild (added 2026-04-25)
+
+**Status: locked + shipped.** `enum_values/remove` is no longer
+CUSTOM_MIGRATION. The PG ENUM rebuild is **deterministic** —
+engine emits the full 4-statement block; user confirms it via
+`--decide <col>:enum_values_remove=needs_confirm` because the
+USING cast fails at apply if any existing row still carries the
+removed value.
+
+**Why CUSTOM_MIGRATION was the wrong tool.** The user pushed
+back 2026-04-25 on my initial "keep it CUSTOM_MIGRATION" call:
+
+> "CUSTOM_MIGRATION tam nepatří — to je pro nedeterministické
+> transformace, kde compiler nemůže napsat SQL. Tohle je jasný
+> deterministický template, jen destruktivní. Jediné místo pro
+> custom migrace je jednoznačně nekompatibilní záležitost, např.
+> json to boolean, tam je to absolutně nedeterministické."
+
+Principle (now codified for all future axis calls): **CUSTOM_MIGRATION
+is only for genuinely non-deterministic transitions** (json→boolean,
+freeform semantic remap). Deterministic-but-destructive transitions
+are `NEEDS_CONFIRM` — engine owns the SQL, author owns the `yes,
+apply it` decision.
+
+**What shipped.**
+
+1. `proto/domains/compiler/types/plan.proto` — `EnumValuesChange`
+   gains `removed_names` + `removed_numbers`. Differ still refuses
+   to set both added and removed in a single FactChange (one-or-
+   the-other); rename-in-place could unlock dual population later.
+2. `docs/classification/constraint.yaml` A10 — `enum_values/remove`
+   strategy flips `CUSTOM_MIGRATION → NEEDS_CONFIRM`, rationale
+   rewritten around the engine-rendered rebuild.
+3. `srcgo/domains/compiler/engine/inject.go` — new
+   `injectEnumRemoveValue` builds an `AlterColumn` op whose
+   `EnumValuesChange` carries `RemovedNames` + `RemovedNumbers`
+   (computed from prev vs curr enum name lists). Only accepts
+   `NEEDS_CONFIRM`; every other strategy hard-errors pointing at
+   the correct `--decide` syntax. Removed from D36 B1 hard-error
+   list.
+4. `srcgo/domains/compiler/emit/postgres/alter_table.go` —
+   `renderEnumValuesChange` extended with a `renderEnumRebuild`
+   branch. Up: `CREATE TYPE <t>_new AS ENUM (<curr values>);
+   ALTER TABLE … ALTER COLUMN … TYPE <t>_new USING col::text::<t>_new;
+   DROP TYPE <t>; ALTER TYPE <t>_new RENAME TO <t>;`. Down
+   symmetric with prev values. Ephemeral `_new` suffix is
+   transaction-local; final RENAME keeps the original type name
+   visible so column type doesn't drift.
+5. `srcgo/domains/compiler/engine/risk.go` — profile key renamed
+   from `enum_remove_value` → `enum_values_remove` (matches the
+   finding axis). `factChangeKind` gains an `EnumValues` case
+   that returns `enum_values_remove` only when `RemovedNames`
+   non-empty (SAFE `AddedNames` stays unannotated).
+6. E2E cells — `enum_values/add` + `enum_values/remove` in
+   `e2e/constraint_cells.go`; green on PG 14–18.
+7. Engine unit tests — `engine/enum_remove_test.go` covers
+   registered `NEEDS_CONFIRM` path (verifies all 4 statements in
+   both up and down) and wrong-strategy hard-error.
+
+**B1 hard-error list slimmed.** Still hard-errors on non-CUSTOM
+resolution: `pk_flip`, `enum_fqn_change`, `element_carrier_reshape`.
+Open question (not closed by D37): apply the same D37 principle to
+`pk_flip` (deterministic `DROP CONSTRAINT + ADD PRIMARY KEY`) — would
+promote to NEEDS_CONFIRM. `element_carrier_reshape` is genuinely
+non-deterministic (MAP value / LIST element carrier change needs
+author remap), so it stays CUSTOM_MIGRATION-only.
+
+**Protojson golden flake.** `TestManifestGoldens/pg_dialect`
+regenerated to absorb whitespace drift between Go toolchain
+versions; no semantic change.
+
 ### D35 — Deterministic risk analysis (always-emit advisory) (added 2026-04-25)
 
 **Status: locked + shipped.** Every migration carries a risk

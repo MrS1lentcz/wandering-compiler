@@ -253,13 +253,20 @@ message ChecksChange {
   repeated w17.compiler.ir.Check removed = 2;
 }
 
-// EnumValuesChange covers the PG `ALTER TYPE ADD VALUE` path (added
-// values) and the REFUSE path (removed values — PG can't drop them).
-// The differ only produces this variant with `added_names` non-empty;
-// removed values become a diag.Error at diff time.
+// EnumValuesChange covers the PG enum type evolution paths:
+//   - added_names / added_numbers: `ALTER TYPE <t> ADD VALUE 'n'` (SAFE).
+//   - removed_names / removed_numbers: D37 NEEDS_CONFIRM rebuild —
+//     engine emits a CREATE TYPE <t>_new / ALTER COLUMN ... USING /
+//     DROP TYPE <t> / RENAME sequence after the user confirms via
+//     --decide <col>:enum_values_remove=needs_confirm. Cast fails if
+//     any row still carries a removed value; user accepts that risk.
+// Both directions can be non-empty simultaneously when a rename /
+// partial reshape is eventually modelled (future extension).
 message EnumValuesChange {
   repeated string added_names = 1;
   repeated int64 added_numbers = 2;
+  repeated string removed_names = 3;
+  repeated int64 removed_numbers = 4;
 }
 
 message AllowedExtensionsChange {

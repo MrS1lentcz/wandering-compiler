@@ -134,30 +134,17 @@ injectStrategyOps, silent-empty migration on resolution.
 **My suggestion.** Option A. custom_type is opaque; compiler has
 no template to render.
 
-##### D.3 `enum_values` remove (10 skips)
+##### D.3 `enum_values` remove — **RESOLVED via D37** (2026-04-25)
 
-**Current behaviour.** Plan.Diff refuses enum value removal at
-diff time (REFUSE strategy) — not a Finding, a hard error.
-The matrix's `enum_values` skips cover add / remove / combined.
-
-**Decision wanted.** Can we auto-render ENUM value removal?
-
-PostgreSQL has no `ALTER TYPE ... DROP VALUE`. Options:
-1. **Option A**: Stays REFUSE. Author drops+recreates the
-   enum type manually.
-2. **Option B**: Engine synthesises a multi-statement block:
-   `CREATE TYPE <new>`, `ALTER TABLE … ALTER COLUMN TYPE
-   <new> USING (<remapping>)`, `DROP TYPE <old>`, `ALTER TYPE
-   <new> RENAME TO <original>`. Needs a per-cell template +
-   data-remap SQL from the author (which is CUSTOM_MIGRATION-
-   shaped anyway).
-3. **Option C**: Same as B but engine emits only the
-   structural DDL; data-remap is mandatory `--decide enum=...:
-   <sql>`.
-
-**My suggestion.** Option A for enum_values remove (keep REFUSE);
-enum_values add stays SAFE with ALTER TYPE ADD VALUE (already
-shipped).
+Plan.Diff emits a `enum_values_remove` ReviewFinding with
+Proposed=NEEDS_CONFIRM; engine's `injectEnumRemoveValue` renders
+the 4-statement rebuild (`CREATE TYPE new / ALTER COLUMN USING /
+DROP TYPE old / RENAME`). Author opts in via `--decide <col>:
+enum_values_remove=needs_confirm` — active decision, engine-
+owned SQL. Principle codified: CUSTOM_MIGRATION is only for
+genuinely non-deterministic transitions (e.g. json→boolean);
+deterministic-but-destructive = NEEDS_CONFIRM. Green on PG 14-18
+in e2e matrix. See D37 in iteration-2.md for full rationale.
 
 ##### D.4 `default` identity_add / identity_drop / auto_kind_change (15 skips)
 

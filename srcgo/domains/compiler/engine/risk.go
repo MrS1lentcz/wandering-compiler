@@ -117,15 +117,16 @@ var riskProfiles = map[string]riskProfile{
 		rationale: "MAP value / LIST element carrier change re-encodes every JSON document or array value.",
 		recommendation: "Author-provided CUSTOM_MIGRATION SQL — wrapper around jsonb_build / array_remap per row.",
 	},
-	"enum_remove_value": {
-		opKind:     "enum_remove_value",
+	"enum_values_remove": {
+		opKind:     "enum_values_remove",
 		severity:   "HIGH",
 		rewrite:    true,
 		lockType:   "ACCESS_EXCLUSIVE",
 		scalesWith: "row_count",
-		rationale: "PostgreSQL has no ALTER TYPE DROP VALUE. Removing an enum value requires type rebuild: " +
-			"CREATE TYPE new, ALTER COLUMN ... USING remap, DROP TYPE old, RENAME new.",
-		recommendation: "Supply the full rebuild as CUSTOM_MIGRATION. Ensure no existing row carries the removed value.",
+		rationale: "PostgreSQL has no ALTER TYPE DROP VALUE. Engine emits the deterministic rebuild: " +
+			"CREATE TYPE new, ALTER COLUMN ... USING col::text::new, DROP TYPE old, RENAME new → old. " +
+			"Cast fails at apply if any row still carries the removed value.",
+		recommendation: "Pre-audit rows carrying the removed value; either surface via a SELECT before deploy or accept apply-time failure and rollback.",
 	},
 	"enum_fqn_change": {
 		opKind:     "enum_fqn_change",
@@ -508,6 +509,15 @@ func factChangeKind(fc *planpb.FactChange) string {
 		return "allowed_extensions_narrow"
 	case *planpb.FactChange_DefaultValue:
 		return "default_change"
+	case *planpb.FactChange_EnumValues:
+		// D37 — RemovedNames non-empty = NEEDS_CONFIRM rebuild path
+		// that rewrites every row in the enum-typed column under an
+		// ACCESS_EXCLUSIVE lock. AddedNames (SAFE) is unannotated;
+		// ADD VALUE is cheap and doesn't rewrite rows.
+		if len(v.EnumValues.GetRemovedNames()) > 0 {
+			return "enum_values_remove"
+		}
+		return ""
 	case *planpb.FactChange_TypeChange:
 		// TypeChange originates from either carrier_change or
 		// pg_custom_type finding resolution. Distinguish by whether

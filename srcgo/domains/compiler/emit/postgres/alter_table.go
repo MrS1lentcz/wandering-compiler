@@ -335,7 +335,7 @@ func renderFactChange(qualTable, colName string, fc *planpb.FactChange, column, 
 		return up, down, nil
 	case *planpb.FactChange_EnumValues:
 		usage.Use(emit.CapEnumType)
-		up, down := renderEnumValuesChange(qualTable, colName, v.EnumValues)
+		up, down := renderEnumValuesChange(qualTable, colName, v.EnumValues, column, prevColumn)
 		return up, down, nil
 	case *planpb.FactChange_AllowedExtensions:
 		// Path-family allowed-extensions changes ride along the
@@ -662,20 +662,29 @@ func qualToTable(qual string) string {
 	return qual
 }
 
-// renderEnumValuesChange — ALTER TYPE <enum> ADD VALUE 'NEW' for
-// each added enum value. PG 12+ allows ADD VALUE; removal triggers
-// REFUSE upstream so this branch only sees the additive case. The
-// type name follows iter-1's `<table>_<col>` derivation.
+// renderEnumValuesChange handles both directions of enum-type evolution:
 //
-// Down: PG has no inverse for ADD VALUE that's safe in the same
-// transaction. Emit a comment + the inverse-intent marker; deploy
-// client / platform UI can prompt for manual cleanup if rollback is
-// requested. Aligns with the platform-owns-data-validation stance.
-func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange) (string, string) {
+//   - Added values (SAFE) — ALTER TYPE <t> ADD VALUE 'n' per added
+//     name. PG has no inverse, so down is a comment marker.
+//   - Removed values (NEEDS_CONFIRM, D37) — PG has no DROP VALUE,
+//     so the rebuild is the only path: CREATE TYPE <t>_new AS ENUM
+//     (<curr surviving values>); ALTER COLUMN USING cast; DROP TYPE
+//     old; RENAME new → old. Down inverts: CREATE TYPE <t>_new with
+//     the pre-remove list, ALTER+USING, DROP, RENAME. Cast fails at
+//     apply if a row still carries a removed value — the user
+//     confirmed that risk via --decide needs_confirm.
+//
+// The two cases are mutually exclusive by construction (differ emits
+// one or the other, never both in a single FactChange).
+func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange, curr, prev *irpb.Column) (string, string) {
 	typeName := pgEnumTypeName(qualToTable(qual), col)
 	qualType := typeName
 	if i := strings.LastIndex(qual, "."); i >= 0 {
 		qualType = qual[:i+1] + typeName
+	}
+
+	if len(ch.GetRemovedNames()) > 0 {
+		return renderEnumRebuild(qual, col, typeName, qualType, curr, prev)
 	}
 
 	var ups, downs []string
@@ -684,6 +693,35 @@ func renderEnumValuesChange(qual, col string, ch *planpb.EnumValuesChange) (stri
 		downs = append(downs, fmt.Sprintf("-- wc: cannot drop ENUM value %s from %s on rollback (PG limitation; manual cleanup required)", sqlStringLiteral(name), qualType))
 	}
 	return strings.Join(ups, "\n"), strings.Join(downs, "\n")
+}
+
+// renderEnumRebuild — D37. 4-statement PG ENUM rebuild, bidirectional.
+// The _new suffix is ephemeral within the transaction; final RENAME
+// leaves the original type name in place so the column's type doesn't
+// drift. Both directions perform the same shape; only the value list
+// and bind direction differ.
+func renderEnumRebuild(qual, col, typeName, qualType string, curr, prev *irpb.Column) (string, string) {
+	newTypeName := typeName + "_new"
+	qualNewType := qualType + "_new"
+	if i := strings.LastIndex(qualType, "."); i >= 0 {
+		qualNewType = qualType[:i+1] + newTypeName
+	}
+
+	renderBlock := func(values []string) string {
+		quoted := make([]string, 0, len(values))
+		for _, n := range values {
+			quoted = append(quoted, sqlStringLiteral(n))
+		}
+		return strings.Join([]string{
+			fmt.Sprintf("CREATE TYPE %s AS ENUM (%s);", qualNewType, strings.Join(quoted, ", ")),
+			fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s TYPE %s USING %s::text::%s;", qual, col, qualNewType, col, qualNewType),
+			fmt.Sprintf("DROP TYPE %s;", qualType),
+			fmt.Sprintf("ALTER TYPE %s RENAME TO %s;", qualNewType, typeName),
+		}, "\n")
+	}
+	up := renderBlock(curr.GetEnumNames())
+	down := renderBlock(prev.GetEnumNames())
+	return up, down
 }
 
 // renderGeneratedExprChange — DROP+ADD when add or change. DIRECT

@@ -54,6 +54,8 @@ func constraintCell(e classifier.ConstraintEntry) Cell {
 		uniqueSynth(&c, e.CaseID)
 	case "pg_custom_type":
 		pgCustomTypeSynth(&c, e.CaseID)
+	case "enum_values":
+		enumValuesSynth(&c, e.CaseID)
 	default:
 		c.SkipReason = fmt.Sprintf("axis %s not yet synthesizable (future wave)", e.Axis)
 	}
@@ -266,6 +268,37 @@ func pgCustomTypeSynth(c *Cell, caseID string) {
 		c.Strategy = planpb.Strategy_LOSSLESS_USING
 	default:
 		c.SkipReason = fmt.Sprintf("pg_custom_type case %q not synthesised", caseID)
+	}
+}
+
+// enumValuesSynth covers two paths:
+//   - add: in-axis FactChange, ALTER TYPE ADD VALUE (SAFE, no Finding).
+//   - remove: D37 NEEDS_CONFIRM Finding resolution, engine emits the
+//     4-statement rebuild (CREATE TYPE new / ALTER USING / DROP / RENAME).
+func enumValuesSynth(c *Cell, caseID string) {
+	mkCol := func(values ...string) *irpb.Column {
+		numbers := make([]int64, len(values))
+		for i := range values {
+			numbers[i] = int64(i + 1)
+		}
+		return &irpb.Column{
+			Name: "target", ProtoName: "target", FieldNumber: 2,
+			Carrier:     irpb.Carrier_CARRIER_STRING,
+			Type:        irpb.SemType_SEM_ENUM,
+			EnumFqn:     "e2e.Target",
+			EnumNames:   values,
+			EnumNumbers: numbers,
+		}
+	}
+	switch caseID {
+	case "add":
+		c.Prev = wrapOneColumn(mkCol("alpha", "beta"))
+		c.Curr = wrapOneColumn(mkCol("alpha", "beta", "gamma"))
+	case "remove":
+		c.Prev = wrapOneColumn(mkCol("alpha", "beta", "gamma"))
+		c.Curr = wrapOneColumn(mkCol("alpha", "beta"))
+	default:
+		c.SkipReason = fmt.Sprintf("enum_values case %q not synthesised (fqn_change / rename_in_place land as follow-ups)", caseID)
 	}
 }
 

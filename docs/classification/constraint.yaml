@@ -230,8 +230,8 @@ cells:
   - axis: enum_values
     case: remove
     description: "names A → A \\ {removed}"
-    strategy: CUSTOM_MIGRATION
-    rationale: "PG can't drop enum values; int-backed CHECK narrow rejects existing rows. Default = author rewrites affected rows to a surviving value. DROP_AND_CREATE fallback discards."
+    strategy: NEEDS_CONFIRM
+    rationale: "PG has no ALTER TYPE DROP VALUE, but the rebuild is deterministic: CREATE TYPE new with surviving values, ALTER COLUMN USING cast, DROP TYPE old, RENAME new. Engine emits the full 4-statement block; user confirms since the USING cast fails at apply if any row still carries the removed value. CUSTOM_MIGRATION is the wrong tool here — there's nothing for the author to decide semantically, only to acknowledge the destructive apply."
 
   - axis: enum_values
     case: rename_in_place

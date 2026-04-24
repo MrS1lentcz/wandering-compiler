@@ -159,7 +159,7 @@ func TestConstraint_CoreCells(t *testing.T) {
 		{"generated_expr", "add", planpb.Strategy_DROP_AND_CREATE},
 		{"generated_expr", "drop", planpb.Strategy_NEEDS_CONFIRM},
 		{"comment", "any", planpb.Strategy_SAFE},
-		{"enum_values", "remove", planpb.Strategy_CUSTOM_MIGRATION},
+		{"enum_values", "remove", planpb.Strategy_NEEDS_CONFIRM},
 		{"enum_values", "fqn_change", planpb.Strategy_CUSTOM_MIGRATION},
 		{"pg_custom_type", "any", planpb.Strategy_CUSTOM_MIGRATION},
 		{"fk_add", "any", planpb.Strategy_NEEDS_CONFIRM},
