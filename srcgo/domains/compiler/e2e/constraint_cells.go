@@ -177,6 +177,32 @@ func defaultSynth(c *Cell, caseID string) {
 		}
 		return col
 	}
+	// D38 — identity_add / identity_drop synth flips AUTO_IDENTITY on
+	// a dedicated non-PK INT64 counter column (AUTO_IDENTITY is valid
+	// on INT32/INT64 semantically; we avoid the PK since wrapOneColumn
+	// already hard-codes the PK id with DbType=BIGINT + no default).
+	mkIdentityCol := func(identity bool) *irpb.Column {
+		col := &irpb.Column{
+			Name: "target", ProtoName: "target", FieldNumber: 2,
+			Carrier: irpb.Carrier_CARRIER_INT64,
+			Type:    irpb.SemType_SEM_COUNTER,
+			DbType:  irpb.DbType_DBT_BIGINT,
+		}
+		if identity {
+			col.Default = &irpb.Default{Variant: &irpb.Default_Auto{Auto: irpb.AutoKind_AUTO_IDENTITY}}
+		}
+		return col
+	}
+	// auto_kind_change uses SEM_DATETIME on a TIMESTAMP carrier so PG
+	// renders TIMESTAMPTZ + AUTO_NOW → NOW().
+	mkAutoKindCol := func(def *irpb.Default) *irpb.Column {
+		return &irpb.Column{
+			Name: "target", ProtoName: "target", FieldNumber: 2,
+			Carrier: irpb.Carrier_CARRIER_TIMESTAMP,
+			Type:    irpb.SemType_SEM_DATETIME,
+			Default: def,
+		}
+	}
 	switch caseID {
 	case "add":
 		c.Prev = wrapOneColumn(plain())
@@ -187,8 +213,17 @@ func defaultSynth(c *Cell, caseID string) {
 	case "change_literal":
 		c.Prev = wrapOneColumn(withDefault("alpha"))
 		c.Curr = wrapOneColumn(withDefault("beta"))
+	case "auto_kind_change":
+		c.Prev = wrapOneColumn(mkAutoKindCol(&irpb.Default{Variant: &irpb.Default_Auto{Auto: irpb.AutoKind_AUTO_NOW}}))
+		c.Curr = wrapOneColumn(mkAutoKindCol(&irpb.Default{Variant: &irpb.Default_LiteralString{LiteralString: "1970-01-01 00:00:00"}}))
+	case "identity_add":
+		c.Prev = wrapOneColumn(mkIdentityCol(false))
+		c.Curr = wrapOneColumn(mkIdentityCol(true))
+	case "identity_drop":
+		c.Prev = wrapOneColumn(mkIdentityCol(true))
+		c.Curr = wrapOneColumn(mkIdentityCol(false))
 	default:
-		c.SkipReason = fmt.Sprintf("default case %q not synthesised (auto_kind/identity flows are follow-up waves)", caseID)
+		c.SkipReason = fmt.Sprintf("default case %q not synthesised", caseID)
 	}
 }
 

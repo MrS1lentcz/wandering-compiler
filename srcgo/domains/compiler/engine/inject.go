@@ -79,6 +79,17 @@ func injectStrategyOps(
 				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
 			}
 			out = append(out, ops...)
+		case "default_identity_add", "default_identity_drop":
+			// D38 — NEEDS_CONFIRM identity lifecycle. Engine emits an
+			// AlterColumn with a DefaultChange carrying the full
+			// prev/curr Default proto; emit/postgres detects AUTO_IDENTITY
+			// on either side and renders the ADD GENERATED + setval or
+			// DROP IDENTITY template.
+			ops, err := injectDefaultIdentity(p, bkt)
+			if err != nil {
+				return nil, fmt.Errorf("finding %s: %w", p.Finding.GetId(), err)
+			}
+			out = append(out, ops...)
 		case "pk_flip", "enum_fqn_change", "element_carrier_reshape":
 			// D36 B1 — these axes accept only CUSTOM_MIGRATION. User
 			// resolving them to another strategy previously landed
@@ -328,6 +339,49 @@ func injectEnumRemoveValue(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
 				Variant: &planpb.FactChange_EnumValues{EnumValues: &planpb.EnumValuesChange{
 					RemovedNames:   removedNames,
 					RemovedNumbers: removedNumbers,
+				}},
+			}},
+		}},
+	}}, nil
+}
+
+// injectDefaultIdentity — D38. Emits an AlterColumn with a single
+// DefaultChange FactChange carrying prev/curr Default protos. The PG
+// emitter inspects the from/to Default and branches to the identity
+// rebuild template (ADD GENERATED + setval for add, DROP IDENTITY for
+// drop). Symmetric enough that one injector covers both finding axes.
+//
+// Only NEEDS_CONFIRM is accepted — the template is deterministic; any
+// other strategy is a misuse signal.
+func injectDefaultIdentity(p resolvedPair, bkt *bucket) ([]*planpb.Op, error) {
+	if p.Resolution.GetStrategy() != planpb.Strategy_NEEDS_CONFIRM {
+		return nil, fmt.Errorf("%s on %s: strategy %s is not supported — only NEEDS_CONFIRM is accepted (supply --decide %s=needs_confirm)",
+			p.Finding.GetAxis(), findingKey(p.Finding), p.Resolution.GetStrategy(), findingKey(p.Finding))
+	}
+	ref := p.Finding.GetColumn()
+	prevTable, prevCol := findColumnByRef(bkt.prev, ref)
+	_, currCol := findColumnByRef(bkt.curr, ref)
+	if prevCol == nil || currCol == nil {
+		return nil, fmt.Errorf("%s: prev/curr column not found via %s/#%d",
+			p.Finding.GetAxis(), ref.GetTableFqn(), ref.GetFieldNumber())
+	}
+	ctx := &planpb.TableCtx{
+		TableName:     prevTable.GetName(),
+		MessageFqn:    prevTable.GetMessageFqn(),
+		NamespaceMode: prevTable.GetNamespaceMode(),
+		Namespace:     prevTable.GetNamespace(),
+	}
+	return []*planpb.Op{{
+		Variant: &planpb.Op_AlterColumn{AlterColumn: &planpb.AlterColumn{
+			Ctx:         ctx,
+			FieldNumber: currCol.GetFieldNumber(),
+			ColumnName:  currCol.GetName(),
+			Column:      currCol,
+			PrevColumn:  prevCol,
+			Changes: []*planpb.FactChange{{
+				Variant: &planpb.FactChange_DefaultValue{DefaultValue: &planpb.DefaultChange{
+					From: prevCol.GetDefault(),
+					To:   currCol.GetDefault(),
 				}},
 			}},
 		}},

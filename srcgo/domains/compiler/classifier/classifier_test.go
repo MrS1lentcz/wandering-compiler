@@ -151,7 +151,7 @@ func TestConstraint_CoreCells(t *testing.T) {
 		{"nullable", "relax", planpb.Strategy_SAFE},
 		{"nullable", "tighten", planpb.Strategy_NEEDS_CONFIRM},
 		{"default", "add", planpb.Strategy_SAFE},
-		{"default", "identity_add", planpb.Strategy_CUSTOM_MIGRATION},
+		{"default", "identity_add", planpb.Strategy_NEEDS_CONFIRM},
 		{"max_len", "widen", planpb.Strategy_SAFE},
 		{"max_len", "narrow", planpb.Strategy_NEEDS_CONFIRM},
 		{"pk", "enable", planpb.Strategy_CUSTOM_MIGRATION},

@@ -473,9 +473,34 @@ func buildFactChanges(carrierTable *irpb.Table, prev, curr *irpb.Column, cls *cl
 		}}})
 	}
 	if !proto.Equal(prev.GetDefault(), curr.GetDefault()) {
-		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_DefaultValue{DefaultValue: &planpb.DefaultChange{
-			From: prev.GetDefault(), To: curr.GetDefault(),
-		}}})
+		// D38 — identity lifecycle transitions route through a Finding
+		// (NEEDS_CONFIRM) instead of an in-axis FactChange. ACCESS
+		// EXCLUSIVE lock + sequence-seed setval is engine-rendered but
+		// author-confirmed. All other default changes (add literal,
+		// drop literal, change literal, auto_kind ↔ literal swap) stay
+		// in-axis SAFE.
+		prevIdentity := isIdentityDefault(prev.GetDefault())
+		currIdentity := isIdentityDefault(curr.GetDefault())
+		switch {
+		case !prevIdentity && currIdentity:
+			if cls == nil {
+				return nil, nil, fmt.Errorf("column %q (#%d): default AUTO_IDENTITY add is NEEDS_CONFIRM (ACCESS EXCLUSIVE lock + seq seeding); run with a classifier",
+					curr.GetName(), curr.GetFieldNumber())
+			}
+			cell := cls.Constraint("default", "identity_add")
+			findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "default_identity_add", cell))
+		case prevIdentity && !currIdentity:
+			if cls == nil {
+				return nil, nil, fmt.Errorf("column %q (#%d): default AUTO_IDENTITY drop is NEEDS_CONFIRM (sequence is lost); run with a classifier",
+					curr.GetName(), curr.GetFieldNumber())
+			}
+			cell := cls.Constraint("default", "identity_drop")
+			findings = append(findings, buildColumnFinding(carrierTable, prev, curr, "default_identity_drop", cell))
+		default:
+			out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_DefaultValue{DefaultValue: &planpb.DefaultChange{
+				From: prev.GetDefault(), To: curr.GetDefault(),
+			}}})
+		}
 	}
 	if prev.GetMaxLen() != curr.GetMaxLen() {
 		out = append(out, &planpb.FactChange{Variant: &planpb.FactChange_MaxLen{MaxLen: &planpb.MaxLenChange{
@@ -598,6 +623,18 @@ func stringSet(ss []string) map[string]struct{} {
 		out[s] = struct{}{}
 	}
 	return out
+}
+
+// isIdentityDefault reports whether d is an AUTO_IDENTITY default.
+// Used by buildFactChanges to route identity add/drop transitions
+// through the Finding path (NEEDS_CONFIRM), leaving plain
+// literal/auto_kind changes on the in-axis SAFE path.
+func isIdentityDefault(d *irpb.Default) bool {
+	if d == nil {
+		return false
+	}
+	v, ok := d.GetVariant().(*irpb.Default_Auto)
+	return ok && v.Auto == irpb.AutoKind_AUTO_IDENTITY
 }
 
 func equalStringSlices(a, b []string) bool {
