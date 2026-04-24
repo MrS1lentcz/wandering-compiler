@@ -395,11 +395,48 @@ message NamedSQL {
 
 // Manifest — M4 deliverable surfaced early in the envelope. Lists the
 // capabilities this migration used (D16 catalog IDs), required PG
-// extensions, and the resolutions applied during this run.
+// extensions, the resolutions applied during this run, and D35 risk
+// findings (informational risk profile per op).
 message Manifest {
   repeated string required_extensions = 1;       // CREATE EXTENSION prerequisites
   repeated string capabilities = 2;              // D16 cap IDs touched
   repeated AppliedResolution applied_resolutions = 3;
+  // D35 — informational risk profile per op. Always emitted (no
+  // opt-out). Every ALTER-shaped op that matches the engine's static
+  // risk table (lock type, rewrite behaviour, scale with row count)
+  // produces one entry here + one `-- RISK:` comment block at the
+  // top of up/down SQL. Platform review UI / senior engineers read
+  // this to gauge migration impact without connecting to the target
+  // DB.
+  repeated RiskFinding risk_findings = 4;
+}
+
+// RiskFinding — deterministic risk annotation derived purely from
+// migration shape. Unlike ReviewFinding (which gates emission
+// pending --decide), RiskFinding is advisory — the migration will
+// apply fine, but the severity / lock / rewrite profile may be
+// operationally expensive on large production tables.
+//
+// Severity levels:
+//   LOW    — metadata-only change (COMMENT, RENAME, SET SCHEMA)
+//   MEDIUM — validates existing rows or quick full scan (SET NOT NULL,
+//            narrow VARCHAR, FK validate)
+//   HIGH   — full table rewrite or ACCESS_EXCLUSIVE lock proportional
+//            to row count (PK flip, carrier change, UNIQUE enable)
+//
+// scales_with:
+//   "constant"  — operation time independent of table size
+//   "row_count" — time proportional to rows in this table
+//   "index_size" — time proportional to existing index size
+message RiskFinding {
+  string op_kind = 1;        // e.g. "pk_flip_enable" / "carrier_change" / "nullable_tighten"
+  ColumnRef column = 2;      // optional — omitted for table-level ops
+  string severity = 3;       // "LOW" / "MEDIUM" / "HIGH"
+  bool rewrite = 4;          // full table rewrite at apply time
+  string lock_type = 5;      // "ACCESS_EXCLUSIVE" / "SHARE_UPDATE_EXCLUSIVE" / "METADATA"
+  string scales_with = 6;    // "constant" / "row_count" / "index_size"
+  string rationale = 7;      // human-readable explanation (why this is risky)
+  string recommendation = 8; // optional suggested alternative approach
 }
 
 // AppliedResolution — the subset of input resolutions that matched a

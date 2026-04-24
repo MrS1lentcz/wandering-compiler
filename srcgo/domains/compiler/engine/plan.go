@@ -125,13 +125,22 @@ func planBucket(
 		return nil, unresolved, nil
 	}
 
+	// D35 — risk analysis. Deterministic pure function of the plan +
+	// findings; runs after splice so CUSTOM_MIGRATION user SQL is
+	// also annotated at the top. Emitted always (no opt-out).
+	risks := analyzeRisks(result.Plan, result.Findings)
+	if header := renderRiskComments(risks); header != "" {
+		up = header + up
+		down = header + down
+	}
+
 	return &planpb.Migration{
 		Connection: bkt.conn,
 		Plan:       result.Plan,
 		UpSql:      up,
 		DownSql:    down,
 		Checks:     collectChecks(result.Plan, cls),
-		Manifest:   buildManifest(applied, usage, emitter, bkt),
+		Manifest:   buildManifest(applied, usage, emitter, bkt, risks),
 	}, unresolved, nil
 }
 
@@ -216,19 +225,20 @@ func splitByResolution(
 //                             on every column the plan references
 //                             (Add/Drop/Alter-column ops).
 //
-// Returns nil when none of the three slots contribute anything — an
+// Returns nil when none of the slots contribute anything — an
 // empty manifest is an "I/O artifact is unnecessary" signal to Sinks
 // (no manifest.json file written).
-func buildManifest(applied []*planpb.AppliedResolution, usage *emit.Usage, emitter emit.DialectEmitter, bkt *bucket) *planpb.Manifest {
+func buildManifest(applied []*planpb.AppliedResolution, usage *emit.Usage, emitter emit.DialectEmitter, bkt *bucket, risks []*planpb.RiskFinding) *planpb.Manifest {
 	caps := usage.Sorted()
 	reqExt := collectRequiredExtensions(caps, emitter, bkt)
-	if len(applied) == 0 && len(caps) == 0 && len(reqExt) == 0 {
+	if len(applied) == 0 && len(caps) == 0 && len(reqExt) == 0 && len(risks) == 0 {
 		return nil
 	}
 	return &planpb.Manifest{
 		AppliedResolutions: applied,
 		Capabilities:       caps,
 		RequiredExtensions: reqExt,
+		RiskFindings:       risks,
 	}
 }
 

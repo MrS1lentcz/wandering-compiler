@@ -2148,6 +2148,107 @@ the cap list noise-wise. Lean: record it, let downstream filter
 for "interesting caps" if the UI wants. Consistent with every
 other cap — emission uses it, cap list names it.
 
+### D35 — Deterministic risk analysis (always-emit advisory) (added 2026-04-25)
+
+**Status: locked + shipped.** Every migration carries a risk
+profile per ALTER-shaped Op derived purely from migration shape.
+No DB connection. Emitted unconditionally — no opt-out flag.
+
+**What gets analysed.**
+
+Static profile table (`engine/risk.go riskProfiles`) keyed by
+`(axis_or_factchange_kind, case)` → fixed profile:
+
+| Field | Shape |
+|---|---|
+| `severity` | `LOW` / `MEDIUM` / `HIGH` |
+| `rewrite` | `true` if full table rewrite |
+| `lock_type` | `ACCESS_EXCLUSIVE` / `SHARE_ROW_EXCLUSIVE` / `SHARE_UPDATE_EXCLUSIVE` / `METADATA` / `UNKNOWN` |
+| `scales_with` | `constant` / `row_count` / `index_size` / `unknown` |
+| `rationale` | free-text explanation |
+| `recommendation` | optional alternative pattern (e.g. expand-contract, NOT VALID+VALIDATE) |
+
+Coverage: ~30 profile entries across HIGH (carrier_change, pk_flip,
+custom_type_change, element_reshape, enum_remove_value,
+generated_expr_add/change, unique_enable, drop_table), MEDIUM
+(nullable_tighten, max_len_narrow, numeric_narrow, dbtype_change,
+fk_add, check_add, allowed_extensions_narrow, generated_expr_drop,
+drop_column), LOW (nullable_relax, max_len_widen, default_change,
+comment, table_rename, namespace_move). Plus `raw_unknown` for
+opaque raw_indexes / raw_checks.
+
+**Where the annotations land.**
+
+1. Inline `-- RISK:` comment block at the top of `up.sql` +
+   `down.sql`, sorted HIGH → MEDIUM → LOW, ties broken by opkind
+   lexicographically. Visible when reviewing SQL directly in
+   psql / editor / PR.
+
+2. Structured `Manifest.RiskFindings []RiskFinding` in
+   manifest.json. Platform review UI / senior-engineer tooling
+   parses this for tabular display.
+
+**Shape example (up.sql head after running against an alter
+fixture):**
+
+```sql
+-- ======================================================================
+-- Migration risk analysis (compile-time, deterministic; no DB inspection).
+-- ======================================================================
+-- RISK MEDIUM [nullable_tighten] users.email
+--   lock: ACCESS_EXCLUSIVE; rewrite: false; scales with: row_count
+--   why: SET NOT NULL scans every row to validate no NULL values exist.
+--   why: Aborts on first NULL found. Blocks writes for the scan duration.
+--   recommend: Add CHECK (col IS NOT NULL) NOT VALID, VALIDATE CONSTRAINT
+--   recommend: in a separate transaction, then SET NOT NULL (skips rescan
+--   recommend: in PG 12+).
+--
+-- ======================================================================
+
+BEGIN;
+
+ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+...
+```
+
+**Why always-emit without opt-out.**
+
+User confirmed 2026-04-25: authors / senior reviewers decide what
+to do with the info (muted, confirmed, ignored — UX layer). The
+tool's responsibility is surfacing, not gating. A flag to hide
+would invite "always use --no-risk-comments" muscle memory, which
+defeats the purpose.
+
+**Why compile-time deterministic (no DB inspection).**
+
+Three alternatives were considered and rejected for this iteration:
+- `--target <dsn>` live introspection: operational complications
+  (DB creds in build env), and the platform (D29) is the right
+  owner of live data.
+- Inline self-inspection SQL (`DO $$ ... $$` blocks printing
+  size): info leaks only at apply time, too late for review.
+- Pre-apply check.sql threshold gates: user-defined thresholds
+  are subjective; NEEDS_CONFIRM pattern already exists for real
+  pre-apply validation.
+
+Compile-time heuristics hit 80% of the value (severity / lock /
+rewrite profile) with zero operational cost.
+
+**Dialect neutrality.**
+
+Risk profile semantics are PG-focused today (lock types are PG
+names). MySQL landing later will need per-dialect profile
+overrides: the `riskProfiles` table grows a dialect dimension,
+or each dialect emitter contributes its own profile table. For
+iter-2 MySQL scope we'll decide then; PG-only content is
+acceptable now (single real SQL emitter).
+
+**Deploy-client / platform consumption (D29 future).**
+
+Platform reads `Manifest.RiskFindings` JSON + renders a
+tabular risk review in the approval UI. Compiler stays pure —
+no live-DB introspection creeping in.
+
 ### D34 — Dialects grouped by category; one domain = one dialect per category (added 2026-04-25)
 
 **Status: locked.** Extends D26 (multi-connection per domain) with
